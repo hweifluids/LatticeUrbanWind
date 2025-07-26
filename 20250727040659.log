@@ -1,0 +1,172 @@
+
+[2025-07-27 04:06:59.069] ──────────────────────────────────────────────────────────────────────────────────── Running tool_cdfInspect.py 
+
+[2025-07-27 04:07:00.154] ===== Dataset Overview =====
+[2025-07-27 04:07:00.156] <xarray.Dataset> Size: 223kB
+[2025-07-27 04:07:00.156] Dimensions:     (lon: 10, lat: 11, height_agl: 101)
+[2025-07-27 04:07:00.157] Coordinates:
+[2025-07-27 04:07:00.157]   * lon         (lon) float64 80B 104.0 104.0 104.1 104.1 ... 104.1 104.1 104.1
+[2025-07-27 04:07:00.157]   * lat         (lat) float64 88B 30.36 30.37 30.38 30.39 ... 30.44 30.45 30.46
+[2025-07-27 04:07:00.158]   * height_agl  (height_agl) float32 404B 0.0 10.0 20.0 ... 980.0 990.0 1e+03
+[2025-07-27 04:07:00.158] Data variables:
+[2025-07-27 04:07:00.159]     u           (height_agl, lat, lon) float32 44kB ...
+[2025-07-27 04:07:00.159]     v           (height_agl, lat, lon) float32 44kB ...
+[2025-07-27 04:07:00.159]     tk          (height_agl, lat, lon) float32 44kB ...
+[2025-07-27 04:07:00.159]     rh          (height_agl, lat, lon) float32 44kB ...
+[2025-07-27 04:07:00.160]     pres        (height_agl, lat, lon) float32 44kB ...
+[2025-07-27 04:07:00.160] Attributes:
+[2025-07-27 04:07:00.160]     CDI:            Climate Data Interface version 2.1.0 (https://mpimet.mpg....
+[2025-07-27 04:07:00.160]     Conventions:    CF-1.6
+[2025-07-27 04:07:00.161]     creation_date:  2025-07-24 01:41:47
+[2025-07-27 04:07:00.161]     Author:         ShenDD, NMIC
+[2025-07-27 04:07:00.161]     city:           Sichuan
+[2025-07-27 04:07:00.161]     lat_ll:         26.05 degrees_north
+[2025-07-27 04:07:00.161]     lon_ll:         97.35 degrees_east
+[2025-07-27 04:07:00.162]     lat_ur:         34.32 degrees_north
+[2025-07-27 04:07:00.162]     lon_ur:         108.52 degrees_east
+[2025-07-27 04:07:00.162]     Projection:     Latlon
+[2025-07-27 04:07:00.162]     history:        Fri Jul 25 15:43:00 2025: cdo sellonlatbox,104.04,104.13,...
+[2025-07-27 04:07:00.163]     CDO:            Climate Data Operators version 2.1.0 (https://mpimet.mpg....
+
+[2025-07-27 04:07:00.163] *** lon range: min = 104.04, max = 104.13
+
+[2025-07-27 04:07:00.163] *** lat range: min = 30.36, max = 30.46
+
+[2025-07-27 04:07:00.164] ===== Variable Details =====
+
+[2025-07-27 04:07:00.164] Variable: u
+[2025-07-27 04:07:00.164]   Dimensions: ('height_agl', 'lat', 'lon')
+[2025-07-27 04:07:00.164]   Shape: (101, 11, 10)
+[2025-07-27 04:07:00.164]   Data type: float32
+[2025-07-27 04:07:00.164]   Preview first two values: [-0.27534926 -0.3033354 ]
+[2025-07-27 04:07:00.165]   Attribute - long_name: U-component of Wind
+[2025-07-27 04:07:00.165]   Attribute - units: m/s
+
+[2025-07-27 04:07:00.165] Variable: v
+[2025-07-27 04:07:00.165]   Dimensions: ('height_agl', 'lat', 'lon')
+[2025-07-27 04:07:00.165]   Shape: (101, 11, 10)
+[2025-07-27 04:07:00.165]   Data type: float32
+[2025-07-27 04:07:00.166]   Preview first two values: [1.4689219 1.481409 ]
+[2025-07-27 04:07:00.166]   Attribute - long_name: V-component of Wind
+[2025-07-27 04:07:00.166]   Attribute - units: m/s
+
+[2025-07-27 04:07:00.166] Variable: tk
+[2025-07-27 04:07:00.166]   Dimensions: ('height_agl', 'lat', 'lon')
+[2025-07-27 04:07:00.167]   Shape: (101, 11, 10)
+[2025-07-27 04:07:00.167]   Data type: float32
+[2025-07-27 04:07:00.167]   Preview first two values: [300.34485 300.29797]
+[2025-07-27 04:07:00.167]   Attribute - long_name: Temperature in Kelvin
+[2025-07-27 04:07:00.167]   Attribute - units: K
+
+[2025-07-27 04:07:00.167] Variable: rh
+[2025-07-27 04:07:00.168]   Dimensions: ('height_agl', 'lat', 'lon')
+[2025-07-27 04:07:00.168]   Shape: (101, 11, 10)
+[2025-07-27 04:07:00.168]   Data type: float32
+[2025-07-27 04:07:00.168]   Preview first two values: [84.36975 84.53828]
+[2025-07-27 04:07:00.168]   Attribute - long_name: Relative Humidity
+[2025-07-27 04:07:00.169]   Attribute - units: %
+
+[2025-07-27 04:07:00.169] Variable: pres
+[2025-07-27 04:07:00.169]   Dimensions: ('height_agl', 'lat', 'lon')
+[2025-07-27 04:07:00.169]   Shape: (101, 11, 10)
+[2025-07-27 04:07:00.169]   Data type: float32
+[2025-07-27 04:07:00.169]   Preview first two values: [94749.72 94715.5 ]
+[2025-07-27 04:07:00.170]   Attribute - long_name: Pressure
+[2025-07-27 04:07:00.170]   Attribute - units: Pa
+
+[2025-07-27 04:07:00.170] ===== Global Attributes =====
+[2025-07-27 04:07:00.170] CDI: Climate Data Interface version 2.1.0 (https://mpimet.mpg.de/cdi)
+[2025-07-27 04:07:00.170] Conventions: CF-1.6
+[2025-07-27 04:07:00.171] creation_date: 2025-07-24 01:41:47
+[2025-07-27 04:07:00.171] Author: ShenDD, NMIC
+[2025-07-27 04:07:00.171] city: Sichuan
+[2025-07-27 04:07:00.171] lat_ll: 26.05 degrees_north
+[2025-07-27 04:07:00.171] lon_ll: 97.35 degrees_east
+[2025-07-27 04:07:00.171] lat_ur: 34.32 degrees_north
+[2025-07-27 04:07:00.172] lon_ur: 108.52 degrees_east
+[2025-07-27 04:07:00.172] Projection: Latlon
+[2025-07-27 04:07:00.172] history: Fri Jul 25 15:43:00 2025: cdo sellonlatbox,104.04,104.13,30.36,30.46 tianfu_20250723120000.nc tianfu_big.nc
+[2025-07-27 04:07:00.173] CDO: Climate Data Operators version 2.1.0 (https://mpimet.mpg.de/cdo)
+[2025-07-27 04:07:00.245] ──────────────────────────────────────────────────────────────────────────────────── tool_cdfInspect.py exited with code 0 
+
+[2025-07-27 04:07:00.245] ──────────────────────────────────────────────────────────────────────────────────── Running tool_shpInspect.py 
+[2025-07-27 04:07:00.743] Loading shapefile: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example.shp
+
+[2025-07-27 04:07:00.841] -------  Range of longitude and latitude  -------
+[2025-07-27 04:07:00.841] Longitude (X) : 104.044683 - 104.124480
+[2025-07-27 04:07:00.841] Latitude  (Y) : 30.382880 - 30.449247
+
+[2025-07-27 04:07:00.841] -------  Meta data  -------
+
+[2025-07-27 04:07:00.842] Data list:  ['Floor', 'AbsZmax', 'AbsZmin', 'Id', 'landmark', 'geometry']
+
+[2025-07-27 04:07:00.842] Data type:
+[2025-07-27 04:07:00.842] Floor        float64
+[2025-07-27 04:07:00.842] AbsZmax      float64
+[2025-07-27 04:07:00.842] AbsZmin      float64
+[2025-07-27 04:07:00.843] Id             int32
+[2025-07-27 04:07:00.843] landmark      object
+[2025-07-27 04:07:00.843] geometry    geometry
+[2025-07-27 04:07:00.843] dtype: object
+
+[2025-07-27 04:07:00.843] First 5 lines:
+[2025-07-27 04:07:00.847]    Floor  AbsZmax  ...  landmark                                           geometry
+[2025-07-27 04:07:00.847] 0  13.24   452.68  ...      None  POLYGON ((104.04475 30.44686, 104.04532 30.446...
+[2025-07-27 04:07:00.847] 1  12.59   452.51  ...      None  POLYGON ((104.04498 30.44716, 104.04498 30.447...
+[2025-07-27 04:07:00.848] 2  14.56   451.15  ...      None  POLYGON ((104.04498 30.44804, 104.04547 30.448...
+[2025-07-27 04:07:00.848] 3  11.73   456.08  ...      None  POLYGON ((104.04468 30.44843, 104.04518 30.448...
+[2025-07-27 04:07:00.848] 4  29.67   455.01  ...      None  POLYGON ((104.04507 30.44864, 104.04507 30.448...
+
+[2025-07-27 04:07:00.849] [5 rows x 6 columns]
+[2025-07-27 04:07:00.905] ──────────────────────────────────────────────────────────────────────────────────── tool_shpInspect.py exited with code 0 
+
+[2025-07-27 04:07:00.905] ──────────────────────────────────────────────────────────────────────────────────── Running buildBC.py 
+[2025-07-27 04:07:01.970] Loaded conf.txt, case=example
+[2025-07-27 04:07:01.971] Opening: wrfInput\example\example.nc...
+[2025-07-27 04:07:02.487] Crop to conf range: lon 104.06-104.11, lat 30.39-30.44
+[2025-07-27 04:07:02.490] Dimension 'lon' has only 6 points, interpolate to 50.
+[2025-07-27 04:07:02.490] Dimension 'lat' has only 6 points, interpolate to 50.
+[2025-07-27 04:07:04.226] Lon range: 104.0600 - 104.1100, Lat range: 30.3900-30.4400
+[2025-07-27 04:07:04.226] Projected X range: -748304.85--742791.77 m (span 5513.08 m), Y range: 3433519.87 - 3439693.85 m (span 6173.99 m)
+[2025-07-27 04:07:04.227] Computed grid spacing: dx = 99.25 m, dy = 114.49 m, dz = 10.00 m.
+[2025-07-27 04:07:04.227] Write output: wrfInput\example\example.vti
+[2025-07-27 04:07:04.311] Finished: wrfInput\example\example.vti  (=2.220384 MB)
+[2025-07-27 04:07:04.421] Write surface data CSV: wrfInput\example\SurfData_Latest.csv
+[2025-07-27 04:07:04.431] Copied SurfData to: wrfInput\example\SurfData_20250723120000.csv
+[2025-07-27 04:07:04.677] ──────────────────────────────────────────────────────────────────────────────────── buildBC.py exited with code 0 
+
+[2025-07-27 04:07:04.677] ──────────────────────────────────────────────────────────────────────────────────── Running voxelization.py 
+[2025-07-27 04:07:05.685] [!]   Loaded existing conf.txt
+[2025-07-27 04:07:05.686]           Case name set from conf.txt: example
+[2025-07-27 04:07:05.686] [!]   Cutting dataset! Range: x: -748304.849--743441.529 m, y: 3434084.106-3439693.943 m.
+[2025-07-27 04:07:05.688] [1/9] Reading shp: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example.shp...
+[2025-07-27 04:07:05.751]           Converted to EPSG:32650 for metric processing…
+[2025-07-27 04:07:05.769] [2/9] Dimensionalizing to SI (UTM 50N)...
+[2025-07-27 04:07:05.770] [3/9] Getting building height...
+[2025-07-27 04:07:05.770] [4/9] Stretching in Z-axis and BOOL combining...
+[2025-07-27 04:07:06.253] [5/9] Translating projected origin to (0,0)…
+[2025-07-27 04:07:06.256]           Translated projected origin (-748304.85, 3434084.11) to zeros.
+[2025-07-27 04:07:06.256] [6/9] Exporting buildings stereolithography stl...
+[2025-07-27 04:07:06.261]           Saved combined mesh to D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_wo_base.stl.
+[2025-07-27 04:07:06.296]           Range verification: ((np.float64(0.0), np.float64(4863.3203125)), (np.float64(0.0), np.float64(5609.83740234375)), (np.float64(0.0), np.float64(283.80999755859375)))
+[2025-07-27 04:07:06.296] [7/9] Adding basement for CFD voxelization...
+[2025-07-27 04:07:06.323]           Basement height set from conf.txt (base_height_manual = 50.0).
+[2025-07-27 04:07:06.350]           Original XYZ bounds:
+[2025-07-27 04:07:06.350]             X: [0.000, 4863.320]
+[2025-07-27 04:07:06.351]             Y: [0.000, 5609.837]
+[2025-07-27 04:07:06.351]             Z: [0.000, 283.810]
+[2025-07-27 04:07:06.352]           XYZ bounds after translation without basement:
+[2025-07-27 04:07:06.352]             X: [0.000, 4863.320]
+[2025-07-27 04:07:06.352]             Y: [0.000, 5609.837]
+[2025-07-27 04:07:06.353]             Z: [50.000, 333.810]
+[2025-07-27 04:07:06.358] [8/9] Saving combined mesh...
+[2025-07-27 04:07:06.362]           Saved combined mesh to D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_with_base.stl...
+[2025-07-27 04:07:06.393]           Re-aligned wobase STL and overwrote: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_wo_base.stl
+[2025-07-27 04:07:06.431]           Re-aligned wobase STL bounds: ((np.float64(0.0), np.float64(4863.3203125)), (np.float64(0.0), np.float64(5609.83740234375)), (np.float64(0.0), np.float64(283.80999755859375)))
+[2025-07-27 04:07:06.466]           Range verification: X:[0.000, 4863.320]  Y:[0.000, 5609.837]  Z:[0.000, 333.810]
+[2025-07-27 04:07:06.466] [9/9] Updating configuration file...
+[2025-07-27 04:07:06.466]           Updated conf.txt at D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\conf.txt
+[2025-07-27 04:07:06.571] ──────────────────────────────────────────────────────────────────────────────────── voxelization.py exited with code 0 
+
+[2025-07-27 04:07:06.571] ──────────────────────────────────────────────────────────────────────────────────── All task finished as expected! 
+

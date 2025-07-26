@@ -1,0 +1,165 @@
+
+===== Dataset Overview =====
+<xarray.Dataset> Size: 223kB
+Dimensions:     (lon: 10, lat: 11, height_agl: 101)
+Coordinates:
+  * lon         (lon) float64 80B 104.0 104.0 104.1 104.1 ... 104.1 104.1 104.1
+  * lat         (lat) float64 88B 30.36 30.37 30.38 30.39 ... 30.44 30.45 30.46
+  * height_agl  (height_agl) float32 404B 0.0 10.0 20.0 ... 980.0 990.0 1e+03
+Data variables:
+    u           (height_agl, lat, lon) float32 44kB ...
+    v           (height_agl, lat, lon) float32 44kB ...
+    tk          (height_agl, lat, lon) float32 44kB ...
+    rh          (height_agl, lat, lon) float32 44kB ...
+    pres        (height_agl, lat, lon) float32 44kB ...
+Attributes:
+    CDI:            Climate Data Interface version 2.1.0 (https://mpimet.mpg....
+    Conventions:    CF-1.6
+    creation_date:  2025-07-24 01:41:47
+    Author:         ShenDD, NMIC
+    city:           Sichuan
+    lat_ll:         26.05 degrees_north
+    lon_ll:         97.35 degrees_east
+    lat_ur:         34.32 degrees_north
+    lon_ur:         108.52 degrees_east
+    Projection:     Latlon
+    history:        Fri Jul 25 15:43:00 2025: cdo sellonlatbox,104.04,104.13,...
+    CDO:            Climate Data Operators version 2.1.0 (https://mpimet.mpg....
+
+*** lon range: min = 104.04, max = 104.13
+
+*** lat range: min = 30.36, max = 30.46
+
+===== Variable Details =====
+
+Variable: u
+  Dimensions: ('height_agl', 'lat', 'lon')
+  Shape: (101, 11, 10)
+  Data type: float32
+  Preview first two values: [-0.27534926 -0.3033354 ]
+  Attribute - long_name: U-component of Wind
+  Attribute - units: m/s
+
+Variable: v
+  Dimensions: ('height_agl', 'lat', 'lon')
+  Shape: (101, 11, 10)
+  Data type: float32
+  Preview first two values: [1.4689219 1.481409 ]
+  Attribute - long_name: V-component of Wind
+  Attribute - units: m/s
+
+Variable: tk
+  Dimensions: ('height_agl', 'lat', 'lon')
+  Shape: (101, 11, 10)
+  Data type: float32
+  Preview first two values: [300.34485 300.29797]
+  Attribute - long_name: Temperature in Kelvin
+  Attribute - units: K
+
+Variable: rh
+  Dimensions: ('height_agl', 'lat', 'lon')
+  Shape: (101, 11, 10)
+  Data type: float32
+  Preview first two values: [84.36975 84.53828]
+  Attribute - long_name: Relative Humidity
+  Attribute - units: %
+
+Variable: pres
+  Dimensions: ('height_agl', 'lat', 'lon')
+  Shape: (101, 11, 10)
+  Data type: float32
+  Preview first two values: [94749.72 94715.5 ]
+  Attribute - long_name: Pressure
+  Attribute - units: Pa
+
+===== Global Attributes =====
+CDI: Climate Data Interface version 2.1.0 (https://mpimet.mpg.de/cdi)
+Conventions: CF-1.6
+creation_date: 2025-07-24 01:41:47
+Author: ShenDD, NMIC
+city: Sichuan
+lat_ll: 26.05 degrees_north
+lon_ll: 97.35 degrees_east
+lat_ur: 34.32 degrees_north
+lon_ur: 108.52 degrees_east
+Projection: Latlon
+history: Fri Jul 25 15:43:00 2025: cdo sellonlatbox,104.04,104.13,30.36,30.46 tianfu_20250723120000.nc tianfu_big.nc
+CDO: Climate Data Operators version 2.1.0 (https://mpimet.mpg.de/cdo)
+
+--- tool_cdfInspect.py exited with code 0 ---
+Loading shapefile: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example.shp
+
+-------  Range of longitude and latitude  -------
+Longitude (X) : 104.044683 - 104.124480
+Latitude  (Y) : 30.382880 - 30.449247
+
+-------  Meta data  -------
+
+Data list:  ['Floor', 'AbsZmax', 'AbsZmin', 'Id', 'landmark', 'geometry']
+
+Data type:
+Floor        float64
+AbsZmax      float64
+AbsZmin      float64
+Id             int32
+landmark      object
+geometry    geometry
+dtype: object
+
+First 5 lines:
+   Floor  AbsZmax  ...  landmark                                           geometry
+0  13.24   452.68  ...      None  POLYGON ((104.04475 30.44686, 104.04532 30.446...
+1  12.59   452.51  ...      None  POLYGON ((104.04498 30.44716, 104.04498 30.447...
+2  14.56   451.15  ...      None  POLYGON ((104.04498 30.44804, 104.04547 30.448...
+3  11.73   456.08  ...      None  POLYGON ((104.04468 30.44843, 104.04518 30.448...
+4  29.67   455.01  ...      None  POLYGON ((104.04507 30.44864, 104.04507 30.448...
+
+[5 rows x 6 columns]
+
+--- tool_shpInspect.py exited with code 0 ---
+Loaded conf.txt, case=example
+Opening: wrfInput\example\example.nc...
+Crop to conf range: lon 104.06-104.11, lat 30.39-30.44
+Dimension 'lon' has only 6 points, interpolate to 50.
+Dimension 'lat' has only 6 points, interpolate to 50.
+Lon range: 104.0600 - 104.1100, Lat range: 30.3900-30.4400
+Projected X range: -748304.85--742791.77 m (span 5513.08 m), Y range: 3433519.87 - 3439693.85 m (span 6173.99 m)
+Computed grid spacing: dx = 99.25 m, dy = 114.49 m, dz = 10.00 m.
+Write output: wrfInput\example\example.vti
+Finished: wrfInput\example\example.vti  (=2.220384 MB)
+Write surface data CSV: wrfInput\example\SurfData_Latest.csv
+Copied SurfData to: wrfInput\example\SurfData_20250723120000.csv
+
+--- buildBC.py exited with code 0 ---
+[!]   Loaded existing conf.txt
+          Case name set from conf.txt: example
+[!]   Cutting dataset! Range: x: -748304.849--743441.529 m, y: 3434084.106-3439693.943 m.
+[1/9] Reading shp: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example.shp...
+          Converted to EPSG:32650 for metric processing…
+[2/9] Dimensionalizing to SI (UTM 50N)...
+[3/9] Getting building height...
+[4/9] Stretching in Z-axis and BOOL combining...
+[5/9] Translating projected origin to (0,0)…
+          Translated projected origin (-748304.85, 3434084.11) to zeros.
+[6/9] Exporting buildings stereolithography stl...
+          Saved combined mesh to D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_wo_base.stl.
+          Range verification: ((np.float64(0.0), np.float64(4863.3203125)), (np.float64(0.0), np.float64(5609.83740234375)), (np.float64(0.0), np.float64(283.80999755859375)))
+[7/9] Adding basement for CFD voxelization...
+          Basement height set from conf.txt (base_height_manual = 50.0).
+          Original XYZ bounds:
+            X: [0.000, 4863.320]
+            Y: [0.000, 5609.837]
+            Z: [0.000, 283.810]
+          XYZ bounds after translation without basement:
+            X: [0.000, 4863.320]
+            Y: [0.000, 5609.837]
+            Z: [50.000, 333.810]
+[8/9] Saving combined mesh...
+          Saved combined mesh to D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_with_base.stl...
+          Re-aligned wobase STL and overwrote: D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\geoData\example\example_wo_base.stl
+          Re-aligned wobase STL bounds: ((np.float64(0.0), np.float64(4863.3203125)), (np.float64(0.0), np.float64(5609.83740234375)), (np.float64(0.0), np.float64(283.80999755859375)))
+          Range verification: X:[0.000, 4863.320]  Y:[0.000, 5609.837]  Z:[0.000, 333.810]
+[9/9] Updating configuration file...
+          Updated conf.txt at D:\2_Cases\4_WRF\2_CMA\WRFcpLBM_20250727\conf.txt
+
+--- voxelization.py exited with code 0 ---

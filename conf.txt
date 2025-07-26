@@ -1,0 +1,47 @@
+casename = example
+cut_lon_manual=[104.06,104.11]
+cut_lat_manual=[30.39,30.44]
+
+// Original SHP Range
+orig_lon = [104.044683, 104.124480]
+orig_lat = [30.382880, 30.449247]
+orig_height = [0.000000, 283.809998]
+
+// Projected SHP SI Range
+si_x_cfd = [0.000000, 4863.320194]
+si_y_cfd = [0.000000, 5609.837234]
+si_height = [0.000000, 333.809998]
+
+// WRF Data Projected SI Range (global / before shift)
+si_x = [-748304.849431, -743441.529237]
+si_y = [3434084.105695, 3439693.942929]
+si_z_cfd = [0.000000, 1000.000000]
+
+// WRF Data Range (raw data)
+cut_lon = [104.060000, 104.110000]
+cut_lat = [30.390000, 30.440000]
+
+// Basement Configurations for Model Voxelization
+base_height = 50.0
+base_height_manual = 50
+
+// Mean velocity uvw (volumetric / boundary / downstream with angle)
+um_vol = [-0.363545, 1.347372, 0.000000]
+um_bc = [-0.374741, 1.203916, 0.000000]
+downstream_bc = "+y"
+downstream_bc_yaw = -15.10
+
+// CFD control
+memory_lbm = 40000
+datetime = 20250723120000
+n_gpu = [2, 1, 1]
+
+
+
+
+
+
+
+
+
+
