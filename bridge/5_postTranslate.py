@@ -24,7 +24,8 @@ def ask_case_name() -> str:
 
 def find_latest_vtk(case_dir: Path) -> Path:
     """Return the vtku-#########.vtk with the largest index in `case_dir`."""
-    pattern = re.compile(r"^vtku-(\d{9})\.vtk$", re.IGNORECASE)
+    pattern = re.compile(r"^[A-Za-z0-9_]*u(?:vw)?-(\d{9})\.vtk$", re.IGNORECASE)
+
     candidates = []
 
     for file in case_dir.iterdir():
@@ -35,7 +36,7 @@ def find_latest_vtk(case_dir: Path) -> Path:
 
     if not candidates:
         raise FileNotFoundError(
-            f"Cannot find vtk file under {case_dir}."
+            f"Cannot find vtk file with matched names under {case_dir}."
         )
 
     # 最大编号

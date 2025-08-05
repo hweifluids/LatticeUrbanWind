@@ -14,8 +14,24 @@ import sys
 import numpy as np
 import trimesh
 import pandas as pd
+import subprocess
 
 TOL = 1e-4  # 0.01%
+
+def default_memory_lbm() -> str:
+    """Return default GPU memory (MiB) as 85% of GPU0 capacity.
+    """
+    try:
+        cmd = [
+            "nvidia-smi",
+            "--query-gpu=memory.total",
+            "--format=csv,noheader,nounits",
+        ]
+        total_mem_mib = int(subprocess.check_output(cmd).decode().split()[0])
+        print(f"    GPU0 Memory is {total_mem_mib} MiB")
+        return str(int(total_mem_mib * 0.85))
+    except Exception:
+        return "20000"
 
 def stl_ranges(stl_path: Path) -> dict[str, tuple[float, float, float]]:
     mesh = trimesh.load(stl_path, force="mesh")
@@ -68,11 +84,11 @@ def ensure_conf_fields(conf_path: Path) -> list[str]:
     def has_key(key: str) -> int | None:
         for i, ln in enumerate(lines):
             raw = ln.split("//")[0].strip()
-            if raw.startswith(key + "="):
-                val = raw.split("=", 1)[1].strip()
-                if val:
+            if raw.split("//")[0].strip().startswith(key):
+                parts = raw.split("=", 1)
+                if len(parts) == 2 and parts[1].strip():
                     return i
-                break
+
         return None
 
     # Ensure the marker and default fields appear exactly at lines 34-37.
@@ -83,14 +99,16 @@ def ensure_conf_fields(conf_path: Path) -> list[str]:
         lines.insert(33, "// CFD control")
 
     # Lines 35-37: required configuration keys with defaults
-    defaults: list[tuple[str, str]] = [
+    defaults: list[tuple[str, str | None]] = [
         ("n_gpu", "[1, 1, 1]"),
-        ("datetime", "20260101120000"),
-        ("memory_lbm", "20000"),
+        ("datetime", "20250723120000"),
+        ("memory_lbm", None),
     ]
     for i, (key, val) in enumerate(defaults):
         if has_key(key) is None:
             line_no = 35 + i  # desired 1-based line number for this key
+            if key == "memory_lbm":
+                val = default_memory_lbm()
             lines.insert(line_no - 1, f"{key} = {val}")
             print(f"[!] Field '{key}' missing. Set default {val} in conf.txt")
 
@@ -135,10 +153,10 @@ def main() -> None:
 
     print("STL ranges:")
     for ax, (mn, mx, sp) in stl.items():
-        print(f"  {ax.upper()}: min={mn:.3f}, max={mx:.3f}, span={sp:.3f}")
+        print(f"    {ax.upper()}: min={mn:.3f}, max={mx:.3f}, span={sp:.3f}")
     print("CSV ranges:")
     for ax, (mn, mx, sp) in csv.items():
-        print(f"  {ax.upper()}: min={mn:.3f}, max={mx:.3f}, span={sp:.3f}")
+        print(f"    {ax.upper()}: min={mn:.3f}, max={mx:.3f}, span={sp:.3f}")
 
     passed, errs = compare_xy(stl, csv)
     if passed:
