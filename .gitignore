@@ -1,6 +1,7 @@
 
 .vscode/
-*.log
+/*.log
+/conf.txt
 
 /caseData/*/
 
