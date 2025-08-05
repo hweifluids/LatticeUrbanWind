@@ -19,6 +19,7 @@ uint         memory = 20000u;
 float3       si_size = float3(0);
 uint Dx = 1u, Dy = 1u, Dz = 1u;
 std::string conf_used_path = "Integrated defaults (conf.txt not found)";
+std::string validation = "error";
 
 struct SamplePoint { float3 p; float3 u; };
 
@@ -146,9 +147,10 @@ void main_setup() {
                 else if (key == "si_y_cfd")    si_size.y   = second_val(val);
                 else if (key == "si_z_cfd")    si_size.z   = second_val(val);
                 else if (key == "n_gpu")       parse_triplet_uint(val, Dx, Dy, Dz);
+                else if (key == "validation") validation = val;
             }
-            si_size.z += z_si_offset;             
-            if (!memory) memory = 6000u;        
+            si_size.z += z_si_offset;
+            if (!memory) memory = 6000u;
             
             // Zero card is certainly not allowed
             if (Dx == 0u) Dx = 1u;
@@ -156,6 +158,16 @@ void main_setup() {
             if (Dz == 0u) Dz = 1u;
 
         }
+    }
+
+    if (validation != "pass") {
+        println("|-----------------------------------------------------------------------------|");
+        println("| ERROR: preprocessing validation failed. Computation aborted.               |");
+        println("|-----------------------------------------------------------------------------|");
+        wait();
+        exit(-1);
+    } else {
+        println("| Preprocessing validation passed.                                           |");
     }
 
     auto fmtf = [](float v, int prec = 2) {
