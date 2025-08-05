@@ -88,7 +88,7 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
         if not (h == h) or h <= 0:
             continue
         px, py = row.geometry.representative_point().coords[0]
-        ax_map.text(px, py, f"{h:.1f}", fontsize=3, ha="center", va="center")
+        ax_map.text(px, py, f"{h:.1f}", fontsize=3, ha="center", va="center", color='red', alpha=0.5)
 
     ax_map.set_aspect("equal")
     ax_map.axis("off")
@@ -106,7 +106,7 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
 
     plt.tight_layout()
     out_path = output_dir / f"{case_name}_preview.jpg"
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=1200)
     plt.close(fig)
     print(f"          Saved preview image to {out_path}")
 
