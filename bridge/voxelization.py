@@ -7,6 +7,8 @@ from shapely.geometry import MultiPolygon
 from pathlib import Path
 from typing import Tuple
 import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
 import re
 
 
@@ -66,9 +68,47 @@ def basement(baseheight, input_file, outputName, domain_width, domain_depth):
     # 4. merge and export final STL
     combined = trimesh.util.concatenate([mesh_buildings, box])
 
-    print(f"[8/9] Saving combined mesh...")
+    print(f"[9/10] Saving combined mesh...")
     combined.export(outputName)
     print(f"          Saved combined mesh to {outputName}...")
+
+
+def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, output_dir: Path) -> None:
+    """Save a preview image of building outlines with height labels."""
+    # compute geographic bounds after cutting
+    min_lon, min_lat, max_lon, max_lat = gdf.to_crs(epsg=4326).total_bounds
+
+    fig, (ax_map, ax_info) = plt.subplots(
+        2, 1, figsize=(8, 8), gridspec_kw={"height_ratios": [4, 1]}
+    )
+
+    gdf.boundary.plot(ax=ax_map, color="black", linewidth=0.5)
+    for _, row in gdf.iterrows():
+        h = row.get("height")
+        if not (h == h) or h <= 0:
+            continue
+        px, py = row.geometry.representative_point().coords[0]
+        ax_map.text(px, py, f"{h:.1f}", fontsize=3, ha="center", va="center")
+
+    ax_map.set_aspect("equal")
+    ax_map.axis("off")
+
+    ax_info.axis("off")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    info_lines = [
+        f"Time: {now}",
+        f"caseName: {case_name}",
+        f"lon range: [{min_lon:.6f}, {max_lon:.6f}]",
+        f"lat range: [{min_lat:.6f}, {max_lat:.6f}]",
+        f"shp: {shp_path.name}",
+    ]
+    ax_info.text(0.01, 0.99, "\n".join(info_lines), va="top", ha="left", fontsize=6)
+
+    plt.tight_layout()
+    out_path = output_dir / f"{case_name}_preview.jpg"
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    print(f"          Saved preview image to {out_path}")
 
 
 def main(caseName=None):
@@ -130,7 +170,7 @@ def main(caseName=None):
             f.rename(data_folder / f"{new_stem}{f.suffix}")
     shpName = data_folder / f"{caseName}.shp"
 
-    print(f"[1/9] Reading shp: {shpName}...")
+    print(f"[1/10] Reading shp: {shpName}...")
     gdf = gpd.read_file(shpName)
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
@@ -160,11 +200,11 @@ def main(caseName=None):
             raise RuntimeError(f"No features found within cut range x={si_x}, y={si_y}.")
 
 
-    print(f"[2/9] Dimensionalizing to SI (UTM 50N)...")
+    print(f"[2/10] Dimensionalizing to SI (UTM 50N)...")
     #gdf = gdf.to_crs(epsg=32650)
 
     # Continue original steps
-    print(f"[3/9] Getting building height...")
+    print(f"[3/10] Getting building height...")
 
     # 1) use absolute height difference
     if 'AbsZmax' in gdf.columns and 'AbsZmin' in gdf.columns:
@@ -190,7 +230,10 @@ def main(caseName=None):
         gdf['height'] = gdf['floors'] * AVG_FLOOR_HEIGHT
 
 
-    print(f"[4/9] Stretching in Z-axis and BOOL combining...")
+    print(f"[4/10] Generating building outline preview...")
+    save_outline_preview(gdf, caseName, shpName, data_folder)
+
+    print(f"[5/10] Stretching in Z-axis and BOOL combining...")
     meshes = []
     for _, row in gdf.iterrows():
         h = row['height']
@@ -211,7 +254,7 @@ def main(caseName=None):
     scene = trimesh.util.concatenate(meshes)
 
 
-    print(f"[5/9] Translating projected origin to (0,0)…")
+    print(f"[6/10] Translating projected origin to (0,0)…")
     # read conf.txt
     import ast
     lines = conf_path.read_text().splitlines()
@@ -231,7 +274,7 @@ def main(caseName=None):
     scene.apply_translation([-x_min_proj, -y_min_proj, 0.0])
     print(f"          Translated projected origin ({x_min_proj:.2f}, {y_min_proj:.2f}) to zeros.")
     
-    print(f"[6/9] Exporting buildings stereolithography stl...")
+    print(f"[7/10] Exporting buildings stereolithography stl...")
     file_wobase = f"{caseName}_wo_base.stl"
     basement_filename = f"{caseName}_with_base.stl"
     # build without basement
@@ -240,7 +283,7 @@ def main(caseName=None):
     bounds_wo = stl_bounds(data_folder / file_wobase)
     print(f"          Range verification: {bounds_wo}")
 
-    print(f"[7/9] Adding basement for CFD voxelization...")
+    print(f"[8/10] Adding basement for CFD voxelization...")
     # calculate domain width and depth from bounds of the no-basement STL
     bounds_wo = stl_bounds(data_folder / file_wobase)
     domain_width  = np.max(si_x) - np.min(si_x) 
@@ -278,7 +321,7 @@ def main(caseName=None):
           f"Y:[0.000, {domain_depth:.3f}]  "
           f"Z:[{bounds_w[2][0]:.3f}, {bounds_w[2][1]:.3f}]")
 
-    print("[9/9] Updating configuration file...")
+    print("[10/10] Updating configuration file...")
         # Update conf.txt lines
     lines[3] = ""    
     lines[4] = "// Original SHP Range"
