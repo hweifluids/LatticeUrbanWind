@@ -101,7 +101,7 @@ def ensure_conf_fields(conf_path: Path) -> list[str]:
     # Lines 35-37: required configuration keys with defaults
     defaults: list[tuple[str, str | None]] = [
         ("n_gpu", "[1, 1, 1]"),
-        ("datetime", "20260101120000"),
+        ("datetime", "20990101120000"),
         ("memory_lbm", None),
     ]
     for i, (key, val) in enumerate(defaults):

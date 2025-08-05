@@ -11,8 +11,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import re
 
-
-
+MIN_EXTRUDE_AREA = 20.0  # m^2, minimum polygon area to extrude
 
 def stl_bounds(file_path: str | Path) -> Tuple[Tuple[float, float],
                                                        Tuple[float, float],
@@ -245,6 +244,8 @@ def main(caseName=None):
         polys = list(row.geometry.geoms) if isinstance(row.geometry, MultiPolygon) else [row.geometry]  # ★ fix: shapely-2
 
         for poly in polys:
+            if poly.area < MIN_EXTRUDE_AREA:
+                continue
             meshes.append(trimesh.creation.extrude_polygon(poly, h))
 
     if not meshes:

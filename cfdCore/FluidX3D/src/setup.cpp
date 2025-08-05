@@ -67,20 +67,6 @@ static string now_str() {
     return ss.str();
 }
 
-// HUANXIA: I have rolled back the time code helper to original localtime_s. 
-// The localtime function is not thread-safe and can cause issues in multi-threaded environments.
-// And the code therefore cannot run on some systems, for whose safety level is set to normal. See _CRT_SECURE_NO_WARNINGS.
-// 
-// helper: return current local time in "YYYY-MM-DD hh:mm:ss" format
-//static string now_str() {
-    // Get timecode
-//    time_t now = time(nullptr);
-//    struct tm* local_time = localtime(&now);
-//    char buffer[80];
-//    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", local_time);
-//    //std::cout << "Formatted: " << buffer << std::endl;
-//    return buffer;
-//}
 
 void main_setup() {
     println("|-----------------------------------------------------------------------------|");
@@ -215,18 +201,6 @@ void main_setup() {
     float lbm_nu = units.nu(si_nu);
     println("| LBM viscosity = " + fmt_sci(lbm_nu, 6) + "                                                    |");
 
-    
-// --- stability safeguard: ensure tau ≥ 0.503 ---
-    //const float cs2 = 1.0f / 3.0f;          // c_s^2
-    //const float tau0 = lbm_nu / cs2 + 0.5f;  // current τ
-    //const float tau_safe = 0.501f;           // lower bound you accept
-    //if (tau0 < tau_safe) {
-    //    const float lbm_nu_safe = (tau_safe - 0.5f) * cs2;
-    //    println("| τ too small, raise ν_LB from "
-    //        + fmt_sci(lbm_nu, 6) + " to "
-    //        + fmt_sci(lbm_nu_safe, 6) + " |");
-    //    lbm_nu = lbm_nu_safe;
-    //}
 
     // read CSV
     const std::string csv_path = get_exe_path() + std::string("../../../wrfInput/") + caseName + "/SurfData_"+datetime+".csv";
@@ -241,7 +215,7 @@ void main_setup() {
     for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x),units.x(s.p.y), units.x(s.p.z + z_si_offset));sp.u = s.u * u_scale; samples.push_back(sp); }
 
 
-    // lwg 多GPU
+    // lwg multiple GPU
     // const uint Dx = 2u, Dy = 1u, Dz = 1u;
     LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu);
 
