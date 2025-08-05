@@ -3,6 +3,7 @@
 #include <sstream>
 #include <vector>
 #include <limits>
+#include <atomic>
 
 #include <cfloat>  // lwg
 #include <chrono>   
@@ -275,8 +276,10 @@ void main_setup() {
 
 
     const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
+    std::atomic<ulong> inlet_face_count(0), outlet_face_count(0);
+    std::atomic<ulong> inlet_grid_count(0), outlet_grid_count(0);
     parallel_for(lbm.get_N(), [&](ulong n) { uint x = 0, y = 0, z = 0; lbm.coordinates(n, x, y, z); const float3 pos = lbm.position(x, y, z);
-    if (z == 0u) { lbm.flags[n] = TYPE_S; return; } 
+    if (z == 0u) { lbm.flags[n] = TYPE_S; return; }
 
     // Determine outlet from potential flow downstream defined in deck
     bool outlet = false;
@@ -294,14 +297,24 @@ void main_setup() {
 
     if (inlet) {
         lbm.flags[n] = TYPE_E;
-        float3 u = inlet_velocity(pos);              
+        float3 u = inlet_velocity(pos);
         lbm.u.x[n] = u.x;
         lbm.u.y[n] = u.y;
         lbm.u.z[n] = u.z;
+        inlet_face_count++;
+        inlet_grid_count++;
     }
-    else if (outlet) { lbm.flags[n] = TYPE_E; }
+    else if (outlet) {
+        lbm.flags[n] = TYPE_E;
+        outlet_face_count++;
+        outlet_grid_count++;
+    }
         });
 
+    println("| inlet face count: " + to_string(inlet_face_count.load()) + "                                      |");
+    println("| outlet face count: " + to_string(outlet_face_count.load()) + "                                     |");
+    println("| inlet grid count: " + to_string(inlet_grid_count.load()) + "                                     |");
+    println("| outlet grid count: " + to_string(outlet_grid_count.load()) + "                                    |");
     println("| Boundary initialization complete.                                           |");
     println("| Time code: " + now_str() + "                                              |");
 
