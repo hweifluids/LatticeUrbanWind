@@ -189,7 +189,7 @@ void main_setup() {
     println("| GPU domain split Dx,Dy,Dz = " + to_string(Dx) + "," + to_string(Dy) + "," + to_string(Dz) + "                                           |");
 
     println("|-----------------------------------------------------------------------------|");
-    const float lbm_ref_u = 0.05f, si_ref_u = 2.0f; 
+    const float lbm_ref_u = 0.01f, si_ref_u = 2.0f; 
     const float si_nu = 1.48E-5f, si_rho = 1.225f;
 
     const uint3 lbm_N = resolution(si_size, memory);
@@ -274,7 +274,7 @@ void main_setup() {
 
 
     const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();\
-    const uint N_ABSORB = 3u;            // PML
+    const uint N_ABSORB = 10u;            // PML nLayers
 
     std::atomic<ulong> inlet_face_count(0), outlet_face_count(0);
     std::atomic<ulong> inlet_grid_count(0), outlet_grid_count(0);
@@ -321,7 +321,6 @@ void main_setup() {
     else if (outlet) {
         lbm.flags[n] = TYPE_E;
 
-        // ρ 线性过渡以吸收回波
         const float w = float(dist_out + 1u) / float(N_ABSORB);  // w ∈ (0,1]
         lbm.rho[n] = 1.0f;                                       // 最外层维持常压
         lbm.u.x[n] *= w;                                         // 速度递减
@@ -344,7 +343,7 @@ void main_setup() {
     // ------------------------------------------------------------------- graphics & run --------------------------------------------------------------------
     lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
-    const ulong lbm_T = 40001ull; 
+    const ulong lbm_T = 100001ull; 
     const uint  vtk_dt = 20000u;        // export VTK every 20 time steps
     const std::string vtk_dir = get_exe_path() + std::string("../../../caseData/") + caseName + "/"+datetime+"_raw_";
     //const string vtk_dir = get_exe_path() + "vtk/"; // ensure this directory exists beforehand

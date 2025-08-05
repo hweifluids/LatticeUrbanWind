@@ -22,9 +22,6 @@ def stl_bounds(file_path: str | Path) -> Tuple[Tuple[float, float],
     return (xmin, xmax), (ymin, ymax), (zmin, zmax)
 
 def wobasement(input_file: str | Path, outputName: str | Path) -> None:
-    """
-    仅做与 basement() 相同的 XY 原点平移，不做 Z 方向抬升，也不做布尔并集。
-    """
     mesh_buildings = trimesh.load(input_file, force='mesh')
     min_x, min_y, _ = mesh_buildings.bounds[0]
     mesh_buildings.apply_translation([-min_x, -min_y, 0.0])
@@ -107,8 +104,8 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
             continue
         px, py = row.geometry.representative_point().coords[0]
         area = row.geometry.area
-        ax_map.text(px, py, f"{h:.1f}", fontsize=1.5, ha="center", va="bottom", color='red', alpha=0.5)
-        ax_map.text(px, py, f"{area:.1f}", fontsize=1.5, ha="center", va="top", color='green', alpha=0.5)
+        ax_map.text(px, py, f"{h:.1f}", fontsize=0.5, ha="center", va="bottom", color='red', alpha=0.6)
+        ax_map.text(px, py, f"{area:.1f}", fontsize=0.5, ha="center", va="top", color='green', alpha=0.6)
 
     ax_map.set_aspect("equal")
     ax_map.axis("off")
@@ -126,7 +123,7 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
 
     plt.tight_layout()
     out_path = output_dir / f"{case_name}_preview.jpg"
-    fig.savefig(out_path, dpi=1200)
+    fig.savefig(out_path, dpi=4800)
     plt.close(fig)
     print(f"          Saved preview image to {out_path}")
 
