@@ -170,17 +170,22 @@ void main_setup() {
 
     if (validation != "pass") {
         println("|-----------------------------------------------------------------------------|");
-        println("| ERROR: preprocessing validation failed. Computation aborted.               |");
+        println("| ERROR: preprocessing validation failed. Computation aborted.                |");
         println("|-----------------------------------------------------------------------------|");
         wait();
         exit(-1);
     } else {
-        println("| Preprocessing validation passed.                                           |");
+        println("| Preprocessing validation passed.                                            |");
     }
 
     auto fmtf = [](float v, int prec = 2) {
         std::ostringstream os;
         os << std::fixed << std::setprecision(prec) << v;
+        return os.str();
+    };
+    auto fmt_sci = [](float v, int prec = 3) {
+        std::ostringstream os;
+        os << std::scientific << std::setprecision(prec) << v;
         return os.str();
     };
 
@@ -193,8 +198,8 @@ void main_setup() {
 
 
 
-    println("| Downstream of estimated potential flow is " + downstream_bc + " BC.                          |");
-    println("| Yaw between potential flow and surface normal is " + downstream_bc_yaw + " degree.             |");
+    println("| Downstream of estimated potential flow is " + downstream_bc + " BC.                            |");
+    println("| Yaw between potential flow and surface normal is " + downstream_bc_yaw + " degree.              |");
     println("| GPU domain split Dx,Dy,Dz = " + to_string(Dx) + "," + to_string(Dy) + "," + to_string(Dz) + "                                           |");
 
     println("|-----------------------------------------------------------------------------|");
@@ -207,11 +212,23 @@ void main_setup() {
 
     const float z_off = units.x(z_si_offset); 
 
-    const float lbm_nu = units.nu(si_nu);
-    println("| LBM viscosity = " + to_string(lbm_nu, 6u) + "                                                    |");
+    float lbm_nu = units.nu(si_nu);
+    println("| LBM viscosity = " + fmt_sci(lbm_nu, 6) + "                                                    |");
+
+    
+// --- stability safeguard: ensure tau ≥ 0.503 ---
+    //const float cs2 = 1.0f / 3.0f;          // c_s^2
+    //const float tau0 = lbm_nu / cs2 + 0.5f;  // current τ
+    //const float tau_safe = 0.501f;           // lower bound you accept
+    //if (tau0 < tau_safe) {
+    //    const float lbm_nu_safe = (tau_safe - 0.5f) * cs2;
+    //    println("| τ too small, raise ν_LB from "
+    //        + fmt_sci(lbm_nu, 6) + " to "
+    //        + fmt_sci(lbm_nu_safe, 6) + " |");
+    //    lbm_nu = lbm_nu_safe;
+    //}
 
     // read CSV
-    
     const std::string csv_path = get_exe_path() + std::string("../../../wrfInput/") + caseName + "/SurfData_"+datetime+".csv";
 
     auto samples_si = read_samples(csv_path);
@@ -282,18 +299,34 @@ void main_setup() {
         };
 
 
-    const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
+    const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();\
+    const uint N_ABSORB = 3u;            // PML
+
     std::atomic<ulong> inlet_face_count(0), outlet_face_count(0);
     std::atomic<ulong> inlet_grid_count(0), outlet_grid_count(0);
     parallel_for(lbm.get_N(), [&](ulong n) { uint x = 0, y = 0, z = 0; lbm.coordinates(n, x, y, z); const float3 pos = lbm.position(x, y, z);
     if (z == 0u) { lbm.flags[n] = TYPE_S; return; }
 
     // Determine outlet from potential flow downstream defined in deck
+    uint dist_out = 0u;              // AML distance
     bool outlet = false;
-    if (downstream_bc == "+y")      outlet = (y == Ny - 1u);
-    else if (downstream_bc == "-y") outlet = (y == 0u);
-    else if (downstream_bc == "+x") outlet = (x == Nx - 1u);
-    else if (downstream_bc == "-x") outlet = (x == 0u);
+    if (downstream_bc == "+y") {
+        dist_out = Ny - 1u - y;
+        outlet = (dist_out < N_ABSORB);
+    }
+    else if (downstream_bc == "-y") {
+        dist_out = y;
+        outlet = (dist_out < N_ABSORB);
+    }
+    else if (downstream_bc == "+x") {
+        dist_out = Nx - 1u - x;
+        outlet = (dist_out < N_ABSORB);
+    }
+    else if (downstream_bc == "-x") {
+        dist_out = x;
+        outlet = (dist_out < N_ABSORB);
+    }
+
 
     // All others are inlet
     bool inlet = ( (x == 0u || x == Nx - 1u ||
@@ -313,9 +346,18 @@ void main_setup() {
     }
     else if (outlet) {
         lbm.flags[n] = TYPE_E;
+
+        // ρ 线性过渡以吸收回波
+        const float w = float(dist_out + 1u) / float(N_ABSORB);  // w ∈ (0,1]
+        lbm.rho[n] = 1.0f;                                       // 最外层维持常压
+        lbm.u.x[n] *= w;                                         // 速度递减
+        lbm.u.y[n] *= w;
+        lbm.u.z[n] *= w;
+
         outlet_face_count++;
         outlet_grid_count++;
     }
+
         });
 
     println("| inlet face count: " + to_string(inlet_face_count.load()) + "                                      |");
