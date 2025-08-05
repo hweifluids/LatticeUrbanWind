@@ -88,7 +88,9 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
         if not (h == h) or h <= 0:
             continue
         px, py = row.geometry.representative_point().coords[0]
-        ax_map.text(px, py, f"{h:.1f}", fontsize=3, ha="center", va="center", color='red', alpha=0.5)
+        area = row.geometry.area
+        ax_map.text(px, py, f"{h:.1f}", fontsize=1.5, ha="center", va="bottom", color='red', alpha=0.5)
+        ax_map.text(px, py, f"{area:.1f}", fontsize=1.5, ha="center", va="top", color='green', alpha=0.5)
 
     ax_map.set_aspect("equal")
     ax_map.axis("off")
