@@ -138,6 +138,7 @@ SCRIPTS = [
     "tool_shpInspect.py",
     "buildBC.py",
     "voxelization.py",
+    "validation.py"
 ]
 LOGFILE = pathlib.Path("./logfile")
 
