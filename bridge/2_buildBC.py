@@ -339,16 +339,17 @@ def buildBC(
 
     # === copy SurfData_Latest.csv to bcData with timestamped name === csv_path = vti_path.parent / "SurfData_Latest.csv"
     if conf_file.exists():
-        # 
+        #
         m_dt = re.search(r"datetime\s*=\s*([0-9]{14})", txt)
         if m_dt:
             dt_str = m_dt.group(1)
-            # project_home = Path(__file__).parent.parent  # $ProjectHome$
-            dst_path = vti_path.parent / f"SurfData_{dt_str}.csv"
-            shutil.copyfile(csv_path, dst_path)
-            print(f"Copied SurfData to: {dst_path}")
         else:
-            print("Warning: 'datetime' not found in conf.txt; skip copy.")
+            dt_str = "20990101120000"
+            print("Warning: 'datetime' not found in conf.txt; use default 20990101120000.")
+        # project_home = Path(__file__).parent.parent  # $ProjectHome$
+        dst_path = vti_path.parent / f"SurfData_{dt_str}.csv"
+        shutil.copyfile(csv_path, dst_path)
+        print(f"Copied SurfData to: {dst_path}")
 
 
     um_bc = bc_sum / bc_cnt if bc_cnt > 0 else np.zeros(3, dtype=float)
