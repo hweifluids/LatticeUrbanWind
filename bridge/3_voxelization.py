@@ -81,11 +81,16 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
         2, 1, figsize=(8, 8), gridspec_kw={"height_ratios": [4, 1]}
     )
 
-    line_width = 0.25
+    line_width = 0.125
+    areas = gdf.geometry.area
     if "height" in gdf.columns:
-        extruded_mask = gdf["height"].notna() & (gdf["height"] > 0)
+        extruded_mask = (
+            gdf["height"].notna()
+            & (gdf["height"] > 0)
+            & (areas >= MIN_EXTRUDE_AREA)
+        )
     else:
-        extruded_mask = np.ones(len(gdf), dtype=bool)
+        extruded_mask = areas >= MIN_EXTRUDE_AREA
     non_extruded = ~extruded_mask
 
     gdf[extruded_mask].boundary.plot(ax=ax_map, color="black", linewidth=line_width)
