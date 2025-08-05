@@ -109,6 +109,13 @@ void main_setup() {
             return (float)atof(rng.substr(c + 1, r - c - 1).c_str());
         };
 
+        // helper: remove surrounding quotation marks from a string if present
+        auto strip_quotes = [](std::string s) {
+            if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+                return s.substr(1, s.size() - 2);
+            return s;
+        };
+
         // resolve GPU number
         auto parse_triplet_uint = [&](const std::string& rng, uint& a, uint& b, uint& c) {
             size_t lb = rng.find('[');
@@ -138,17 +145,17 @@ void main_setup() {
                 std::string key = trim(line.substr(0, eq));
                 std::string val = trim(line.substr(eq + 1));
 
-                if (key == "casename")        caseName     = val;
-                else if (key == "datetime")   datetime = val;
-                else if (key == "downstream_bc") downstream_bc = val;
-                else if (key == "downstream_bc_yaw") downstream_bc_yaw = val;
+                if (key == "casename")        caseName     = strip_quotes(val);
+                else if (key == "datetime")   datetime     = strip_quotes(val);
+                else if (key == "downstream_bc") downstream_bc = strip_quotes(val);
+                else if (key == "downstream_bc_yaw") downstream_bc_yaw = strip_quotes(val);
                 else if (key == "base_height") z_si_offset = (float)atof(val.c_str());
                 else if (key == "memory_lbm")  memory      = (uint)atoi(val.c_str());
                 else if (key == "si_x_cfd")    si_size.x   = second_val(val);
                 else if (key == "si_y_cfd")    si_size.y   = second_val(val);
                 else if (key == "si_z_cfd")    si_size.z   = second_val(val);
                 else if (key == "n_gpu")       parse_triplet_uint(val, Dx, Dy, Dz);
-                else if (key == "validation") validation = val;
+                else if (key == "validation") validation = strip_quotes(val);
             }
             si_size.z += z_si_offset;
             if (!memory) memory = 6000u;
