@@ -16,7 +16,8 @@ def get_nc_path():
     if len(sys.argv) == 2:              # input parameter: python load_shp.py my_case
         user_input = sys.argv[1]
     elif len(sys.argv) == 1:            # no parameter, send to interaction
-        user_input = input("Enter case name or .nc filename: ").strip()
+        print("Please enter the case name or .nc filename:")
+        user_input = input("- ").strip()
     else:                               # too many params, exit
         script = os.path.basename(sys.argv[0])
         print(f"Usage: {script} [case_name]")

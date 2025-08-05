@@ -11,7 +11,8 @@ def main():
     if len(sys.argv) == 2:              # input parameter: python load_shp.py my_case
         case_name = sys.argv[1]
     elif len(sys.argv) == 1:            # no parameter, send to interaction
-        case_name = input("Please enter the case name: ")
+        print("Please enter the case name: ")
+        case_name = input("- ")
     else:                               # too many params, exit
         script = os.path.basename(sys.argv[0])
         print(f"Usage: {script} [case_name]")

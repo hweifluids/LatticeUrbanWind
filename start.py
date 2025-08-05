@@ -134,11 +134,11 @@ sys.stderr = sys.stdout
 # === 1) Basic setup =============================================================
 BRIDGE_DIR = pathlib.Path(__file__).resolve().parent / "bridge"   # bridge folder
 SCRIPTS = [
-    "tool_cdfInspect.py",
-    "tool_shpInspect.py",
-    "buildBC.py",
-    "voxelization.py",
-    "validation.py"
+    "1_tool_cdfInspect.py",
+    "1_tool_shpInspect.py",
+    "2_buildBC.py",
+    "3_voxelization.py",
+    "4_validation.py"
 ]
 LOGFILE = pathlib.Path("./logfile")
 
@@ -172,7 +172,7 @@ def run_script(script: pathlib.Path, log):
     """
     # -u means unbuffered
     args = [sys.executable, "-u", str(script)]
-    if script.name in ("tool_cdfInspect.py", "tool_shpInspect.py"):        # who need casename
+    if script.name in ("1_tool_cdfInspect.py", "1_tool_shpInspect.py"):        # who need casename
         args.append(caseName)
 
     proc = subprocess.Popen(
