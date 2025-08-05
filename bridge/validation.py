@@ -60,7 +60,9 @@ def ensure_conf_fields(conf_path: Path) -> list[str]:
             conf_path.write_text("")
             print("[!] conf.txt not found. Created empty conf.txt")
     lines = conf_path.read_text().splitlines()
-    while len(lines) < 38:
+    # Ensure there are enough placeholder lines before inserting defaults so
+    # that we can target specific line numbers later (34-37 in 1-based index).
+    while len(lines) < 33:
         lines.append("")
 
     def has_key(key: str) -> int | None:
@@ -73,24 +75,29 @@ def ensure_conf_fields(conf_path: Path) -> list[str]:
                 break
         return None
 
-    def insert_after(tag: str, text: str) -> None:
-        for i, ln in enumerate(lines):
-            if ln.strip() == tag:
-                lines.insert(i + 1, text)
-                return
-        lines.append(tag)
-        lines.append(text)
+    # Ensure the marker and default fields appear exactly at lines 34-37.
+    # Line numbers here are 1-based in comments for clarity.
 
-    defaults = {
-        "memory_lbm": "20000",
-        "datetime": "20250723120000",
-        "n_gpu": "[1, 1, 1]",
-    }
-    for key, val in defaults.items():
-        idx = has_key(key)
-        if idx is None:
-            insert_after("// CFD control", f"{key} = {val}")
+    # Line 34: "// CFD control" marker
+    if lines[33].strip() != "// CFD control":
+        lines.insert(33, "// CFD control")
+
+    # Lines 35-37: required configuration keys with defaults
+    defaults: list[tuple[str, str]] = [
+        ("n_gpu", "[1, 1, 1]"),
+        ("datetime", "20250723120000"),
+        ("memory_lbm", "20000"),
+    ]
+    for i, (key, val) in enumerate(defaults):
+        if has_key(key) is None:
+            line_no = 35 + i  # desired 1-based line number for this key
+            lines.insert(line_no - 1, f"{key} = {val}")
             print(f"[!] Field '{key}' missing. Set default {val} in conf.txt")
+
+    # Pad to 38 lines so that validation result can be written at line 38 later
+    while len(lines) < 38:
+        lines.append("")
+
     return lines
 
 def write_validation(conf_lines: list[str], conf_path: Path, passed: bool) -> None:
