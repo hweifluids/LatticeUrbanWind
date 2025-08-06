@@ -228,19 +228,18 @@ def main(caseName=None):
         gdf['height'] = gdf['AbsZmax'] - gdf['AbsZmin']
 
     # 2) use Height field (case-insensitive)
-    elif any(col in gdf.columns for col in ('Height', 'height', 'HEIGHT')):
-        height_col = next(col for col in ('Height', 'height', 'HEIGHT') if col in gdf.columns)
+    elif any(col in gdf.columns for col in ('Elevation','Height', 'height', 'HEIGHT')):
+        height_col = next(col for col in ('Elevation', 'Height', 'height', 'HEIGHT') if col in gdf.columns)
         gdf['height'] = gpd.pd.to_numeric(gdf[height_col], errors='coerce')
 
     # 3) use floor count × average floor height
     else:
-
         if 'FLOOR' in gdf.columns:
             floor_col = 'FLOOR'
         elif 'Floor' in gdf.columns:
             floor_col = 'Floor'
         else:
-            raise KeyError("No height or level information in SHP: AbsZmax/AbsZmin, Height, height, HEIGHT, FLOOR, Floor. Exiting...")
+            raise KeyError("No height or level information in SHP: AbsZmax/AbsZmin, Elevation, Height, height, HEIGHT, FLOOR, Floor. Exiting...")
 
         gdf['floors'] = gpd.pd.to_numeric(gdf[floor_col], errors='coerce')
         AVG_FLOOR_HEIGHT = 3.0

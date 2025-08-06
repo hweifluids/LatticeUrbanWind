@@ -189,12 +189,13 @@ void main_setup() {
     println("| GPU domain split Dx,Dy,Dz = " + to_string(Dx) + "," + to_string(Dy) + "," + to_string(Dz) + "                                           |");
 
     println("|-----------------------------------------------------------------------------|");
-    const float lbm_ref_u = 0.01f, si_ref_u = 2.0f; 
+    const float lbm_ref_u = 0.5f, si_ref_u = 50.0f;
+
     const float si_nu = 1.48E-5f, si_rho = 1.225f;
 
     const uint3 lbm_N = resolution(si_size, memory);
     println("| Grid resolution Nx,Ny,Nz = " + to_string(lbm_N.x) + "," + to_string(lbm_N.y) + "," + to_string(lbm_N.z) + "                                    |");
-    units.set_m_kg_s((float)lbm_N.y, lbm_ref_u, 1.0f, si_size.y, si_ref_u, si_rho);
+    units.set_m_kg_s((float)lbm_N.y, lbm_ref_u, 0.1f, si_size.y, si_ref_u, si_rho);
 
     const float z_off = units.x(z_si_offset); 
 
