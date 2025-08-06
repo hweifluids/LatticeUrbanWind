@@ -12,6 +12,7 @@ from datetime import datetime
 import re
 
 MIN_EXTRUDE_AREA = 20.0  # m^2, minimum polygon area to extrude
+SCALE_FACTOR = 0.01  # STL export scale factor (1/100)
 
 def stl_bounds(file_path: str | Path) -> Tuple[Tuple[float, float],
                                                        Tuple[float, float],
@@ -295,9 +296,13 @@ def main(caseName=None):
     print(f"[7/10] Exporting buildings stereolithography stl...")
     file_wobase = f"{caseName}_wo_base.stl"
     basement_filename = f"{caseName}_with_base.stl"
-    # build without basement
-    scene.export(data_folder / file_wobase)
-    print(f"          Saved combined mesh to {data_folder / file_wobase}.")
+    # build without basement and scale down for STL
+    scene_scaled = scene.copy()
+    scene_scaled.apply_scale(SCALE_FACTOR)
+    scene_scaled.export(data_folder / file_wobase)
+    print(
+        f"          Saved combined mesh to {data_folder / file_wobase} (scaled by {SCALE_FACTOR})."
+    )
     bounds_wo = stl_bounds(data_folder / file_wobase)
     print(f"          Range verification: {bounds_wo}")
 
@@ -322,11 +327,12 @@ def main(caseName=None):
     else:
         print(f"          Basement height not specified, using default = {baseheight}.")
 
-    basement(baseheight, 
+    basement(
+        baseheight * SCALE_FACTOR,
         data_folder / file_wobase,
         data_folder / basement_filename,
-        domain_width,
-        domain_depth
+        domain_width * SCALE_FACTOR,
+        domain_depth * SCALE_FACTOR,
     )
 
     wobasement(data_folder / file_wobase, data_folder / file_wobase)
@@ -334,10 +340,12 @@ def main(caseName=None):
     print(f"          Re-aligned wobase STL bounds: {bounds_wo}")
 
     bounds_w = stl_bounds(data_folder / basement_filename)
-    print(f"          Range verification: "
-          f"X:[0.000, {domain_width:.3f}]  "
-          f"Y:[0.000, {domain_depth:.3f}]  "
-          f"Z:[{bounds_w[2][0]:.3f}, {bounds_w[2][1]:.3f}]")
+    print(
+        f"          Range verification: "
+        f"X:[0.000, {domain_width:.3f}]  "
+        f"Y:[0.000, {domain_depth:.3f}]  "
+        f"Z:[{bounds_w[2][0] * 100:.3f}, {bounds_w[2][1] * 100:.3f}]"
+    )
 
     print("[10/10] Updating configuration file...")
         # Update conf.txt lines
@@ -345,12 +353,12 @@ def main(caseName=None):
     lines[4] = "// Original SHP Range"
     lines[5] = f"orig_lon = [{orig_min_lon:.6f}, {orig_max_lon:.6f}]"
     lines[6] = f"orig_lat = [{orig_min_lat:.6f}, {orig_max_lat:.6f}]"
-    lines[7] = f"orig_height = [{bounds_wo[2][0]:.6f}, {bounds_wo[2][1]:.6f}]"
+    lines[7] = f"orig_height = [{bounds_wo[2][0] * 100:.6f}, {bounds_wo[2][1] * 100:.6f}]"
     lines[8] = ""
     lines[9] = "// Projected SHP SI Range"
     lines[10] = f"si_x_cfd = [0.000000, {domain_width:.6f}]"
     lines[11] = f"si_y_cfd = [0.000000, {domain_depth:.6f}]"
-    lines[12] = f"si_height = [{bounds_w[2][0]:.6f}, {bounds_w[2][1]:.6f}]"
+    lines[12] = f"si_height = [{bounds_w[2][0] * 100:.6f}, {bounds_w[2][1] * 100:.6f}]"
 
     lines[23] = "// Basement Configurations for Model Voxelization"
     lines[24] = f"base_height = {baseheight}"

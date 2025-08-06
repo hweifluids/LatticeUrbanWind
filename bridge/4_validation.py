@@ -33,8 +33,12 @@ def default_memory_lbm() -> str:
     except Exception:
         return "20000"
 
+SCALE_BACK = 100.0  # STL coordinates were saved at 1/100 scale
+
+
 def stl_ranges(stl_path: Path) -> dict[str, tuple[float, float, float]]:
     mesh = trimesh.load(stl_path, force="mesh")
+    mesh.apply_scale(SCALE_BACK)
     (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
     return {
         "x": (xmin, xmax, xmax - xmin),
