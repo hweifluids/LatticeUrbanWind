@@ -24,12 +24,15 @@ void main_setup() { // urban canopy airflow over STL city model (non‑interacti
 	LBM lbm(lbm_N, lbm_nu); // compile with GRAPHICS (without INTERACTIVE_GRAPHICS)
 
 	// ------------------------------------------------------------------- import & scale geometry -----------------------------------------------------------
-	Mesh* mesh = read_stl(get_exe_path() + "../stl/buildings_base.stl");
+        Mesh* mesh = read_stl(get_exe_path() + "../stl/buildings_base.stl");
 
-	// Scale STL so its x‑extent matches 5379.31348 m (converted to LBM units)
-	const float target_lbm_x = units.x(si_size.x);
-	const float scale = target_lbm_x / mesh->get_bounding_box_size().x;
-	mesh->scale(scale);
+        // Restore original scale (STL saved at 1/100)
+        if (mesh) mesh->scale(100.0f);
+
+        // Scale STL so its x‑extent matches 5379.31348 m (converted to LBM units)
+        const float target_lbm_x = units.x(si_size.x);
+        const float scale = target_lbm_x / mesh->get_bounding_box_size().x;
+        mesh->scale(scale);
 
 	// Position model: leave a 1‑cell buffer to the negative boundaries, sit on z = 1
 	mesh->translate(float3(1.0f - mesh->pmin.x,

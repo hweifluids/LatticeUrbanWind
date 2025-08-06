@@ -175,6 +175,7 @@ void main_setup() {
     println("Time code = " + now_str());
 
     if (!mesh) { println("ERROR: failed to load STL"); wait(); exit(-1); }
+    mesh->scale(100.0f); // STL stored at 1/100 scale, restore here
     const float target_lbm_x = units.x(si_size.x); const float scale_geom = target_lbm_x / mesh->get_bounding_box_size().x; mesh->scale(scale_geom);
     mesh->translate(float3(1.0f - mesh->pmin.x, 1.0f - mesh->pmin.y, 1.0f - mesh->pmin.z));
 
