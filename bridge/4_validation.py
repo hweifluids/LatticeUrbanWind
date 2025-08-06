@@ -33,7 +33,7 @@ def default_memory_lbm() -> str:
     except Exception:
         return "20000"
 
-SCALE_BACK = 100.0  # STL coordinates were saved at 1/100 scale
+SCALE_BACK = 1.0  # STL coordinates were saved at 1/100 scale
 
 
 def stl_ranges(stl_path: Path) -> dict[str, tuple[float, float, float]]:

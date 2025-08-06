@@ -10,9 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 import re
+from shapely.ops import transform
 
 MIN_EXTRUDE_AREA = 20.0  # m^2, minimum polygon area to extrude
-SCALE_FACTOR = 0.01  # STL export scale factor (1/100)
+SCALE_FACTOR = 1.00  # STL export scale factor (1/100)
 
 def stl_bounds(file_path: str | Path) -> Tuple[Tuple[float, float],
                                                        Tuple[float, float],
@@ -210,7 +211,8 @@ def main(caseName=None):
         si_x = np.sort(np.array(si_x, dtype=float))
         si_y = np.sort(np.array(si_y, dtype=float))
         
-        bbox_proj = box(si_x[0], si_y[0], si_x[1], si_y[1])   
+        bbox_proj = box(si_x[0], si_y[0], si_x[1], si_y[1]) 
+        gdf.geometry = gdf.geometry.buffer(0)  
         gdf = gpd.clip(gdf, bbox_proj)
 
         # if clipping results in empty GeoDataFrame
@@ -248,7 +250,7 @@ def main(caseName=None):
 
 
     print(f"[4/10] Generating building outline preview...")
-    save_outline_preview(gdf, caseName, shpName, data_folder)
+    #save_outline_preview(gdf, caseName, shpName, data_folder)
 
     print(f"[5/10] Stretching in Z-axis and BOOL combining...")
     meshes = []
@@ -262,7 +264,8 @@ def main(caseName=None):
         for poly in polys:
             if poly.area < MIN_EXTRUDE_AREA:
                 continue
-            meshes.append(trimesh.creation.extrude_polygon(poly, h))
+            poly_2d = transform(lambda x, y, z=None: (x, y), poly)
+            meshes.append(trimesh.creation.extrude_polygon(poly_2d, h))
 
     if not meshes:
         raise RuntimeError(
