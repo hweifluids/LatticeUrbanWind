@@ -2265,8 +2265,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 	const float3 r_origin = position(xyz)+offset;
 	const float3 r_direction = (float3)((float)(direction==0u), (float)(direction==1u), (float)(direction==2u));
 	uint intersections=0u, intersections_check=0u;
-	const uint max_intersections = 256u; // maximum number of mesh intersections to track
-	ushort distances[max_intersections]; // store distances to intersections
+	ushort distances[64]; // allow up to 64 mesh intersections
 	const bool condition = direction==0u ? r_origin.y<y0||r_origin.z<z0||r_origin.y>=y1||r_origin.z>=z1 : direction==1u ? r_origin.x<x0||r_origin.z<z0||r_origin.x>=x1||r_origin.z>=z1 : r_origin.x<x0||r_origin.y<y0||r_origin.x>=x1||r_origin.y>=y1;
 
 	if(condition) return; // don't use local memory (~25% slower, but this also runs on old OpenCL 1.0 GPUs)
@@ -2279,24 +2278,15 @@ string opencl_c_container() { return R( // ########################## begin of O
 		const float g=dot(u, h), f=1.0f/g, s=f*dot(w, h), t=f*dot(r_direction, q), d=f*dot(v, q); // check for division by zero in case g==0, otherwise f=NaN can cause hang
 		if(g!=0.0f&&s>=0.0f&&s<1.0f&&t>=0.0f&&s+t<1.0f) { // ray-triangle intersection ahead or behind
 			if(d>0.0f) { // ray-triangle intersection ahead
-				if(d<65536.0f) {
-					if(intersections < max_intersections) {
-						distances[intersections] = (ushort)d; // store distance to intersection in array as ushort
-						intersections++;
-					} else {
-						return; // too many intersections, abort to avoid overflow
-					}
-				} else {
-					intersections++; // count intersection even if distance cannot be stored
-				}
+				if(intersections<64u&&d<65536.0f) distances[intersections] = (ushort)d; // store distance to intersection in array as ushort
+				intersections++;
 			} else { // ray-triangle intersection behind
 				intersections_check++; // cast a second ray to check if starting point is really inside (error correction)
 			}
 		}
 	}
 
-	const uint clamped_intersections = min(intersections, max_intersections);
-	for(int i=1; i<(int)clamped_intersections; i++) { // insertion-sort distances
+	for(int i=1; i<(int)intersections; i++) { // insertion-sort distances
 		ushort t = distances[i];
 		int j = i-1;
 		while(distances[j]>t&&j>=0) {
@@ -2310,13 +2300,13 @@ string opencl_c_container() { return R( // ########################## begin of O
 	uint intersection = intersections%2u!=intersections_check%2u; // iterate through column, start with 0 regularly, start with 1 if forward and backward intersection count evenness differs (error correction)
 	const uint h0 = direction==0u ? xyz.x : direction==1u ? xyz.y : xyz.z;
 	const uint hmax = direction==0u ? (uint)clamp((int)x1-def_Ox, 0, (int)def_Nx) : direction==1u ? (uint)clamp((int)y1-def_Oy, 0, (int)def_Ny) : (uint)clamp((int)z1-def_Oz, 0, (int)def_Nz);
-	const uint hmesh = clamped_intersections>0u ? h0+(uint)distances[clamped_intersections-1u] : h0; // prevent array out-of-bounds access
+	const uint hmesh = h0+(uint)distances[min(intersections-1u, 63u)]; // clamp (intersections-1u) to prevent array out-of-bounds access
 	for(uint h=h0; h<hmax; h++) {
-		while(intersection<clamped_intersections&&h>h0+(uint)distances[intersection]) {
+		while(intersection<intersections&&h>h0+(uint)distances[min(intersection, 63u)]) { // clamp intersection to prevent array out-of-bounds access
 			inside = !inside; // passed mesh intersection, so switch inside/outside state
 			intersection++;
 		}
-		inside = inside&&(intersection<clamped_intersections&&h<hmesh); // point must be outside if there are no more ray-mesh intersections ahead (error correction)
+		inside = inside&&(intersection<intersections&&h<hmesh); // point must be outside if there are no more ray-mesh intersections ahead (error correction)
 		const uxx n = index((uint3)(direction==0u?h:xyz.x, direction==1u?h:xyz.y, direction==2u?h:xyz.z));
 		uchar flagsn = flags[n];
 		const float3 p = position(coordinates(n))+offset;
