@@ -2286,27 +2286,29 @@ string opencl_c_container() { return R( // ########################## begin of O
 		}
 	}
 
-	for(int i=1; i<(int)intersections; i++) { // insertion-sort distances
-		ushort t = distances[i];
-		int j = i-1;
-		while(distances[j]>t&&j>=0) {
-			distances[j+1] = distances[j];
-			j--;
-		}
-		distances[j+1] = t;
-	}
-	bool inside = (intersections%2u)&&(intersections_check%2u);
-	const bool set_u = sq(ux)+sq(uy)+sq(uz)+sq(rx)+sq(ry)+sq(rz)>0.0f;
-	uint intersection = intersections%2u!=intersections_check%2u; // iterate through column, start with 0 regularly, start with 1 if forward and backward intersection count evenness differs (error correction)
-	const uint h0 = direction==0u ? xyz.x : direction==1u ? xyz.y : xyz.z;
-	const uint hmax = direction==0u ? (uint)clamp((int)x1-def_Ox, 0, (int)def_Nx) : direction==1u ? (uint)clamp((int)y1-def_Oy, 0, (int)def_Ny) : (uint)clamp((int)z1-def_Oz, 0, (int)def_Nz);
-	const uint hmesh = h0+(uint)distances[min(intersections-1u, 63u)]; // clamp (intersections-1u) to prevent array out-of-bounds access
-	for(uint h=h0; h<hmax; h++) {
-		while(intersection<intersections&&h>h0+(uint)distances[min(intersection, 63u)]) { // clamp intersection to prevent array out-of-bounds access
-			inside = !inside; // passed mesh intersection, so switch inside/outside state
-			intersection++;
-		}
-		inside = inside&&(intersection<intersections&&h<hmesh); // point must be outside if there are no more ray-mesh intersections ahead (error correction)
+        const uint intersections_sorted = min(intersections, 64u);
+        for(int i=1; i<(int)intersections_sorted; i++) { // insertion-sort distances
+                ushort t = distances[i];
+                int j = i-1;
+                while(j>=0 && distances[j]>t) {
+                        distances[j+1] = distances[j];
+                        j--;
+                }
+                distances[j+1] = t;
+        }
+        bool inside = (intersections%2u)&&(intersections_check%2u);
+        const bool set_u = sq(ux)+sq(uy)+sq(uz)+sq(rx)+sq(ry)+sq(rz)>0.0f;
+        uint intersection = intersections%2u!=intersections_check%2u; // iterate through column, start with 0 regularly, start with 1 if forward and backward intersection count evenness differs (error correction)
+        intersections = intersections_sorted;
+        const uint h0 = direction==0u ? xyz.x : direction==1u ? xyz.y : xyz.z;
+        const uint hmax = direction==0u ? (uint)clamp((int)x1-def_Ox, 0, (int)def_Nx) : direction==1u ? (uint)clamp((int)y1-def_Oy, 0, (int)def_Ny) : (uint)clamp((int)z1-def_Oz, 0, (int)def_Nz);
+        const uint hmesh = h0+(uint)distances[min(intersections-1u, 63u)]; // clamp (intersections-1u) to prevent array out-of-bounds access
+        for(uint h=h0; h<hmax; h++) {
+                while(intersection<intersections&&h>h0+(uint)distances[min(intersection, 63u)]) { // clamp intersection to prevent array out-of-bounds access
+                        inside = !inside; // passed mesh intersection, so switch inside/outside state
+                        intersection++;
+                }
+                inside = inside&&(intersection<intersections&&h<hmesh); // point must be outside if there are no more ray-mesh intersections ahead (error correction)
 		const uxx n = index((uint3)(direction==0u?h:xyz.x, direction==1u?h:xyz.y, direction==2u?h:xyz.z));
 		uchar flagsn = flags[n];
 		const float3 p = position(coordinates(n))+offset;
