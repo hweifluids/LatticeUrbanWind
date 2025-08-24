@@ -265,7 +265,7 @@ def main(caseName=None):
             if poly.area < MIN_EXTRUDE_AREA:
                 continue
             poly_2d = transform(lambda x, y, z=None: (x, y), poly)
-            meshes.append(trimesh.creation.extrude_polygon(poly_2d, h))
+            meshes.append(trimesh.creation.extrude_polygon(poly_2d, h, engine="earcut"))
 
     if not meshes:
         raise RuntimeError(

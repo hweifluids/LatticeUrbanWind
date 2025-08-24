@@ -1,4 +1,4 @@
-#include "setup.hpp"
+﻿#include "setup.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -97,15 +97,15 @@ static string now_str() {
     auto now = system_clock::now();
     std::time_t tt = system_clock::to_time_t(now);
     std::tm tm;
-    #if defined(_WIN32)
-        if (localtime_s(&tm, &tt) != 0) {
-            throw std::runtime_error("Failed to get local time.");
-        }
-    #else
-        if (localtime_r(&tt, &tm) == nullptr) {
-            throw std::runtime_error("Failed to get local time.");
-        }
-    #endif
+#if defined(_WIN32)
+    if (localtime_s(&tm, &tt) != 0) {
+        throw std::runtime_error("Failed to get local time.");
+    }
+#else
+    if (localtime_r(&tt, &tm) == nullptr) {
+        throw std::runtime_error("Failed to get local time.");
+    }
+#endif
     std::stringstream ss;
     ss << std::put_time(&tm, "%F %T"); // %F = YYYY-MM-DD, %T = hh:mm:ss
     return ss.str();
@@ -119,40 +119,32 @@ void main_setup() {
     println("|                                            Version - 250727 - Draft         |");
     println("|                                                                             |");
     println("|-----------------------------------------------------------------------------|");
- 
+
     // ---------------------- read conf.txt -----------------------------------
     {
         const std::string conf_path = get_exe_path() + std::string("../../../conf.txt");
-        println("| Declared configuration full path: " + conf_path + " |");
         std::ifstream fin(conf_path);
-        if (fin.is_open()) {
-            println("| conf exists at declared path. Start reading.                                |");
-            conf_used_path = conf_path;
-        }
-        else {
-            println("| conf not found at declared path.                                            |");
-        }
-
+        if (fin.is_open()) conf_used_path = conf_path;
 
         // trim
         auto trim = [](std::string s) {
-            const char* ws = " \t\r";
+            const char* ws = " \t";
             size_t b = s.find_first_not_of(ws);
             size_t e = s.find_last_not_of(ws);
             return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1);
-        };
+            };
         // get values
         auto second_val = [](const std::string& rng) {
             size_t c = rng.find(','); size_t r = rng.find(']', c);
             return (float)atof(rng.substr(c + 1, r - c - 1).c_str());
-        };
+            };
 
         // helper: remove surrounding quotation marks from a string if present
         auto strip_quotes = [](std::string s) {
             if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
                 return s.substr(1, s.size() - 2);
             return s;
-        };
+            };
 
         // resolve GPU number
         auto parse_triplet_uint = [&](const std::string& rng, uint& a, uint& b, uint& c) {
@@ -173,31 +165,32 @@ void main_setup() {
         if (!fin.is_open()) {
             println("WARNING: conf.txt not found, using integrated defaults...");
             caseName = "shanghai";
-            si_size  = float3(3518.36f, 4438.94f, 1000.0f + z_si_offset);
-        } else {
+            si_size = float3(3518.36f, 4438.94f, 1000.0f + z_si_offset);
+        }
+        else {
             std::string line;
             while (std::getline(fin, line)) {
                 size_t cmt = line.find("//"); if (cmt != std::string::npos) line.erase(cmt);
-                size_t eq  = line.find('=');  if (eq  == std::string::npos) continue;
+                size_t eq = line.find('=');  if (eq == std::string::npos) continue;
 
                 std::string key = trim(line.substr(0, eq));
                 std::string val = trim(line.substr(eq + 1));
 
-                if (key == "casename")        caseName     = strip_quotes(val);
-                else if (key == "datetime")   datetime     = strip_quotes(val);
+                if (key == "casename")        caseName = strip_quotes(val);
+                else if (key == "datetime")   datetime = strip_quotes(val);
                 else if (key == "downstream_bc") downstream_bc = strip_quotes(val);
                 else if (key == "downstream_bc_yaw") downstream_bc_yaw = strip_quotes(val);
                 else if (key == "base_height") z_si_offset = (float)atof(val.c_str());
-                else if (key == "memory_lbm")  memory      = (uint)atoi(val.c_str());
-                else if (key == "si_x_cfd")    si_size.x   = second_val(val);
-                else if (key == "si_y_cfd")    si_size.y   = second_val(val);
-                else if (key == "si_z_cfd")    si_size.z   = second_val(val);
+                else if (key == "memory_lbm")  memory = (uint)atoi(val.c_str());
+                else if (key == "si_x_cfd")    si_size.x = second_val(val);
+                else if (key == "si_y_cfd")    si_size.y = second_val(val);
+                else if (key == "si_z_cfd")    si_size.z = second_val(val);
                 else if (key == "n_gpu")       parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "validation") validation = strip_quotes(val);
             }
             si_size.z += z_si_offset;
             if (!memory) memory = 6000u;
-            
+
             // Zero card is certainly not allowed
             if (Dx == 0u) Dx = 1u;
             if (Dy == 0u) Dy = 1u;
@@ -212,7 +205,8 @@ void main_setup() {
         println("|-----------------------------------------------------------------------------|");
         wait();
         exit(-1);
-    } else {
+    }
+    else {
         println("| Preprocessing validation passed.                                            |");
     }
 
@@ -220,12 +214,12 @@ void main_setup() {
         std::ostringstream os;
         os << std::fixed << std::setprecision(prec) << v;
         return os.str();
-    };
+        };
     auto fmt_sci = [](float v, int prec = 3) {
         std::ostringstream os;
         os << std::scientific << std::setprecision(prec) << v;
         return os.str();
-    };
+        };
 
 
     // print configurations
@@ -249,50 +243,23 @@ void main_setup() {
     println("| Grid resolution Nx,Ny,Nz = " + to_string(lbm_N.x) + "," + to_string(lbm_N.y) + "," + to_string(lbm_N.z) + "                                    |");
     units.set_m_kg_s((float)lbm_N.y, lbm_ref_u, 0.1f, si_size.y, si_ref_u, si_rho);
 
-    const float z_off = units.x(z_si_offset); 
+    const float z_off = units.x(z_si_offset);
 
     float lbm_nu = units.nu(si_nu);
     println("| LBM viscosity = " + fmt_sci(lbm_nu, 6) + "                                                    |");
 
 
     // read CSV
-    const std::string csv_path = get_exe_path() + std::string("../../../wrfInput/") + caseName + "/SurfData_"+datetime+".csv";
+    const std::string csv_path = get_exe_path() + std::string("../../../wrfInput/") + caseName + "/SurfData_" + datetime + ".csv";
 
     auto samples_si = read_samples(csv_path);
     println("| WRF data loaded = " + to_string(samples_si.size()) + "                                                     |");
     if (samples_si.empty()) { println("ERROR: no inlet samples. Aborting."); wait(); exit(-1); }
 
-    // 过滤：移除原始数据中 z = zmax 且不在 x 边界或 y 边界上的点
-    {
-        float xmin = FLT_MAX, ymin = FLT_MAX, zmin = FLT_MAX;
-        float xmax = -FLT_MAX, ymax = -FLT_MAX, zmax = -FLT_MAX;
-        for (const auto& s : samples_si) {
-            xmin = std::min(xmin, s.p.x); xmax = std::max(xmax, s.p.x);
-            ymin = std::min(ymin, s.p.y); ymax = std::max(ymax, s.p.y);
-            zmin = std::min(zmin, s.p.z); zmax = std::max(zmax, s.p.z);
-        }
-        const float rx = xmax - xmin;
-        const float ry = ymax - ymin;
-        const float rz = zmax - zmin;
-        const float tol = 1e-6f * std::max(rx, std::max(ry, rz));  // 浮点容差
-
-        std::vector<SamplePoint> kept; kept.reserve(samples_si.size());
-        for (const auto& s : samples_si) {
-            const bool on_bottom = std::fabs(s.p.z - zmin) <= tol;
-            const bool on_perimeter =
-                (std::fabs(s.p.x - xmin) <= tol) || (std::fabs(s.p.x - xmax) <= tol) ||
-                (std::fabs(s.p.y - ymin) <= tol) || (std::fabs(s.p.y - ymax) <= tol);
-            // 保留所有非顶层点，以及位于顶层但在周边一圈的点
-            if (!(on_bottom && !on_perimeter)) kept.push_back(s);
-        }
-        samples_si.swap(kept);
-        println("| WRF data kept after cull = " + to_string(samples_si.size()) + "                                     |");
-    }
-
     // convert samples to LBM units
     const float u_scale = lbm_ref_u / si_ref_u;
     std::vector<SamplePoint> samples; samples.reserve(samples_si.size());
-    for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x),units.x(s.p.y), units.x(s.p.z + z_si_offset));sp.u = s.u * u_scale; samples.push_back(sp); }
+    for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z + z_si_offset)); sp.u = s.u * u_scale; samples.push_back(sp); }
 
 
     // lwg multiple GPU
@@ -305,13 +272,13 @@ void main_setup() {
     for (auto& sp : samples) {
         sp.p.x += origin_lbmu.x;
         sp.p.y += origin_lbmu.y;
-        sp.p.z += origin_lbmu.z;        
+        sp.p.z += origin_lbmu.z;
     }
-    const float z0_lbmu = origin_lbmu.z;                    
+    const float z0_lbmu = origin_lbmu.z;
 
     //const float z0_lbmu = lbm.position(0u, 0u, 0u).z;   
 
-	// ------------------------------- MESH LOADING -------------------------------
+    // ------------------------------- MESH LOADING -------------------------------
     println("|-----------------------------------------------------------------------------|");
     println("| Loading buildings as geometry, meshing...                                   |");
 
@@ -332,64 +299,37 @@ void main_setup() {
 
     println("| Building BC: Connecting to WRF data (single-threading only for draft).      |");
 
-    println("| Time code: " + now_str()+ "                                              |") ;
-    
-    // 真三维 IDW 插值，不做桶与MLS
+    println("| Time code: " + now_str() + "                                              |");
+
+    // 真三维最邻近插值，不做桶与MLS
     std::function<float3(const float3&)> inlet_velocity;
+
     inlet_velocity = [&](const float3& pos)->float3 {
+        // 地基以下置零
         if (pos.z <= z0_lbmu) {
             return float3(0.0f);
         }
-        static const int K = 48;
-        float best_r2[K];
-        int   best_i[K];
-        for (int j = 0; j < K; ++j) { best_r2[j] = FLT_MAX; best_i[j] = -1; }
 
+        int   best_i = -1;
+        float best_r2 = FLT_MAX;
+
+        // 线性扫描最近样本
         for (size_t i = 0; i < samples.size(); ++i) {
             const auto& sp = samples[i];
             float dx = sp.p.x - pos.x;
             float dy = sp.p.y - pos.y;
             float dz = sp.p.z - pos.z;
             float r2 = dx * dx + dy * dy + dz * dz;
-
-            if (r2 == 0.0f) {
-                return sp.u;
-            }
-            int worst = 0;
-            float worst_r2 = best_r2[0];
-            for (int j = 1; j < K; ++j) {
-                if (best_r2[j] > worst_r2) { worst_r2 = best_r2[j]; worst = j; }
-            }
-            if (r2 < worst_r2) {
-                best_r2[worst] = r2;
-                best_i[worst] = static_cast<int>(i);
+            if (r2 < best_r2) {
+                best_r2 = r2;
+                best_i = static_cast<int>(i);
             }
         }
 
-        const float eps = 1e-12f;
-        float r2_max = 0.0f;
-        for (int j = 0; j < K; ++j) {
-            if (best_i[j] >= 0 && best_r2[j] > r2_max) r2_max = best_r2[j];
+        if (best_i >= 0) {
+            return samples[static_cast<size_t>(best_i)].u;
         }
-        // 与局部采样间距绑定的正则化尺度，alpha 可按需微调
-        const float alpha = 0.0625f;           // 典型取值 1/16
-        const float delta2 = alpha * r2_max;   // 正则化项，避免 r→0 的奇异权重
-
-        float wsum = 0.0f;
-        float3 usum = float3(0.0f);
-        for (int j = 0; j < K; ++j) {
-            if (best_i[j] < 0) continue;
-            float w = 1.0f / (best_r2[j] + delta2);
-            const float3 u = samples[best_i[j]].u;
-            usum.x += u.x * w;
-            usum.y += u.y * w;
-            usum.z += u.z * w;
-            wsum += w;
-        }
-
-        if (wsum > 0.0f) {
-            return float3(usum.x / wsum, usum.y / wsum, usum.z / wsum);
-        }
+        // 理论上不会到此。给出安全回退
         return float3(0.0f);
         };
 
@@ -397,7 +337,7 @@ void main_setup() {
 
     // PML nLayers
     const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
-    const uint N_ABSORB = 10u;            
+    const uint N_ABSORB = 10u;
 
     std::atomic<ulong> inlet_face_count(0), outlet_face_count(0);
     std::atomic<ulong> inlet_grid_count(0), outlet_grid_count(0);
@@ -474,18 +414,18 @@ void main_setup() {
 
 
     // All others are inlet
-    bool inlet = ( (x == 0u || x == Nx - 1u ||
-                    y == 0u || y == Ny - 1u ||
-                    z == Nz - 1u) && !outlet );
+    bool inlet = ((x == 0u || x == Nx - 1u ||
+        y == 0u || y == Ny - 1u ||
+        z == Nz - 1u) && !outlet);
 
     if (inlet) {
         lbm.flags[n] = TYPE_E; // 仅标记入口，插值放到第二轮
         ulong idx = heavy_write_pos.fetch_add(1, std::memory_order_relaxed);
-    #ifndef NDEBUG
+#ifndef NDEBUG
         if (idx >= TOT_HEAVY) {
             println("ERROR: heavy_nodes overflow");
         }
-    #endif
+#endif
         if (idx < TOT_HEAVY) heavy_nodes[idx] = n;
     }
 
@@ -514,8 +454,7 @@ void main_setup() {
             lbm.coordinates(n, x, y, z);
             const float3 pos = lbm.position(x, y, z);
 
-            float3 u = inlet_velocity(pos); // 使用真三维 IDW
-
+            float3 u = inlet_velocity(pos);     // 仍然是原来的最近邻
             lbm.u.x[n] = u.x;
             lbm.u.y[n] = u.y;
             lbm.u.z[n] = u.z;
@@ -539,9 +478,9 @@ void main_setup() {
     // ------------------------------------------------------------------- graphics & run --------------------------------------------------------------------
     lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
-    const ulong lbm_T = 100001ull; 
+    const ulong lbm_T = 100001ull;
     const uint  vtk_dt = 20000u;        // export VTK every 20 time steps
-    const std::string vtk_dir = get_exe_path() + std::string("../../../caseData/") + caseName + "/"+datetime+"_raw_";
+    const std::string vtk_dir = get_exe_path() + std::string("../../../caseData/") + caseName + "/" + datetime + "_raw_";
     //const string vtk_dir = get_exe_path() + "vtk/"; // ensure this directory exists beforehand
 
 #if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)

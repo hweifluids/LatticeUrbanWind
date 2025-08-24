@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+xarray
+geopandas
+shapely
+vtk
+pyvista
+trimesh
+netCDF4

@@ -1,5 +1,6 @@
-import subprocess
 
-cmd = ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"]
-total_mem_mib = int(subprocess.check_output(cmd).decode().split()[0])
-print(f"GPU0 Memory is {total_mem_mib} MiB")
+from dask.distributed import Client, LocalCluster
+c = Client(LocalCluster())
+print(c)
+c.close()
+PY

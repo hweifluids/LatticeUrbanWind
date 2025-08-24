@@ -13,6 +13,8 @@ import geopandas as gpd
 from shapely.geometry import Point
 import shutil
 
+import dask
+from dask import config as dask_config
 
 ## Filling the basement
 def _forward_fill_whole_layer(u: np.ndarray, v: np.ndarray) -> None:
@@ -58,7 +60,8 @@ def buildBC(
     else:
         print("No conf.txt found: use provided nc_path and no cropping")
     print(f"Opening: {nc_path}...")
-    ds = xr.open_dataset(nc_path)
+    ds = xr.open_dataset(nc_path, chunks={"lon": 64, "lat": 64})
+
 
     # --- if conf.txt gives cut_lon / cut_lat, then perform cut ------------------
     m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", txt)
@@ -87,35 +90,35 @@ def buildBC(
         vert = "height_agl"
     else:
         raise ValueError("Cannot find height field 'lev' or 'height_agl'.")
+    
+    dask_config.set(scheduler="processes")
+    ds = ds.chunk({vert: max(1, ds.sizes[vert] // 4)})
+
+
     # read wind and height
-    u   = ds[var_u].transpose(vert, "lat", "lon").astype(np.float32).values
-    v   = ds[var_v].transpose(vert, "lat", "lon").astype(np.float32).values
-    # try read vertical velocity; if absent, fill zeros
     var_w = "w"
-    w = (ds[var_w].transpose(vert, "lat", "lon").astype(np.float32).values
-         if var_w in ds.variables else np.zeros_like(u))
 
-
-    lev = ds[vert].values                          # double precision
-    lon = ds["lon"].values
-    lat = ds["lat"].values
  
     # —— interpolation —— # To be revised - Huanxia
-    target_n = 50
+    target_n_map = {"lon": 200, "lat": 200, vert: 10}
     new_coords = {}
     for dim in ("lon", "lat", vert):
+        target_n = target_n_map[dim]
         if ds.sizes[dim] < target_n:
             coords = ds[dim].values
             new_coords[dim] = np.linspace(coords[0], coords[-1],
-                                         target_n, dtype=coords.dtype)
+                                        target_n, dtype=coords.dtype)
             # lwg: 此处插值坐标应与配置文件中目标网格一致 , 高度未考虑 
             # new_coords[dim] = np.linspace(eval(f"{dim}_min_c"), eval(f"{dim}_max_c"), target_n, dtype=coords.dtype)
             print(f"Dimension '{dim}' has only {ds.sizes[dim]} points, "
                 f"interpolate to {target_n}.")
+
     
     # one order interpolation
     if new_coords:
-        ds = ds.interp(new_coords,method="pchip")
+        ds = ds.interp(new_coords, method="pchip")
+        ds = ds.persist()
+
 
         # re-extraction
         u   = ds[var_u].transpose(vert, "lat", "lon").astype(np.float32).values
