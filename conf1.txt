@@ -1,0 +1,48 @@
+casename = shanghai
+cut_lon_manual=[121.3,121.7]
+cut_lat_manual=[31.1,31.4]
+
+// Original SHP Range
+orig_lon = [120.901520, 121.968088]
+orig_lat = [30.706903, 31.814999]
+orig_height = [0.000000, 48900.000000]
+
+// Projected SHP SI Range
+si_x_cfd = [0.000000, 38197.065448]
+si_y_cfd = [0.000000, 33292.031395]
+si_height = [0.000000, 53900.000000]
+
+// WRF Data Projected SI Range (global / before shift)
+si_x = [910255.906102, 948452.899354]
+si_y = [3448645.709940, 3481937.736132]
+si_z_cfd = [0.000000, 1000.000000]
+
+// WRF Data Range (raw data)
+cut_lon = [121.300000, 121.700000]
+cut_lat = [31.100000, 31.400000]
+
+// Basement Configurations for Model Voxelization
+base_height = 50.0
+base_height_manual = 50
+
+// Mean velocity uvw (volumetric / boundary / downstream with angle)
+um_vol = [0.452075, 0.772608, 0.092566]
+um_bc = [0.465594, 1.325803, 0.000000]
+downstream_bc = "+y"
+downstream_bc_yaw = 30.33
+
+// CFD control
+n_gpu = [2, 1, 1]
+datetime = 20990101120000
+memory_lbm = 40000
+validation = pass
+
+
+
+
+
+
+
+
+
+
