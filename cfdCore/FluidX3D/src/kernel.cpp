@@ -2111,7 +2111,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 	return (uint)index_transfer_data[side_i];
 }
 )+R(void extract_fi(const uint a, const uint A, const uxx n, const uint side, const ulong t, global fpxx_copy* transfer_buffer, const global fpxx_copy* fi) {
-	uxx j[def_velocity_set]; // neighbor indices
+	uxx j[def_velocity_set]; // neighbor indices testing
 	neighbors(n, j); // calculate neighbor indices
 	for(uint b=0u; b<def_transfers; b++) {
 		const uint i = index_transfer(side*def_transfers+b);
