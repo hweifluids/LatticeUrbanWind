@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+error() { echo "ERROR: $1" >&2; exit 2; }
+
+# Must have LUW_HOME set
+: "${LUW_HOME:?LUW_HOME is not set}"
+
+# Select Python interpreter. Prefer $PYTHON, then look for python3 or python
+if [[ -n "${PYTHON:-}" ]]; then
+  PY="$PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="python3"
+elif command -v python >/dev/null 2>&1; then
+  PY="python"
+else
+  error "No python interpreter found. Install python3 or set \$PYTHON"
+fi
+
+target="$LUW_HOME/core/tools_core/shpInspect.py"
+[[ -f "$target" ]] || error "Target script not found: $target"
+
+# Parse deck parameter. If not provided, auto-detect in current directory
+ConfPath="${1:-}"
+if [[ -z "$ConfPath" ]]; then
+  if [[ -f "conf.luw" ]]; then
+    ConfPath="conf.luw"
+  else
+    shopt -s nullglob
+    luws=( *.luw )
+    shopt -u nullglob
+    if [[ ${#luws[@]} -eq 1 ]]; then
+      ConfPath="${luws[0]}"
+    else
+      echo "Usage: shpinspect <path-to-conf.luw>. No conf.luw in current directory and no unique *.luw found." >&2
+      exit 2
+    fi
+  fi
+fi
+
+# Check conf file exists, get absolute path
+if command -v realpath >/dev/null 2>&1; then
+  ConfPathAbs="$(realpath -m -- "$ConfPath")"
+else
+  ConfPathAbs="$("$PY" - <<'PYEOF' "$ConfPath"
+import os, sys
+p = sys.argv[1]
+print(os.path.abspath(p))
+PYEOF
+)"
+fi
+[[ -f "$ConfPathAbs" ]] || error "Conf file not found: $ConfPathAbs"
+
+exec "$PY" "$target" "$ConfPathAbs"

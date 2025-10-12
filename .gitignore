@@ -1,21 +1,22 @@
+# Virtual env at repo root
+/.venv/
 
-.vscode/
-/*.log
-/conf.txt
-/logfile
+# FluidX3D generated folders
+/core/cfd_core/FluidX3D/temp/
+/core/cfd_core/FluidX3D/bin/export/
+/core/cfd_core/FluidX3D/.vs/
 
-/caseData/*/
+# Files anywhere
+*.vcxproj.user
+*.log
+*.vtk
 
-/geoData/*/
-!/geoData/example/
-!/geoData/example/**
+# Ignore all files under /example, including files in subfolders
+/example/**
 
-/wrfInput/*/
-!/wrfInput/example/
-!/wrfInput/example/**
+# Re-allow directories so we can unignore specific files
+!/example/**/
 
-cfdCore/FluidX3D/bin/
-cfdCore/FluidX3D/temp/
-cfdCore/FluidX3D/stl/
-cfdCore/FluidX3D/.vs/
-cfdCore/FluidX3D/FluidX3D.vcxproj.user
+# Do not ignore .luw files under /example at any depth
+!/example/*.luw
+!/example/**/*.luw
