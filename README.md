@@ -1,6 +1,6 @@
-Installation:
+## Installation:
 
-## 1. Install GPU Drivers and OpenCL Runtime
+**1. Install GPU Drivers and OpenCL Runtime**
 
 
 - **Windows**
@@ -84,22 +84,10 @@ Installation:
     ```
   </details>
 
-- **Android**
-  <details><summary>ARM GPUs</summary>
-
-  - Download the [Termux `.apk`](https://github.com/termux/termux-app/releases) and install it.
-  - In the Termux app, run:
-    ```bash
-    apt update && apt upgrade -y
-    apt install -y clang git make
-    ```
-
-  </details>
-
 <br>
 
 
-Usage:
+## Usage:
 
 The $project_path$ mentioned below is the parent folder of deck file (*.luw, the configuration file). You can actually place it anywhere you would like, and name the folder as you like (casename is suggested).
 
@@ -129,4 +117,4 @@ The following commands are provided by this package. The deck file could be auto
 
 "visluw" translate vtk file from utm to lat/lon, save to *.npz and *.nc, and generate sectional views of velocity.
 
-(Under development) "visluw <path-to-vtk>" will compute vorticity and, if possible, pressure, from a vtk result file.  
+(Under development) "analyseluw <path-to-vtk>" will compute vorticity and, if possible, pressure, from a vtk result file.  
