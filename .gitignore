@@ -3,9 +3,9 @@
 
 # FluidX3D generated folders
 /core/cfd_core/FluidX3D/temp/
-/core/cfd_core/FluidX3D/bin/export/
+/core/cfd_core/FluidX3D/bin/**
 /core/cfd_core/FluidX3D/.vs/
-
+/core/cfd_core/FluidX3D-3.5/
 # Files anywhere
 *.vcxproj.user
 *.log
