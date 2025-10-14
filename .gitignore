@@ -13,9 +13,11 @@
 
 # Ignore all files under /example, including files in subfolders
 /example/**
+/run/**
 
 # Re-allow directories so we can unignore specific files
 !/example/**/
+!/run/readme.txt
 
 # Do not ignore .luw files under /example at any depth
 !/example/*.luw
