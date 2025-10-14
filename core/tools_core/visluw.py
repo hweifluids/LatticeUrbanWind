@@ -232,11 +232,13 @@ class WindFieldProcessor:
     """Wind field processor using PyVista structured grid and index-based cropping."""
 
     def __init__(self,
-                 vtk_file_path: str,
-                 transformer_fwd: Transformer,
-                 transformer_inv: Transformer,
-                 center_lon: float,
-                 center_lat: float) -> None:
+                vtk_file_path: str,
+                transformer_fwd: Transformer,
+                transformer_inv: Transformer,
+                center_lon: float,
+                center_lat: float,
+                si_x_cfd: Optional[List[float]] = None,
+                si_y_cfd: Optional[List[float]] = None) -> None:
         self.vtk_file_path = vtk_file_path
         self.mesh: Optional[pv.StructuredGrid] = None
         self.wind_data: Optional[np.ndarray] = None
@@ -245,9 +247,13 @@ class WindFieldProcessor:
         # Geodesy
         self.transformer_fwd = transformer_fwd   # lon/lat -> UTM
         self.transformer_inv = transformer_inv   # UTM -> lon/lat
-        self.center_lon = float(center_lon)
-        self.center_lat = float(center_lat)
+        self.center_lon = float(center_lon)      # SW corner lon
+        self.center_lat = float(center_lat)      # SW corner lat
         self.center_utm = self.transformer_fwd.transform(self.center_lon, self.center_lat)
+
+        # Optional CFD meter ranges, e.g., [0.0, 38156.18], [0.0, 33276.73]
+        self.si_x_cfd = si_x_cfd
+        self.si_y_cfd = si_y_cfd
 
         # Vertical info
         self.zmin_vtk: Optional[float] = None
@@ -258,6 +264,7 @@ class WindFieldProcessor:
 
         # For plotting extent equal to the per-layer mapped min/max
         self.crop_lonlat_extent: Optional[Tuple[float, float, float, float]] = None
+
 
     def load_vtk(self) -> None:
         """Load VTK using PyVista and cache bounds."""
@@ -289,15 +296,33 @@ class WindFieldProcessor:
         # Store the requested lon/lat crop as a reference
         self.crop_lonlat_extent = (float(lon_min), float(lon_max), float(lat_min), float(lat_max))
 
+        # Compute full-grid XY extents in VTK coordinates
+        nx_full, ny_full, nz_full = self.mesh.dimensions
+        origin = self.mesh.origin
+        spacing = self.mesh.spacing
+        x_full_min = float(origin[0])
+        x_full_max = float(origin[0] + (nx_full - 1) * spacing[0])
+        y_full_min = float(origin[1])
+        y_full_max = float(origin[1] + (ny_full - 1) * spacing[1])
+
+        # Optional scale factors from VTK units to CFD meters
+        sx = 1.0
+        sy = 1.0
+        if self.si_x_cfd and len(self.si_x_cfd) == 2:
+            sx = (self.si_x_cfd[1] - self.si_x_cfd[0]) / max(x_full_max - x_full_min, 1e-12)
+        if self.si_y_cfd and len(self.si_y_cfd) == 2:
+            sy = (self.si_y_cfd[1] - self.si_y_cfd[0]) / max(y_full_max - y_full_min, 1e-12)
+
         # Convert lon/lat box to UTM meters
         xmin_utm, ymin_utm = self.transformer_fwd.transform(lon_min, lat_min)
         xmax_utm, ymax_utm = self.transformer_fwd.transform(lon_max, lat_max)
 
-        # Map to VTK-relative coordinates by subtracting the UTM coordinates of the chosen center
-        x_vtk_min = xmin_utm - self.center_utm[0]
-        x_vtk_max = xmax_utm - self.center_utm[0]
-        y_vtk_min = ymin_utm - self.center_utm[1]
-        y_vtk_max = ymax_utm - self.center_utm[1]
+        # Map UTM meters to VTK coordinates referenced to SW origin
+        x_vtk_min = x_full_min + (xmin_utm - self.center_utm[0]) / sx
+        x_vtk_max = x_full_min + (xmax_utm - self.center_utm[0]) / sx
+        y_vtk_min = y_full_min + (ymin_utm - self.center_utm[1]) / sy
+        y_vtk_max = y_full_min + (ymax_utm - self.center_utm[1]) / sy
+
 
         # Build full coordinate axes in VTK coordinates
         nx_full, ny_full, nz_full = self.mesh.dimensions
@@ -421,24 +446,29 @@ class WindFieldProcessor:
         x_vtk = np.array(self.grid_info["x_coords_vtk"])  # length nx
         y_vtk = np.array(self.grid_info["y_coords_vtk"])  # length ny
 
-        # Map cropped VTK x/y linearly to the user-entered lon/lat box in UTM
-        if self.crop_lonlat_extent is not None:
-            lon_min, lon_max, lat_min, lat_max = self.crop_lonlat_extent
-        else:
-            lon_min, lon_max, lat_min, lat_max = 0.0, 1.0, 0.0, 1.0  # fallback
+        # Map VTK x/y to absolute UTM using SW origin and optional CFD meter scaling
+        nx_full, ny_full, _ = self.mesh.dimensions
+        origin = self.mesh.origin
+        spacing = self.mesh.spacing
+        x_full_min = float(origin[0])
+        x_full_max = float(origin[0] + (nx_full - 1) * spacing[0])
+        y_full_min = float(origin[1])
+        y_full_max = float(origin[1] + (ny_full - 1) * spacing[1])
 
-        ux_min, uy_min = self.transformer_fwd.transform(lon_min, lat_min)
-        ux_max, uy_max = self.transformer_fwd.transform(lon_max, lat_max)
+        sx = 1.0
+        sy = 1.0
+        if self.si_x_cfd and len(self.si_x_cfd) == 2:
+            sx = (self.si_x_cfd[1] - self.si_x_cfd[0]) / max(x_full_max - x_full_min, 1e-12)
+        if self.si_y_cfd and len(self.si_y_cfd) == 2:
+            sy = (self.si_y_cfd[1] - self.si_y_cfd[0]) / max(y_full_max - y_full_min, 1e-12)
 
-        x_vmin, x_vmax = float(x_vtk.min()), float(x_vtk.max())
-        y_vmin, y_vmax = float(y_vtk.min()), float(y_vtk.max())
-        denom_x = x_vmax - x_vmin if x_vmax != x_vmin else 1.0
-        denom_y = y_vmax - y_vmin if y_vmax != y_vmin else 1.0
-        x_abs = ux_min + (x_vtk - x_vmin) * (ux_max - ux_min) / denom_x
-        y_abs = uy_min + (y_vtk - y_vmin) * (uy_max - uy_min) / denom_y
+        swx, swy = self.center_utm
+        x_abs = swx + (x_vtk - x_full_min) * sx
+        y_abs = swy + (y_vtk - y_full_min) * sy
 
-        X_abs, Y_abs = np.meshgrid(x_abs, y_abs, indexing="xy")   # (ny, nx)
+        X_abs, Y_abs = np.meshgrid(x_abs, y_abs, indexing="xy")
         lon_flat, lat_flat = self.transformer_inv.transform(X_abs.ravel(), Y_abs.ravel())
+
         lon2d = np.asarray(lon_flat, dtype=np.float64).reshape((ny, nx))
         lat2d = np.asarray(lat_flat, dtype=np.float64).reshape((ny, nx))
         
@@ -559,24 +589,31 @@ class WindFieldProcessor:
         # Build lon/lat grid by the same linear mapping used for NetCDF so axes match exactly
         x_vtk = np.array(self.grid_info["x_coords_vtk"])
         y_vtk = np.array(self.grid_info["y_coords_vtk"])
-        if self.crop_lonlat_extent is not None:
-            lon_min_ref, lon_max_ref, lat_min_ref, lat_max_ref = self.crop_lonlat_extent
-        else:
-            lon_min_ref, lon_max_ref, lat_min_ref, lat_max_ref = 0.0, 1.0, 0.0, 1.0
+        
+        # Build lon/lat grid via SW-origin mapping with optional CFD scaling
+        nx_full, ny_full, _ = self.mesh.dimensions
+        origin = self.mesh.origin
+        spacing = self.mesh.spacing
+        x_full_min = float(origin[0])
+        x_full_max = float(origin[0] + (nx_full - 1) * spacing[0])
+        y_full_min = float(origin[1])
+        y_full_max = float(origin[1] + (ny_full - 1) * spacing[1])
 
-        ux_min, uy_min = self.transformer_fwd.transform(lon_min_ref, lat_min_ref)
-        ux_max, uy_max = self.transformer_fwd.transform(lon_max_ref, lat_max_ref)
+        sx = 1.0
+        sy = 1.0
+        if self.si_x_cfd and len(self.si_x_cfd) == 2:
+            sx = (self.si_x_cfd[1] - self.si_x_cfd[0]) / max(x_full_max - x_full_min, 1e-12)
+        if self.si_y_cfd and len(self.si_y_cfd) == 2:
+            sy = (self.si_y_cfd[1] - self.si_y_cfd[0]) / max(y_full_max - y_full_min, 1e-12)
 
-        x_vmin, x_vmax = float(x_vtk.min()), float(x_vtk.max())
-        y_vmin, y_vmax = float(y_vtk.min()), float(y_vtk.max())
-        denom_x = x_vmax - x_vmin if x_vmax != x_vmin else 1.0
-        denom_y = y_vmax - y_vmin if y_vmax != y_vmin else 1.0
-        x_abs = ux_min + (x_vtk - x_vmin) * (ux_max - ux_min) / denom_x
-        y_abs = uy_min + (y_vtk - y_vmin) * (uy_max - uy_min) / denom_y
+        swx, swy = self.center_utm
+        x_abs = swx + (x_vtk - x_full_min) * sx
+        y_abs = swy + (y_vtk - y_full_min) * sy
         X_abs, Y_abs = np.meshgrid(x_abs, y_abs, indexing="xy")
         lon_flat, lat_flat = self.transformer_inv.transform(X_abs.ravel(), Y_abs.ravel())
         lon2d = np.asarray(lon_flat, dtype=np.float64).reshape(Y_abs.shape)
         lat2d = np.asarray(lat_flat, dtype=np.float64).reshape(Y_abs.shape)
+
 
         # Common color scale
         vmin = 0.0
@@ -654,6 +691,8 @@ def main() -> None:
     # Read LUW
     try:
         cfg = read_luw(luw_path)
+        si_x_cfd = cfg.get("si_x_cfd", None)
+        si_y_cfd = cfg.get("si_y_cfd", None)
     except SystemExit:
         raise
     except Exception as e:
@@ -665,7 +704,7 @@ def main() -> None:
     if not casename:
         soft_exit("Missing casename in LUW. Please add: casename = your_case")
     if not dtstr or not re.fullmatch(r'\d{14}', dtstr):
-        soft_exit("Missing or invalid datetime in LUW. Expected format yyyymmddHHMMSS.")
+        soft_exit("Missing or invalid datetime in LUW. Expected format yyyymmddHHMMSS. Run tranluw first.")
 
     # Defaults for interactive crop from LUW if available
     lon_defaults = cfg.get("cut_lon_manual", None)
@@ -711,18 +750,18 @@ def main() -> None:
     if not confirm_proceed("Press ENTER to proceed, or type 'y'/'yes'. Any other key to abort:"):
         soft_exit("User did not confirm the crop box.")
 
-    # Determine center lon/lat with LUW-first strategy to avoid XY-to-geo mismatch
+    # Set mapping origin to the SW corner of the CFD grid. This origin corresponds to VTK (0,0).
     if center_lon_luw is not None and center_lat_luw is not None:
         center_lon = float(center_lon_luw)
         center_lat = float(center_lat_luw)
-    elif (lon_min_def is not None and lon_max_def is not None and
-          lat_min_def is not None and lat_max_def is not None):
-        center_lon = 0.5 * (lon_min_def + lon_max_def)
-        center_lat = 0.5 * (lat_min_def + lat_max_def)
+    elif (lon_min_def is not None and lat_min_def is not None):
+        center_lon = float(lon_min_def)
+        center_lat = float(lat_min_def)
     else:
-        center_lon = 0.5 * (lon_min + lon_max)
-        center_lat = 0.5 * (lat_min + lat_max)
-    print(f"[INFO] Mapping center set to lon {center_lon}, lat {center_lat} based on LUW preference")
+        center_lon = float(lon_min)
+        center_lat = float(lat_min)
+    print(f"[INFO] Mapping origin set to SW corner at lon {center_lon}, lat {center_lat}")
+
 
     # Ask for number of layers to export
     try:
@@ -745,7 +784,10 @@ def main() -> None:
 
     # Process
     try:
-        processor = WindFieldProcessor(vtk_path, transformer_fwd, transformer_inv, center_lon, center_lat)
+        processor = WindFieldProcessor(
+            vtk_path, transformer_fwd, transformer_inv, center_lon, center_lat,
+            si_x_cfd=si_x_cfd, si_y_cfd=si_y_cfd
+        )
         processor.load_vtk()
         processor.plan_crop_from_lonlat(lon_min, lon_max, lat_min, lat_max)
         processor.extract_structured_grid()
