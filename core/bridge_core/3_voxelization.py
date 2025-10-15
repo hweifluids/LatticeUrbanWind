@@ -72,9 +72,11 @@ def extrude_polygon_to_mesh(poly: Polygon, height: float) -> trimesh.Trimesh:
         poly_2d = Polygon(exterior_2d)
 
     try:
+        print("[INFO] Trying to extrude polygon using 'earcut' engine")
         return trimesh.creation.extrude_polygon(poly_2d, height, engine="earcut")
     except Exception:
         try:
+            print("[INFO] Trying to extrude polygon using 'triangle' engine")
             return trimesh.creation.extrude_polygon(poly_2d, height, engine="triangle")
         except Exception as e:
             raise RuntimeError("No triangulation engine available, please install mapbox_earcut or triangle") from e
