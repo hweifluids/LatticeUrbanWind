@@ -31,6 +31,7 @@ uint Dx = 1u, Dy = 1u, Dz = 1u;
 std::string conf_used_path = "Integrated defaults (*.luw not found)";
 bool use_high_order = false;
 bool flux_correction = false;
+uint research_output_steps = 0u; // <-- [新功能] 存储 research_output 的步数
 
 struct SamplePoint { float3 p; float3 u; };
 
@@ -205,9 +206,9 @@ void main_setup() {
                 else if (key == "gpu_memory")   gpu_memory_val = unquote(val);
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
-
+                else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
             }
-            si_size.z += z_si_offset;
+            // si_size.z += z_si_offset;
             if (!memory) memory = 6000u;
             if (Dx == 0u) Dx = 1u;
             if (Dy == 0u) Dy = 1u;
@@ -307,7 +308,7 @@ void main_setup() {
     // convert samples to LBM units
     const float u_scale = lbm_ref_u / si_ref_u;
     std::vector<SamplePoint> samples; samples.reserve(samples_si.size());
-    for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x),units.x(s.p.y), units.x(s.p.z + z_si_offset));sp.u = s.u * u_scale; samples.push_back(sp); }
+    for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z)); sp.u = s.u * u_scale; samples.push_back(sp);}
 
 
     // lwg 多GPU
@@ -338,20 +339,31 @@ void main_setup() {
             wait(); exit(-1);
         }
         const std::string prefix = caseName;
-        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-            if (!entry.is_regular_file()) continue;
-            const std::string fname = entry.path().filename().string();
-            if (fname.size() >= prefix.size() + 4 &&
-                fname.substr(0, prefix.size()) == prefix &&
-                entry.path().extension() == ".stl") {
-                stl_path = entry.path().string();
-                break; // first match
+
+        // First try {parent}/proj_temp/{caseName}_DEM.stl
+        const std::filesystem::path dem_candidate = dir / (prefix + "_DEM.stl");
+        if (std::filesystem::exists(dem_candidate) && std::filesystem::is_regular_file(dem_candidate)) {
+            stl_path = dem_candidate.string();
+        }
+        else {
+            // Fallback to any {caseName}*.stl
+            for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                if (!entry.is_regular_file()) continue;
+                const std::string fname = entry.path().filename().string();
+                if (fname.size() >= prefix.size() + 4 &&
+                    fname.substr(0, prefix.size()) == prefix &&
+                    entry.path().extension() == ".stl") {
+                    stl_path = entry.path().string();
+                    break; // first match
+                }
             }
         }
+
         if (stl_path.empty()) {
-            println("ERROR: no STL file matching pattern " + prefix + "*.stl under " + dir.string());
+            println("ERROR: no STL file. Tried " + dem_candidate.string() + " then " + prefix + "*.stl under " + dir.string());
             wait(); exit(-1);
         }
+
     }
     Mesh* mesh = read_stl(stl_path);
 
@@ -379,7 +391,9 @@ void main_setup() {
 
     if (use_high_order) {
         KNNInterpolatorHD knn_hd(std::move(P), std::move(Uv));
-        InletVelocityFieldHD inlet_hd(knn_hd, z0_lbmu, z_off);
+		// Calculate z base threshold in LBM units
+        const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu;
+        InletVelocityFieldHD inlet_hd(knn_hd, z_base_threshold_lbmu);
         apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd);
         println("| [" + now_str() + "] Boundary initialization complete (high-order).        |");
 
@@ -460,6 +474,41 @@ void main_setup() {
     }
     println("| Task finished: " + now_str() + "                                                |");
 
+    if (research_output_steps > 0) {
+        println("|-----------------------------------------------------------------------------|");
+        println("| Starting research output phase: " + to_string(research_output_steps) + " steps...                        |");
+
+        std::vector<std::string> vtk_filenames;
+        vtk_filenames.reserve(research_output_steps);
+
+        const ulong lbm_T_research = lbm.get_t() + research_output_steps;
+
+        while (lbm.get_t() < lbm_T_research) {
+            lbm.run(1u, lbm_T_research);
+            lbm.u.write_device_to_vtk(vtk_dir, true);
+            // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
+            lbm.rho.write_device_to_vtk(vtk_dir, true);
+        }
+
+        println("| Research output phase complete. Writing transform.info...             |");
+
+		// 4. Write transform.info
+        std::string info_path = parent + "/proj_temp/transform.info";
+        std::ofstream info_file(info_path);
+        if (info_file.is_open()) {
+            // dt_si = (cell_m / 1.0) * (lbm_ref_u / si_ref_u) * 1.0
+            const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+
+            info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
+
+            info_file.close();
+            println("| Successfully wrote " + info_path + " |");
+        }
+        else {
+            println("ERROR: Could not open " + info_path + " for writing.");
+        }
+    }
+
 #else // GRAPHICS + INTERACTIVE or pure CLI
     while (lbm.get_t() < lbm_T) {
         if (lbm.get_t() % vtk_dt == 0u) {
@@ -467,6 +516,40 @@ void main_setup() {
             lbm.write_vtk(vtk_file, true, true);
         }
         lbm.run(1u, lbm_T);
+    }
+    if (research_output_steps > 0) {
+        println("|-----------------------------------------------------------------------------|");
+        println("| Starting research output phase: " + to_string(research_output_steps) + " steps...                        |");
+
+        std::vector<std::string> vtk_filenames;
+        vtk_filenames.reserve(research_output_steps);
+
+        const ulong lbm_T_research = lbm.get_t() + research_output_steps;
+
+        while (lbm.get_t() < lbm_T_research) {
+            lbm.run(1u, lbm_T_research);
+            lbm.u.write_device_to_vtk(vtk_dir, true);
+            // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
+            lbm.rho.write_device_to_vtk(vtk_dir, true);
+        }
+
+        println("| Research output phase complete. Writing transform.info...             |");
+
+        // 4. write transform.info
+        std::string info_path = parent + "/proj_temp/transform.info";
+        std::ofstream info_file(info_path);
+        if (info_file.is_open()) {
+            // dt_si = (cell_m / 1.0) * (lbm_ref_u / si_ref_u) * 1.0
+            const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+
+            info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
+
+            info_file.close();
+            println("| Successfully wrote " + info_path + " |");
+        }
+        else {
+            println("ERROR: Could not open " + info_path + " for writing.");
+        }
     }
 #endif
 }

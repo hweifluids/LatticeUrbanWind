@@ -23,18 +23,17 @@ private:
     std::vector<float3> U_;
 };
 
-// 入口速度场包装器：在 z0 平面之上施加 zoff 的采样偏移
 class InletVelocityFieldHD {
 public:
-    InletVelocityFieldHD(const InletInterpolatorHD& interp, float z0, float zoff)
-        : interp_(interp), z0_(z0), zoff_(zoff) {}
+    InletVelocityFieldHD(const InletInterpolatorHD& interp, float z_base_lbmu)
+        : interp_(interp), z_base_lbmu_(z_base_lbmu) {
+    }
 
     float3 operator()(const float3& pos) const;
 
 private:
     const InletInterpolatorHD& interp_;
-    float z0_;
-    float zoff_;
+    float z_base_lbmu_;
 };
 
 // 高阶版本的入口与出口赋值

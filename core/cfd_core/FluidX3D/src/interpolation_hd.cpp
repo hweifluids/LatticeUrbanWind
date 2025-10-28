@@ -90,10 +90,12 @@ float3 KNNInterpolatorHD::eval(const float3& pos) const {
 }
 
 float3 InletVelocityFieldHD::operator()(const float3& pos) const {
-    float3 q = pos;
-    const float zq = z0_ + zoff_;
-    if (q.z < zq) q.z = zq;
-    return interp_.eval(q);
+	// Check if below z threshold
+    if (pos.z < z_base_lbmu_) {
+		// Velocity zero below threshold
+        return float3{ 0.0f, 0.0f, 0.0f };
+    }
+        return interp_.eval(pos);
 }
 
 // ======================= Parellel computing =======================
