@@ -1,4 +1,4 @@
-Copyright (c) 2024-2025 Huanxia Wei
+Copyright (c) 2024-2025 Huanxia Wei @ UniManchester and Cao Yue @ UCB
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to use this software for public research, education or personal use, and to alter it and redistribute it freely, subject to the following restrictions:
 1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software. Altered source versions must be plainly marked as such, and must not be misrepresented as being the original software.
