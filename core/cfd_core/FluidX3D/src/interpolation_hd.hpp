@@ -3,14 +3,11 @@
 #include <vector>
 #include <string>
 
-// 本头文件提供“高阶插值”版本的独立接口，符号名与基础版不同，可同时编译链接。
-
 struct InletInterpolatorHD {
     virtual ~InletInterpolatorHD() = default;
     virtual float3 eval(const float3& pos) const = 0;
 };
 
-// K 近邻反距离加权插值器（固定 K，线性扫描样本集）
 class KNNInterpolatorHD final : public InletInterpolatorHD {
 public:
     KNNInterpolatorHD(std::vector<float3> points, std::vector<float3> velocities)
@@ -36,7 +33,6 @@ private:
     float z_base_lbmu_;
 };
 
-// 高阶版本的入口与出口赋值
 void apply_inlet_outlet_hd(LBM& lbm,
                            const std::string& downstream_bc,
                            const InletVelocityFieldHD& inlet,
