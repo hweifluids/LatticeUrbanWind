@@ -10,11 +10,11 @@ import os
 
 print("│───────────────────────────────────────────────────────────────────│")
 print("│  Project:   WRFcpLBM - toolbox for WRF-FluidX3D coupling          │")
-print("│  Module:    MAIN MODULE (Currently for preprocess)                │")
+print("│  Module:    MAKELUW - THE MAKING OF LUW                           │")
 print("│  Author:    Huanxia Wei                                           │")
 print("│  Email:     huanxia.wei@u.nus.edu                                 │")
-print("│  Version:   <20250714A-CPU>                                       │")
-print("│  License:   Currently designed for CMA, opensource in the future. │")
+print("│  Version:   <20251031A-GPU>                                       │")
+print("│  License:   Customized License.                                   │")
 print("│───────────────────────────────────────────────────────────────────│")
 
 
@@ -135,9 +135,9 @@ LUW_HOME = pathlib.Path(os.environ["LUW_HOME"])
 SCRIPTS = [
     LUW_HOME / "core/tools_core/cdfInspect.py",
     LUW_HOME / "core/tools_core/shpInspect.py",
-    LUW_HOME / "core/bridge_core/1_buildBC.py",
+    LUW_HOME / "core/bridge_core/1_buildBC_with_dem.py",
     LUW_HOME / "core/bridge_core/2_shpCutter.py",
-    LUW_HOME / "core/bridge_core/3_voxelization.py",
+    LUW_HOME / "core/bridge_core/3_voxelization_with_dem.py",
     LUW_HOME / "core/tools_core/prerunValidate.py",
 ]
 
