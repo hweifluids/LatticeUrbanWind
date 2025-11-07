@@ -98,7 +98,7 @@ void main_setup() {
     println("|      LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation      |");
     println("|                                                                             |");
     println("|                                        Developed by Huanxia Wei's Team      |");
-    println("|                                        Version - v3.0-251107                |");
+    println("|                                        Version - v3.0-251010                |");
     println("|                                                                             |");
     println("|-----------------------------------------------------------------------------|");
  
@@ -157,11 +157,13 @@ void main_setup() {
             };
 
         if (!fin.is_open()) {
-            println("ERROR: *.luw not found. Please provide a valid *.luw and rerun.");
-            wait();
-            exit(-1);
+            println("WARNING: *.luw not found, using integrated defaults...");
+            caseName = "example";
+            datetime = "20990101120000";
+            si_size = float3(3518.36f, 4438.94f, 1000.0f + z_si_offset);
+            parent = std::filesystem::path(get_exe_path()).parent_path().string();
+            cell_m = 20.0f;
         }
-
         else {
             std::string line;
             std::string mesh_control_val, gpu_memory_val, cell_size_val;

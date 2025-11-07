@@ -244,16 +244,25 @@ def write_validation(conf_lines: list[str], conf_path: Path, passed: bool) -> No
                     return True
         return False
 
-    # 若不存在 high_order 与 flux_correction，则在 validation 的下一行与下下一行补齐
+    # 若不存在 high_order 与 flux_correction 需要补写
     if not has_key("high_order"):
-        while len(conf_lines) <= val_idx + 1:
-            conf_lines.append("")
-        conf_lines[val_idx + 1] = "high_order = true"
+        insert_idx = val_idx + 1
+        while insert_idx < len(conf_lines) and conf_lines[insert_idx].strip() != "":
+            insert_idx += 1
+        if insert_idx == len(conf_lines):
+            conf_lines.append("high_order = true")
+        else:
+            conf_lines[insert_idx] = "high_order = true"
 
     if not has_key("flux_correction"):
-        while len(conf_lines) <= val_idx + 2:
-            conf_lines.append("")
-        conf_lines[val_idx + 2] = "flux_correction = true"
+        insert_idx = val_idx + 1
+        while insert_idx < len(conf_lines) and conf_lines[insert_idx].strip() != "":
+            insert_idx += 1
+        if insert_idx == len(conf_lines):
+            conf_lines.append("flux_correction = true")
+        else:
+            conf_lines[insert_idx] = "flux_correction = true"
+
 
     conf_path.write_text("\n".join(conf_lines) + "\n")
 
@@ -288,9 +297,13 @@ def main() -> None:
         write_validation(lines, conf_path, False)
         sys.exit(1)
 
-    # 新位置：全部在 ProjectHome/proj_temp 下
     proj_temp = project_home / "proj_temp"
-    stl_path = proj_temp / f"{caseName}.stl"
+    stl_dem_path = proj_temp / f"{caseName}_DEM.stl"
+    if stl_dem_path.exists():
+        stl_path = stl_dem_path
+    else:
+        stl_path = proj_temp / f"{caseName}.stl"
+    print(f"Using STL file: {stl_path}")
 
     # CSV 主备候选：优先 SurfData_{datetime}.csv，不存在则使用 SurfData_Latest.csv
     csv_path = proj_temp / f"SurfData_{dt_str}.csv"

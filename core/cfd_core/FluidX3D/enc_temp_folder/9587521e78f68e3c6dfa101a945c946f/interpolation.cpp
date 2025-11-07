@@ -36,8 +36,8 @@ float3 NearestNeighborInterpolator::eval(const float3& pos) const {
 }
 
 float3 InletVelocityField::operator()(const float3& pos) const {
-    const float z_lb = pos.z;
-    if (z_lb < z0_ + zoff_) return float3(0.0f);
+    const float z_phys = pos.z - z0_;
+    if (z_phys < zoff_) return float3(0.0f);
     return interp_.eval(pos);
 }
 

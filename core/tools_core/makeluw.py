@@ -135,9 +135,9 @@ LUW_HOME = pathlib.Path(os.environ["LUW_HOME"])
 SCRIPTS = [
     LUW_HOME / "core/tools_core/cdfInspect.py",
     LUW_HOME / "core/tools_core/shpInspect.py",
-    LUW_HOME / "core/bridge_core/1_buildBC_with_dem.py",
+    LUW_HOME / "core/bridge_core/1_buildBC.py",
     LUW_HOME / "core/bridge_core/2_shpCutter.py",
-    LUW_HOME / "core/bridge_core/3_voxelization_with_dem.py",
+    LUW_HOME / "core/bridge_core/3_voxelization.py",
     LUW_HOME / "core/tools_core/prerunValidate.py",
 ]
 

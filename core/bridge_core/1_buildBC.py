@@ -1,13 +1,15 @@
-# 1_buildBC.py
+# 1_buildBC_with_dem.py
+# Modified version of 1_buildBC.py with DEM terrain support
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 import math
 import vtk
 from vtk.util import numpy_support as nps
 import geopandas as gpd
-from shapely.geometry import Point, Polygon  # kept for compatibility if used elsewhere
+from shapely.geometry import Point, Polygon
+from shapely.ops import transform as shapely_transform
 import shutil
 import os
 import sys
@@ -21,6 +23,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import numpy as np
 import xarray as xr
+import pickle
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dask import config as dask_config
@@ -39,6 +42,209 @@ def _log_warn(msg: str) -> None:
 
 def _log_error(msg: str) -> None:
     print(f"[ERROR] {msg}")
+
+
+def _load_dem_data(project_home: Path, work_crs: str, elevation_field: str = "elevation") -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Load DEM data from shapefile in DEM folder.
+    Returns (points_xy, elevations) in work_crs or (None, None) if not found.
+    Elevations are adjusted so minimum = 0.
+
+    Args:
+        project_home: Project directory containing DEM folder
+        work_crs: Target CRS (e.g., "EPSG:32651")
+        elevation_field: Name of elevation field in shapefile
+    """
+    dem_folder = project_home / "terrain_db"
+    if not dem_folder.exists():
+        _log_warn("Terrain terrain_db folder not found, proceeding without terrain data")
+        return None, None
+
+    shp_files = list(dem_folder.glob("*.shp"))
+    if not shp_files:
+        _log_warn("No shapefile found in terrain_db folder, proceeding without terrain data")
+        return None, None
+
+    dem_shp = shp_files[0]
+    _log_info(f"Loading DEM from: {dem_shp}")
+
+    try:
+        dem_gdf = gpd.read_file(dem_shp)
+
+        # Force geometries to 2D to avoid Z-coordinate issues during reprojection
+        def force_2d(geom):
+            if geom is None:
+                return None
+            return shapely_transform(lambda x, y, z=None: (x, y), geom)
+
+        dem_gdf['geometry'] = dem_gdf['geometry'].apply(force_2d)
+
+        # Reproject to working CRS if needed
+        if dem_gdf.crs != work_crs:
+            _log_info(f"Reprojecting DEM from {dem_gdf.crs} to {work_crs}")
+            dem_gdf = dem_gdf.to_crs(work_crs)
+
+        # Find elevation field
+        elev_col = None
+        for col in ['elevation', 'Elevation', 'ELEVATION', 'height', 'Height', 'z', 'Z']:
+            if col in dem_gdf.columns:
+                elev_col = col
+                break
+
+        if elev_col is None:
+            _log_warn(f"Elevation field not found in DEM shapefile")
+            return None, None
+
+        _log_info(f"Using elevation column: {elev_col}")
+
+        # Extract points and elevations
+        points = []
+        elevations = []
+
+        for idx, row in dem_gdf.iterrows():
+            geom = row['geometry']
+            elev = row[elev_col]
+
+            if geom is None or geom.is_empty:
+                continue
+
+            try:
+                elev_val = float(elev)
+                if math.isnan(elev_val):
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            # Use centroid for all geometry types (Point, Polygon, etc.)
+            centroid = geom.centroid
+            if centroid is not None and not centroid.is_empty:
+                points.append([centroid.x, centroid.y])
+                elevations.append(elev_val)
+
+        if not points:
+            _log_warn("No valid DEM points found")
+            return None, None
+
+        points_xy = np.array(points)
+        elevations = np.array(elevations)
+
+        _log_info(f"Loaded {len(elevations)} DEM points")
+        _log_info(f"Original elevation range (sea level): {elevations.min():.2f} to {elevations.max():.2f} meters")
+
+        # Adjust elevations so minimum = 0 (datum adjustment)
+        min_elev = elevations.min()
+        elevations = elevations - min_elev
+
+        _log_info(f"Adjusted to datum (lowest point = 0): {elevations.min():.2f} to {elevations.max():.2f} meters")
+        _log_info(f"Datum offset applied: {min_elev:.2f}m")
+
+        return points_xy, elevations
+
+    except Exception as e:
+        _log_warn(f"Failed to load DEM data: {e}")
+        return None, None
+
+
+def _interpolate_dem_to_grid(dem_points: np.ndarray, dem_elevations: np.ndarray,
+                             x_grid: np.ndarray, y_grid: np.ndarray,
+                             rotate_deg: float, pivot_xy: Tuple[float, float],
+                             x_min: float, y_min: float,
+                             idw_power: float = 2.0, idw_neighbors: int = 12) -> np.ndarray:
+    """
+    Interpolate DEM elevations to wind field grid using IDW.
+    DEM points are already shifted to relative coordinates (origin at 0,0).
+
+    Args:
+        dem_points: Nx2 array of DEM points in shifted coordinates (origin at 0,0)
+        dem_elevations: N array of elevation values (already adjusted to datum)
+        x_grid: 1D array of x coordinates in wind grid (after rotation and shift)
+        y_grid: 1D array of y coordinates in wind grid (after rotation and shift)
+        rotate_deg: rotation angle applied to wind grid
+        pivot_xy: rotation pivot point in absolute UTM coordinates
+        x_min: minimum x in absolute UTM coordinates (for shifting pivot)
+        y_min: minimum y in absolute UTM coordinates (for shifting pivot)
+        idw_power: IDW power parameter
+        idw_neighbors: number of nearest neighbors
+
+    Returns:
+        2D array (ny, nx) of interpolated elevations
+    """
+    # Shift pivot to relative coordinates
+    pivot_shifted = (pivot_xy[0] - x_min, pivot_xy[1] - y_min)
+
+    # Rotate DEM points to match wind grid
+    th = math.radians(rotate_deg)
+    c = math.cos(th)
+    s = math.sin(th)
+
+    dem_x = dem_points[:, 0]
+    dem_y = dem_points[:, 1]
+
+    dem_x_rot = c * (dem_x - pivot_shifted[0]) - s * (dem_y - pivot_shifted[1]) + pivot_shifted[0]
+    dem_y_rot = s * (dem_x - pivot_shifted[0]) + c * (dem_y - pivot_shifted[1]) + pivot_shifted[1]
+
+    dem_points_rot = np.column_stack([dem_x_rot, dem_y_rot])
+
+    # Crop DEM points to wind grid bounding box (with buffer)
+    x_min_grid = x_grid.min()
+    x_max_grid = x_grid.max()
+    y_min_grid = y_grid.min()
+    y_max_grid = y_grid.max()
+
+    # Add 10% buffer to ensure coverage
+    x_range = x_max_grid - x_min_grid
+    y_range = y_max_grid - y_min_grid
+    buffer = max(x_range, y_range) * 0.1
+
+    mask = (
+        (dem_x_rot >= x_min_grid - buffer) &
+        (dem_x_rot <= x_max_grid + buffer) &
+        (dem_y_rot >= y_min_grid - buffer) &
+        (dem_y_rot <= y_max_grid + buffer)
+    )
+
+    dem_points_rot_cropped = dem_points_rot[mask]
+    dem_elevations_cropped = dem_elevations[mask]
+
+    _log_info(f"Cropped DEM from {len(dem_elevations)} to {len(dem_elevations_cropped)} points within grid bounds")
+
+    if len(dem_elevations_cropped) == 0:
+        _log_warn("No DEM points within grid bounds, using zeros")
+        return np.zeros((len(y_grid), len(x_grid)), dtype=np.float32)
+
+    # Create grid points
+    nx = len(x_grid)
+    ny = len(y_grid)
+    X, Y = np.meshgrid(x_grid, y_grid, indexing='xy')
+    grid_points = np.column_stack([X.ravel(), Y.ravel()])
+
+    # IDW interpolation using cropped DEM points
+    tree = cKDTree(dem_points_rot_cropped)
+    distances, indices = tree.query(grid_points, k=min(idw_neighbors, len(dem_elevations_cropped)))
+    distances = np.maximum(distances, 1e-10)
+
+    weights = 1.0 / (distances ** idw_power)
+    weights_sum = weights.sum(axis=1, keepdims=True)
+    weights_normalized = weights / weights_sum
+
+    Z = np.sum(weights_normalized * dem_elevations_cropped[indices], axis=1)
+    Z = Z.reshape(ny, nx)
+
+    # Ensure minimum is at least 0
+    if Z.min() < 0:
+        _log_warn(f"Interpolation created negative values (min={Z.min():.2f}m), clipping to 0")
+        Z = np.maximum(Z, 0.0)
+
+    _log_info(f"DEM interpolated to grid: absolute elevation range {Z.min():.2f} to {Z.max():.2f} meters")
+
+    # Convert to elevation difference (relative to minimum in this grid)
+    z_min_grid = Z.min()
+    Z_diff = Z - z_min_grid
+
+    _log_info(f"DEM elevation difference range: 0.00 to {Z_diff.max():.2f} meters (relative to grid minimum)")
+    _log_info(f"Grid minimum elevation (datum): {z_min_grid:.2f} meters")
+
+    return Z_diff
 
 
 def _forward_fill_whole_layer(u: np.ndarray, v: np.ndarray) -> None:
@@ -265,11 +471,14 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     u_out = np.empty((nz, ny, nx), dtype=np.float32)
     v_out = np.empty((nz, ny, nx), dtype=np.float32)
 
-    _log_info(f"Total vertical levels: {nz}")
+    _log_info(f"Total vertical levels to interpolate: {nz}")
     _log_info("Start horizontal interpolation onto uniform grid: precomputed barycentric weights with nearest fallback")
-    last_percent = -1
-    last_len = 0
-    last_percent, last_len = _progress_draw(0, nz, last_percent, last_len)
+
+    import sys
+    sys.stdout.write("[INFO] Horizontal interpolation progress (# is 5%): |")
+    sys.stdout.flush()
+    next_percent_idx = 1  # 1..20
+
 
     M = qpts.shape[0]
 
@@ -295,11 +504,26 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
         u_out[k] = out_u_flat.reshape(ny, nx)
         v_out[k] = out_v_flat.reshape(ny, nx)
 
-        last_percent, last_len = _progress_draw(k + 1, nz, last_percent, last_len)
+        progress_ratio = (k + 1) / nz if nz > 0 else 1.0
+        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            sys.stdout.flush()
+            next_percent_idx += 1
 
-    sys.stdout.write("\n")
+    if next_percent_idx <= 20:
+        while next_percent_idx <= 20:
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            next_percent_idx += 1
+        sys.stdout.flush()
+
+    sys.stdout.write("|Finished|\n")
     sys.stdout.flush()
     _log_info("Horizontal interpolation finished")
+
 
     dx = (x_max - x_min) / (nx - 1) if nx > 1 else 0.0
     dy = (y_max - y_min) / (ny - 1) if ny > 1 else 0.0
@@ -312,6 +536,7 @@ def buildBC_dev(
     conf_path: Union[str, Path],
     var_u: str = "u",
     var_v: str = "v",
+    elevation_scale: float = 1.0,
 ) -> None:
     try:
         # conf and path
@@ -325,6 +550,13 @@ def buildBC_dev(
         dask_config.set(scheduler="threads", num_workers=max_workers)
 
         _log_info(f"Set parallel workers: {max_workers}")
+
+        # Get UTM CRS first
+        utm_crs = _get_fixed_utm_crs()
+
+        # Load DEM data (will be reprojected to UTM)
+        project_home = conf_file.parent
+        dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs)
 
         ds = xr.open_dataset(nc_path_resolved, chunks={"lon": 64, "lat": 64})
 
@@ -401,7 +633,6 @@ def buildBC_dev(
         # projection and rotation - use fixed UTM CRS to match main.ipynb
         lon_min, lon_max = float(lon.min()), float(lon.max())
         lat_min, lat_max = float(lat.min()), float(lat.max())
-        utm_crs = _get_fixed_utm_crs()
         _log_info(f"Using fixed UTM CRS to match main.ipynb: {utm_crs}")
 
         pts_xy, center_xy, rotate_deg, pivot_xy = _project_bbox_and_rotation(lon_min, lon_max, lat_min, lat_max, utm_crs)
@@ -423,6 +654,41 @@ def buildBC_dev(
             u, v, x_src, y_src, nx=nx, ny=ny, x_min=0.0, x_max=x_max - x_min, y_min=0.0, y_max=y_max - y_min
         )
         dz = float(lev[-1] - lev[0]) / (nz - 1) if nz > 1 else 0.0
+
+        # Interpolate DEM to wind grid (if available)
+        dem_grid = None
+        dem_data_to_save = None
+        if dem_points_utm is not None and dem_elevations is not None:
+            _log_info("Interpolating DEM to wind field grid")
+            x_grid = np.linspace(0.0, x_max - x_min, nx)
+            y_grid = np.linspace(0.0, y_max - y_min, ny)
+            # Shift DEM points to match wind grid origin
+            dem_points_shifted = dem_points_utm - np.array([x_min, y_min])
+            dem_grid = _interpolate_dem_to_grid(
+                dem_points_shifted, dem_elevations,
+                x_grid, y_grid,
+                rotate_deg, pivot_xy,
+                x_min, y_min
+            )
+
+            # Prepare DEM data for saving (will save later after proj_temp is created)
+            # IMPORTANT: Always save UNSCALED data to pkl for reusability
+            dem_data_to_save = {
+                'dem_grid': dem_grid,  # (ny, nx) elevation difference array (UNSCALED)
+                'x_grid': x_grid,      # 1D x coordinates
+                'y_grid': y_grid,      # 1D y coordinates
+                'dx': dx,
+                'dy': dy,
+                'base_height': 50.0,   # Fixed base height
+                'rotate_deg': rotate_deg,
+                'pivot_xy': pivot_xy,
+                'x_min': x_min,
+                'y_min': y_min,
+                'x_max': x_max,
+                'y_max': y_max
+            }
+        else:
+            _log_info("No DEM data, proceeding with flat terrain")
 
         # extend from z=0 to zmin by duplicating the first valid layer at zmin
         # build new arrays whose origin starts at z=0
@@ -512,47 +778,200 @@ def buildBC_dev(
         mb = Path(vti_path).stat().st_size / 1e6
         _log_info(f"Wrote VTI: {vti_path} size ~ {mb:.3f} MB")
 
-        # write boundary CSV and boundary mean
+        # Save DEM data as pkl for 3_voxelization_with_dem.py
+        if dem_data_to_save is not None:
+            dem_pkl_path = proj_temp / "dem_grid.pkl"
+            with open(dem_pkl_path, 'wb') as f:
+                pickle.dump(dem_data_to_save, f)
+            _log_info(f"Saved DEM grid data to: {dem_pkl_path}")
+
+        # Prepare interpolation for terrain-adjusted wind field
+        # Fixed top height: z_max_output = original_z_max + base_height
+        base_height = 50.0  # Fixed base height
+        z_max_output = float((nz - 1) * dz) + base_height  # Fixed top boundary
+        z_original = np.arange(nz, dtype=np.float32) * dz  # Original z levels (0, dz, 2*dz, ...)
+
+        if dem_grid is not None:
+            _log_info(f"Applying terrain-following coordinates with fixed top at {z_max_output:.2f}m")
+            _log_info(f"DEM elevation difference range: {dem_grid.min():.2f}m to {dem_grid.max():.2f}m")
+            _log_info(f"Bottom elevation range: {base_height + dem_grid.min():.2f}m to {base_height + dem_grid.max():.2f}m")
+        else:
+            _log_info(f"No DEM data, applying flat base offset: Z = Z_grid + {base_height}m")
+
+        def _interpolate_wind_at_z(u_col, v_col, w_col, z_target, z_src, dem_offset):
+            """
+            Interpolate wind components at target z using IDW.
+            z_target: target z in output coordinates (e.g., 1150m)
+            z_src: original z levels (0, dz, 2*dz, ...)
+            dem_offset: base_height + dem_elevation
+            """
+            # Map target z back to original coordinate
+            z_in_original = z_target - dem_offset
+
+            # Clamp to valid range
+            z_in_original = np.clip(z_in_original, z_src[0], z_src[-1])
+
+            # Find two nearest levels for IDW
+            if z_in_original <= z_src[0]:
+                return u_col[0], v_col[0], w_col[0]
+            elif z_in_original >= z_src[-1]:
+                return u_col[-1], v_col[-1], w_col[-1]
+            else:
+                # Find bracketing indices
+                k_upper = np.searchsorted(z_src, z_in_original)
+                k_lower = k_upper - 1
+
+                z_lower = z_src[k_lower]
+                z_upper = z_src[k_upper]
+
+                # IDW with power=1 (linear-like but using inverse distance)
+                d_lower = abs(z_in_original - z_lower)
+                d_upper = abs(z_in_original - z_upper)
+
+                if d_lower < 1e-6:
+                    return u_col[k_lower], v_col[k_lower], w_col[k_lower]
+                elif d_upper < 1e-6:
+                    return u_col[k_upper], v_col[k_upper], w_col[k_upper]
+                else:
+                    w_lower = 1.0 / d_lower
+                    w_upper = 1.0 / d_upper
+                    w_sum = w_lower + w_upper
+
+                    u_interp = (w_lower * u_col[k_lower] + w_upper * u_col[k_upper]) / w_sum
+                    v_interp = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
+                    w_interp = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
+
+                    return u_interp, v_interp, w_interp
+
         bc_sum = np.zeros(3, dtype=float)
         bc_cnt = 0
         csv_path = vti_path.parent / "SurfData_Latest.csv"
+
+        # Log elevation scale if not 1.0
+        if elevation_scale != 1.0:
+            _log_info(f"Applying elevation scale {elevation_scale}x to CSV output")
+
         with open(csv_path, "w", encoding="utf-8") as f:
             f.write("X,Y,Z,u,v,w\n")
-            # bottom and top faces
-            for k in (0, nz - 1):
-                z = float(k) * dz
-                for j in range(ny):
-                    y = j * dy
-                    for i in range(nx):
-                        x = i * dx
-                        uval = u_m[k, j, i]
-                        vval = v_m[k, j, i]
-                        f.write(f"{x},{y},{z},{uval},{vval},0.0\n")
-                        bc_sum += np.array([uval, vval, 0.0])
-                        bc_cnt += 1
+            # bottom face (k=0)
+            for j in range(ny):
+                y = j * dy
+                for i in range(nx):
+                    x = i * dx
+                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                    # Apply elevation scale to CSV output
+                    dem_diff_scaled = dem_diff * elevation_scale
+                    z_output = base_height + dem_diff_scaled
+
+                    # Use bottom layer data
+                    uval = u_m[0, j, i]
+                    vval = v_m[0, j, i]
+                    wval = 0.0
+
+                    f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+                    bc_sum += np.array([uval, vval, wval])
+                    bc_cnt += 1
+
+            # top face: interpolate at z_max_output for each (x,y)
+            for j in range(ny):
+                y = j * dy
+                for i in range(nx):
+                    x = i * dx
+                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                    # Apply elevation scale to CSV output
+                    dem_diff_scaled = dem_diff * elevation_scale
+
+                    # Map z_max_output back to original coordinate
+                    z_in_original = z_max_output - base_height - dem_diff_scaled
+
+                    # Interpolate wind at this z
+                    u_col = u_m[:, j, i]
+                    v_col = v_m[:, j, i]
+                    w_col = w[:, j, i]
+
+                    # Find two nearest levels for interpolation
+                    if z_in_original <= z_original[0]:
+                        uval, vval, wval = u_col[0], v_col[0], w_col[0]
+                    elif z_in_original >= z_original[-1]:
+                        uval, vval, wval = u_col[-1], v_col[-1], w_col[-1]
+                    else:
+                        k_upper = np.searchsorted(z_original, z_in_original)
+                        k_lower = k_upper - 1
+
+                        z_lower = z_original[k_lower]
+                        z_upper = z_original[k_upper]
+
+                        # IDW interpolation
+                        d_lower = abs(z_in_original - z_lower)
+                        d_upper = abs(z_in_original - z_upper)
+
+                        if d_lower < 1e-6:
+                            uval, vval, wval = u_col[k_lower], v_col[k_lower], w_col[k_lower]
+                        elif d_upper < 1e-6:
+                            uval, vval, wval = u_col[k_upper], v_col[k_upper], w_col[k_upper]
+                        else:
+                            w_lower = 1.0 / d_lower
+                            w_upper = 1.0 / d_upper
+                            w_sum = w_lower + w_upper
+
+                            uval = (w_lower * u_col[k_lower] + w_upper * u_col[k_upper]) / w_sum
+                            vval = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
+                            wval = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
+
+                    f.write(f"{x:.3f},{y:.3f},{z_max_output:.3f},{uval},{vval},0.0\n")
+                    bc_sum += np.array([uval, vval, 0.0])
+                    bc_cnt += 1
             # south and north faces
             for j in (0, ny - 1):
                 y = j * dy
                 for k in range(1, nz - 1):
-                    z = float(k) * dz
+                    z_grid = float(k) * dz
                     for i in range(nx):
                         x = i * dx
+                        dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                        # Apply elevation scale to CSV output
+                        dem_diff_scaled = dem_diff * elevation_scale
+
+                        # Output z with DEM offset
+                        z_output = z_grid + base_height + dem_diff_scaled
+
+                        # Skip if exceeds max (remove超出部分)
+                        if z_output > z_max_output:
+                            continue
+
+                        # Use original layer data (no interpolation for middle layers)
                         uval = u_m[k, j, i]
                         vval = v_m[k, j, i]
-                        f.write(f"{x},{y},{z},{uval},{vval},0.0\n")
-                        bc_sum += np.array([uval, vval, 0.0])
+                        wval = 0.0
+
+                        f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+                        bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
             # west and east faces
             for i in (0, nx - 1):
                 x = i * dx
                 for k in range(1, nz - 1):
-                    z = float(k) * dz
+                    z_grid = float(k) * dz
                     for j in range(ny):
                         y = j * dy
+                        dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                        # Apply elevation scale to CSV output
+                        dem_diff_scaled = dem_diff * elevation_scale
+
+                        # Output z with DEM offset
+                        z_output = z_grid + base_height + dem_diff_scaled
+
+                        # Skip if exceeds max (remove超出部分)
+                        if z_output > z_max_output:
+                            continue
+
+                        # Use original layer data (no interpolation for middle layers)
                         uval = u_m[k, j, i]
                         vval = v_m[k, j, i]
-                        f.write(f"{x},{y},{z},{uval},{vval},0.0\n")
-                        bc_sum += np.array([uval, vval, 0.0])
+                        wval = 0.0
+
+                        f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+                        bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
         _log_info(f"Wrote boundary CSV: {csv_path}")
 
@@ -613,8 +1032,23 @@ def buildBC_dev(
         raise
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        _log_error("Usage: python 1_buildBC.py <path-to-conf-file>")
-        sys.exit(2)
-    buildBC_dev(sys.argv[1])
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build boundary conditions with DEM terrain support"
+    )
+    parser.add_argument(
+        "conf_file",
+        type=str,
+        help="Path to configuration file (conf.luw)"
+    )
+    parser.add_argument(
+        "--elevation-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for elevation differences (for visualization/testing). Default: 1.0"
+    )
+
+    args = parser.parse_args()
+    buildBC_dev(args.conf_file, elevation_scale=args.elevation_scale)
 

@@ -147,16 +147,41 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Drop non-polygonal and invalid features, attempt to fix invalid ones, and ensure closed outlines."""
     print("Cleaning step started. Ensuring geometries are valid and polygonal.")
     before = len(gdf)
+    print(f"Total geometries to validate: {before}")
     # Try to fix invalids and drop non-polygonal
     fixed = []
-    for idx, g in enumerate(gdf.geometry):
+
+    import sys
+    sys.stdout.write("Validation Progress (# is 5%): |")
+    sys.stdout.flush()
+    next_percent_idx = 1  # 1..20, each is 5%
+
+    for idx, g in enumerate(gdf.geometry, 1):
         if g is None or g.is_empty:
             fixed.append(None)
-            continue
-        g2 = _make_valid_safe(g)
-        fixed.append(g2)
-        if (idx + 1) % 50000 == 0:
-            print(f"Validated {idx + 1} geometries so far.")
+        else:
+            g2 = _make_valid_safe(g)
+            fixed.append(g2)
+
+        progress_ratio = idx / before if before > 0 else 1.0
+        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            sys.stdout.flush()
+            next_percent_idx += 1
+
+    if next_percent_idx <= 20:
+        while next_percent_idx <= 20:
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            next_percent_idx += 1
+        sys.stdout.flush()
+
+    sys.stdout.write("|Finished|\n")
+    sys.stdout.flush()
+
     gdf2 = gdf.copy()
     gdf2["geometry"] = fixed
     gdf2 = gdf2[gdf2.geometry.notna() & ~gdf2.geometry.is_empty]
@@ -199,38 +224,60 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
     # Pre-prepare geometries for faster intersection tests
     prepared_geoms = [prepared.prep(geom) for geom in gdf.geometry]
 
+    import sys
+    print(f"Total seeds to check for overlap components: {n}")
+    sys.stdout.write("Component discovery progress (# is 5%): |")
+    sys.stdout.flush()
+    next_percent_idx = 1  # 1..20, each is 5 percent
+
     for i in range(n):
         if visited[i]:
-            continue
-        # BFS to collect indices that positively overlap with i (directly or transitively)
-        queue = [i]
-        visited[i] = True
-        comp = [i]
-        while queue:
-            a = queue.pop()
-            ga = gdf.geometry.iloc[a]
-            cand_idx = list(sindex.intersection(ga.bounds))
-            for j in cand_idx:
-                if j == a or visited[j]:
-                    continue
-                gj = gdf.geometry.iloc[j]
-                # Quick predicate using prepared geometry to avoid heavy intersection when separated
-                if not prepared_geoms[a].intersects(gj):
-                    continue
-                # Positive-area check
-                try:
-                    inter_area = ga.intersection(gj).area
-                except Exception:
-                    inter_area = 0.0
-                if inter_area > 0.0:
-                    visited[j] = True
-                    queue.append(j)
-                    comp.append(j)
-        components.append(comp)
-        comp_sizes.append(len(comp))
+            # still need to update progress
+            pass
+        else:
+            # BFS to collect indices that positively overlap with i
+            queue = [i]
+            visited[i] = True
+            comp = [i]
+            while queue:
+                a = queue.pop()
+                ga = gdf.geometry.iloc[a]
+                cand_idx = list(sindex.intersection(ga.bounds))
+                for j in cand_idx:
+                    if j == a or visited[j]:
+                        continue
+                    gj = gdf.geometry.iloc[j]
+                    if not prepared_geoms[a].intersects(gj):
+                        continue
+                    try:
+                        inter_area = ga.intersection(gj).area
+                    except Exception:
+                        inter_area = 0.0
+                    if inter_area > 0.0:
+                        visited[j] = True
+                        queue.append(j)
+                        comp.append(j)
+            components.append(comp)
+            comp_sizes.append(len(comp))
 
-        if (i + 1) % 50000 == 0:
-            print(f"Processed {i + 1} seeds for component discovery.")
+        progress_ratio = (i + 1) / n if n > 0 else 1.0
+        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            sys.stdout.flush()
+            next_percent_idx += 1
+
+    if next_percent_idx <= 20:
+        while next_percent_idx <= 20:
+            sys.stdout.write("#")
+            if next_percent_idx % 4 == 0:
+                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+            next_percent_idx += 1
+        sys.stdout.flush()
+    sys.stdout.write("|Finished|\n")
+    sys.stdout.flush()
+
 
     merged_rows = []
     merged_count = 0
@@ -368,12 +415,18 @@ def main():
     start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Start time: {start_ts}")
 
-    # 读取唯一参数为 conf 文件全路径，并据此确定 ProjectHome
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: python 2_shpCutter.py <path-to-conf-file> [--preview]")
+    if len(sys.argv) < 2:
+        print("Usage: python 2_shpCutter.py <path-to-conf-file> [--preview] [--validate]")
         sys.exit(2)
     conf_file = Path(sys.argv[1]).expanduser().resolve()
-    save_preview = (len(sys.argv) == 3 and sys.argv[2].strip().lower() in ("--preview", "preview", "1", "true", "yes"))
+    save_preview = False
+    do_double_validation = False
+    for arg in sys.argv[2:]:
+        a = arg.strip().lower()
+        if a in ("--preview", "preview", "1", "true", "yes"):
+            save_preview = True
+        if a in ("--validate", "validate"):
+            do_double_validation = True
 
     if not conf_file.exists():
         raise FileNotFoundError(f"conf file not found: {conf_file}")
@@ -409,12 +462,6 @@ def main():
     print(f"Output shapefile: {out_path}")
     print(f"Case name: {case_name}")
 
-
-    print(f"Input path: {in_path}")
-    print(f"Output directory: {out_dir}")
-    print(f"Output shapefile: {out_path}")
-    print(f"Case name: {case_name}")
-
     cut_lon, cut_lat = get_lonlat(conf_file)
     print(f"Bbox lon range: {cut_lon}")
     print(f"Bbox lat range: {cut_lat}")
@@ -443,16 +490,22 @@ def main():
     bbox = box(minx, miny, maxx, maxy)
     print(f"Bbox constructed. MinLon: {minx}, MinLat: {miny}, MaxLon: {maxx}, MaxLat: {maxy}")
 
-    print("Clipping to bbox.")
-    clipped_wgs84 = gpd.clip(clean_building_geometries(gdf_wgs84), bbox)
+    print("Clipping to bbox. Geometry cleaning before clipping.")
+    gdf_wgs84_cleaned = clean_building_geometries(gdf_wgs84)
+    clipped_wgs84 = gpd.clip(gdf_wgs84_cleaned, bbox)
 
     clipped_wgs84 = clipped_wgs84[clipped_wgs84.geometry.notna() & ~clipped_wgs84.geometry.is_empty]
     print(f"Clipping completed. Features after clip: {len(clipped_wgs84)}")
 
     # Data cleaning before area filtering
-    print("Starting geometry cleaning before area filtering.")
-    cleaned = clean_building_geometries(clipped_wgs84)
-    print(f"Geometry cleaning finished. Features after cleaning: {len(cleaned)}")
+    if do_double_validation:
+        print("Starting geometry cleaning before area filtering.")
+        cleaned = clean_building_geometries(clipped_wgs84)
+        print(f"Geometry cleaning finished. Features after cleaning: {len(cleaned)}")
+    else:
+        cleaned = clipped_wgs84
+        print("Geometry cleaning skipped because --validate not provided.")
+
 
     # Overlap union
     height_col = select_height_column(cleaned) or "elevation"
