@@ -767,57 +767,46 @@ def main():
     else:
         print(f"[INFO] Using specified height field: {args.height_field}")
 
-    # Build bbox and rotation
-    bbox_ll = _build_bbox_polygon_from_conf(conf_file)
-    print("[INFO] Built geographic bbox from conf.txt")
-    if bbox_ll is None:
-        raise RuntimeError("Cannot build lat-lon bbox")
-    try:
-        base_poly_proj = _project_geometry(bbox_ll, work_crs) if work_crs is not None else bbox_ll
-    except Exception:
-        minx, miny, maxx, maxy = gdf_work.total_bounds
-        base_poly_proj = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
-    print("[INFO] Projected bbox polygon into working CRS")
+    # Build bbox - project only two corner points (same as 1_buildBC.py)
+    conf_file_path = Path(conf_file).expanduser().resolve()
+    if not conf_file_path.exists():
+        raise FileNotFoundError(f"[ERROR] Configuration file not found: {conf_file_path}")
+    txt = conf_file_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Estimate rotation angle
-    coords = list(base_poly_proj.exterior.coords)
-    if len(coords) < 2:
-        raise RuntimeError("[ERROR] Base rectangle geometry is abnormal")
-    x0, y0 = coords[0][0], coords[0][1]
-    x1, y1 = coords[1][0], coords[1][1]
-    dx, dy = x1 - x0, y1 - y0
-    angle_rad = math.atan2(dy, dx)
-    rotate_deg = - math.degrees(angle_rad)
+    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", txt)
+    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", txt)
+    if not (m_lon and m_lat):
+        raise ValueError("conf 中未找到 cut_lon_manual/cut_lat_manual")
 
-    pivot = base_poly_proj.centroid
-    pivot_xy = (pivot.x, pivot.y)
-    print(f"[INFO] Estimated rotation: {rotate_deg:.6f} degrees")
-    print(f"[INFO] Rotation pivot: ({pivot_xy[0]:.3f}, {pivot_xy[1]:.3f})")
+    lon_vals = [float(v.strip()) for v in m_lon.group(1).split(",")]
+    lat_vals = [float(v.strip()) for v in m_lat.group(1).split(",")]
+    lon_min, lon_max = min(lon_vals), max(lon_vals)
+    lat_min, lat_max = min(lat_vals), max(lat_vals)
 
-    # Rotate base
-    base_rot = affinity.rotate(base_poly_proj, rotate_deg, origin=pivot_xy, use_radians=False)
-    print("[INFO] Rotated base rectangle")
+    print(f"[INFO] Config bounds: lon=[{lon_min}, {lon_max}], lat=[{lat_min}, {lat_max}]")
 
-    # Rotate DEM points if available
+    # Project only two corner points to UTM
+    from pyproj import Transformer
+    transformer = Transformer.from_crs("EPSG:4326", work_crs, always_xy=True)
+    x_lo, y_lo = transformer.transform(lon_min, lat_min)
+    x_hi, y_hi = transformer.transform(lon_max, lat_max)
+
+    print(f"[INFO] Projected bounds: x=[{x_lo:.3f}, {x_hi:.3f}], y=[{y_lo:.3f}, {y_hi:.3f}]")
+    print(f"[INFO] Domain size: {x_hi - x_lo:.3f} x {y_hi - y_lo:.3f} m")
+
+    # Create axis-aligned bounding box
+    minx, miny, maxx, maxy = x_lo, y_lo, x_hi, y_hi
+    base_rot = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
+    rotate_deg = 0.0
+    pivot_xy = ((minx + maxx) / 2, (miny + maxy) / 2)
+    print(f"[INFO] Using axis-aligned bounding box (no rotation)")
+
+    # No rotation needed for DEM points (rotate_deg = 0)
     if dem_points is not None:
-        if use_pkl_dem:
-            print("[INFO] Rotating DEM points from pkl (need to match building coordinate system)")
-        else:
-            print("[INFO] Rotating DEM points")
-        dem_points_rot = []
-        for pt in dem_points:
-            x, y = pt
-            # Apply rotation
-            th = math.radians(rotate_deg)
-            c = math.cos(th)
-            s = math.sin(th)
-            xr = c * (x - pivot_xy[0]) - s * (y - pivot_xy[1]) + pivot_xy[0]
-            yr = s * (x - pivot_xy[0]) + c * (y - pivot_xy[1]) + pivot_xy[1]
-            dem_points_rot.append([xr, yr])
-        dem_points = np.array(dem_points_rot)
+        print("[INFO] DEM points ready (no rotation needed)")
 
-    # Rotate and filter buildings
-    print("[INFO] Rotating building polygons and filtering by height")
+    # Filter buildings by height (no rotation needed)
+    print("[INFO] Filtering building polygons by height")
     rotated_polygons = []
     heights = []
     for _, row in gdf_work.iterrows():
@@ -835,8 +824,8 @@ def main():
             continue
         for poly in polys:
             try:
-                poly_rot = affinity.rotate(poly, rotate_deg, origin=pivot_xy, use_radians=False)
-                rotated_polygons.append(poly_rot)
+                # No rotation needed (rotate_deg = 0)
+                rotated_polygons.append(poly)
                 heights.append(h)
             except Exception:
                 continue

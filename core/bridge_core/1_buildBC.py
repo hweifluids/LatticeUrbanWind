@@ -327,35 +327,91 @@ def _read_conf_and_nc_path(conf_path: Union[str, Path]) -> Tuple[Path | None, di
 
 
 
-def _crop_lonlat_by_conf(ds: xr.Dataset, conf_raw: str | None) -> xr.Dataset:
+def _crop_wind_by_utm_bounds(ds: xr.Dataset, conf_raw: str | None, utm_crs: str) -> xr.Dataset:
     """
-    Optional lon/lat cropping according to conf cut_lon_manual and cut_lat_manual.
-    Each bound is expanded by half a grid step to keep edge cells.
+    Crop wind data in UTM coordinate space (same as DEM).
+    Converts lon/lat bounds from config to UTM, then crops wind grid points.
     """
     if not conf_raw:
-        _log_info("No manual crop range from conf, skip lon/lat crop")
+        _log_info("No manual crop range from conf, skip cropping")
         return ds
 
-    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-    if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
-        _log_info("cut_lon_manual or cut_lat_manual not provided, skip lon/lat crop")
-        return ds
+    # Try to read cut_utm_x and cut_utm_y first (direct UTM specification)
+    m_utm_x = re.search(r"cut_utm_x\s*=\s*\[([^\]]+)\]", conf_raw)
+    m_utm_y = re.search(r"cut_utm_y\s*=\s*\[([^\]]+)\]", conf_raw)
 
-    lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
-    lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
-    lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
-    lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
+    if m_utm_x and m_utm_y and m_utm_x.group(1).strip() and m_utm_y.group(1).strip():
+        # Direct UTM bounds specified
+        x_lo, x_hi = [float(v) for v in m_utm_x.group(1).split(",")]
+        y_lo, y_hi = [float(v) for v in m_utm_y.group(1).split(",")]
+        _log_info(f"Using direct UTM bounds from config: X=[{x_lo}, {x_hi}], Y=[{y_lo}, {y_hi}]")
+    else:
+        # Convert lon/lat bounds to UTM
+        m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+        m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+        if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
+            _log_info("cut_lon_manual or cut_lat_manual not provided, skip cropping")
+            return ds
 
-    dlon = float(abs(ds["lon"].diff("lon").mean().values)) if "lon" in ds.dims else 0.0
-    dlat = float(abs(ds["lat"].diff("lat").mean().values)) if "lat" in ds.dims else 0.0
+        lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
+        lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
+        lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
+        lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
 
-    _log_info(f"Crop lon to [{lon_lo}, {lon_hi}] and lat to [{lat_lo}, {lat_hi}], with half-grid padding")
-    ds2 = ds.sel(
-        lon=slice(lon_lo - 0.5 * dlon, lon_hi + 0.5 * dlon),
-        lat=slice(lat_lo - 0.5 * dlat, lat_hi + 0.5 * dlat),
-    )
-    return ds2
+        # Convert to UTM
+        transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+        x_lo, y_lo = transformer.transform(lon_lo, lat_lo)
+        x_hi, y_hi = transformer.transform(lon_hi, lat_hi)
+
+        _log_info(f"Converted lon/lat bounds [{lon_lo:.6f}, {lon_hi:.6f}] x [{lat_lo:.6f}, {lat_hi:.6f}]")
+        _log_info(f"  to UTM bounds X=[{x_lo:.2f}, {x_hi:.2f}], Y=[{y_lo:.2f}, {y_hi:.2f}]")
+
+    # Project all wind grid points to UTM
+    lon = ds["lon"].values
+    lat = ds["lat"].values
+
+    transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+
+    if lon.ndim == 1 and lat.ndim == 1:
+        # 1D coordinates - create meshgrid
+        lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='ij')
+    else:
+        # Already 2D
+        lon_2d, lat_2d = lon, lat
+
+    # Transform to UTM
+    x_utm, y_utm = transformer.transform(lon_2d.ravel(), lat_2d.ravel())
+    x_utm = x_utm.reshape(lon_2d.shape)
+    y_utm = y_utm.reshape(lat_2d.shape)
+
+    # Find points within UTM bounds
+    mask = (x_utm >= x_lo) & (x_utm <= x_hi) & (y_utm >= y_lo) & (y_utm <= y_hi)
+
+    if lon.ndim == 1:
+        # For 1D coords, find the range of indices
+        mask_lon = mask.any(axis=1)  # Any point in this lon is within bounds
+        mask_lat = mask.any(axis=0)  # Any point in this lat is within bounds
+
+        lon_indices = np.where(mask_lon)[0]
+        lat_indices = np.where(mask_lat)[0]
+
+        if len(lon_indices) == 0 or len(lat_indices) == 0:
+            _log_warn("No wind data points within UTM bounds, returning original dataset")
+            return ds
+
+        lon_idx_min, lon_idx_max = lon_indices[0], lon_indices[-1]
+        lat_idx_min, lat_idx_max = lat_indices[0], lat_indices[-1]
+
+        _log_info(f"Cropped wind data from {len(lon)}x{len(lat)} to {lon_idx_max-lon_idx_min+1}x{lat_idx_max-lat_idx_min+1} points")
+
+        # Crop dataset
+        ds_cropped = ds.isel(lon=slice(lon_idx_min, lon_idx_max+1), lat=slice(lat_idx_min, lat_idx_max+1))
+    else:
+        # For 2D coords, this is more complex - for now just return original
+        _log_warn("2D lon/lat coordinates not fully supported for UTM cropping, using original dataset")
+        ds_cropped = ds
+
+    return ds_cropped
 
 
 def _get_fixed_utm_crs():
@@ -558,10 +614,13 @@ def buildBC_dev(
         project_home = conf_file.parent
         dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs)
 
+        # Get UTM CRS first
+        utm_crs = _get_fixed_utm_crs()
+
         ds = xr.open_dataset(nc_path_resolved, chunks={"lon": 64, "lat": 64})
 
-        # lon/lat crop
-        ds = _crop_lonlat_by_conf(ds, conf.get("__raw__"))
+        # UTM-based crop (same coordinate system as DEM)
+        ds = _crop_wind_by_utm_bounds(ds, conf.get("__raw__"), utm_crs)
 
         # vertical coordinate detection
         if "lev" in ds.coords:
@@ -638,20 +697,54 @@ def buildBC_dev(
         pts_xy, center_xy, rotate_deg, pivot_xy = _project_bbox_and_rotation(lon_min, lon_max, lat_min, lat_max, utm_crs)
         _log_info(f"Estimated convergence angle = {rotate_deg:.6f} deg, use projected bbox centroid as pivot")
 
+        # Calculate target domain size from config bounds (for si_x_cfd and si_y_cfd)
+        # Simply project the two corner points and calculate the difference
+        target_domain_size = None
+        if conf.get("__raw__"):
+            conf_raw = conf.get("__raw__")
+            m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+            m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+            if m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip():
+                lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
+                lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
+                lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
+                lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
+
+                # Project two corner points to UTM
+                transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+                x_lo, y_lo = transformer.transform(lon_lo, lat_lo)
+                x_hi, y_hi = transformer.transform(lon_hi, lat_hi)
+
+                # Calculate size directly (no rotation needed for domain size definition)
+                si_x_target = x_hi - x_lo
+                si_y_target = y_hi - y_lo
+
+                target_domain_size = (si_x_target, si_y_target)
+                _log_info(f"Target domain size from config (UTM projection): {si_x_target:.3f} x {si_y_target:.3f} m")
+
         # project each grid point and rotate
         x_rot, y_rot = _project_rotate_grid(lon, lat, utm_crs, rotate_deg, pivot_xy)
 
         # global min/max in meters after rotation, then shift to zero origin
-        x_min, x_max = float(x_rot.min()), float(x_rot.max())
-        y_min, y_max = float(y_rot.min()), float(y_rot.max())
-        _log_info(f"Meter range after rotation X [{x_min:.3f}, {x_max:.3f}] Y [{y_min:.3f}, {y_max:.3f}]")
+        x_min_data, x_max_data = float(x_rot.min()), float(x_rot.max())
+        y_min_data, y_max_data = float(y_rot.min()), float(y_rot.max())
+        _log_info(f"Wind data range after rotation X [{x_min_data:.3f}, {x_max_data:.3f}] Y [{y_min_data:.3f}, {y_max_data:.3f}]")
 
-        x_src = x_rot - x_min
-        y_src = y_rot - y_min
+        x_src = x_rot - x_min_data
+        y_src = y_rot - y_min_data
 
-        # interpolate to uniform grid
+        # Use target domain size if available, otherwise use data range
+        if target_domain_size is not None:
+            x_range_target, y_range_target = target_domain_size
+            _log_info(f"Using target domain size for interpolation: {x_range_target:.3f} x {y_range_target:.3f} m")
+        else:
+            x_range_target = x_max_data - x_min_data
+            y_range_target = y_max_data - y_min_data
+            _log_info(f"Using data range for interpolation: {x_range_target:.3f} x {y_range_target:.3f} m")
+
+        # interpolate to uniform grid using target domain size
         u_m, v_m, dx, dy = _interp_to_uniform_meter_grid(
-            u, v, x_src, y_src, nx=nx, ny=ny, x_min=0.0, x_max=x_max - x_min, y_min=0.0, y_max=y_max - y_min
+            u, v, x_src, y_src, nx=nx, ny=ny, x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target
         )
         dz = float(lev[-1] - lev[0]) / (nz - 1) if nz > 1 else 0.0
 
@@ -660,15 +753,15 @@ def buildBC_dev(
         dem_data_to_save = None
         if dem_points_utm is not None and dem_elevations is not None:
             _log_info("Interpolating DEM to wind field grid")
-            x_grid = np.linspace(0.0, x_max - x_min, nx)
-            y_grid = np.linspace(0.0, y_max - y_min, ny)
+            x_grid = np.linspace(0.0, x_range_target, nx)
+            y_grid = np.linspace(0.0, y_range_target, ny)
             # Shift DEM points to match wind grid origin
-            dem_points_shifted = dem_points_utm - np.array([x_min, y_min])
+            dem_points_shifted = dem_points_utm - np.array([x_min_data, y_min_data])
             dem_grid = _interpolate_dem_to_grid(
                 dem_points_shifted, dem_elevations,
                 x_grid, y_grid,
                 rotate_deg, pivot_xy,
-                x_min, y_min
+                x_min_data, y_min_data
             )
 
             # Prepare DEM data for saving (will save later after proj_temp is created)
@@ -682,10 +775,10 @@ def buildBC_dev(
                 'base_height': 50.0,   # Fixed base height
                 'rotate_deg': rotate_deg,
                 'pivot_xy': pivot_xy,
-                'x_min': x_min,
-                'y_min': y_min,
-                'x_max': x_max,
-                'y_max': y_max
+                'x_min': x_min_data,
+                'y_min': y_min_data,
+                'x_max': x_max_data,
+                'y_max': y_max_data
             }
         else:
             _log_info("No DEM data, proceeding with flat terrain")
@@ -737,8 +830,18 @@ def buildBC_dev(
             # conf_lines[20] = f"cut_lon_wrf = [{orig_lon_min:.6f}, {orig_lon_max:.6f}]"
             # conf_lines[21] = f"cut_lat_wrf = [{orig_lat_min:.6f}, {orig_lat_max:.6f}]"
             conf_lines[14] = "// Projected SI Range after rotation"
-            conf_lines[15] = f"si_x_cfd = [0.000000, {(x_max - x_min):.6f}]"
-            conf_lines[16] = f"si_y_cfd = [0.000000, {(y_max - y_min):.6f}]"
+
+            # Use target_domain_size if available (from config bounds), otherwise use data bounds
+            if target_domain_size is not None:
+                si_x_range, si_y_range = target_domain_size
+                _log_info(f"Using target domain size for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
+            else:
+                si_x_range = x_max_data - x_min_data
+                si_y_range = y_max_data - y_min_data
+                _log_info(f"Using data bounds for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
+
+            conf_lines[15] = f"si_x_cfd = [0.000000, {si_x_range:.6f}]"
+            conf_lines[16] = f"si_y_cfd = [0.000000, {si_y_range:.6f}]"
             # vertical range starts at 0
             z_max_new = float(lev[-1]) if float(lev[0]) <= 0 else float(lev[-1]) + float(lev[0])
             conf_lines[17] = f"si_z_cfd = [0.000000, {z_max_new:.6f}]"
@@ -1023,7 +1126,7 @@ def buildBC_dev(
 
         # summary
         _log_info(f"Lon range {lon_min:.6f} to {lon_max:.6f} Lat range {lat_min:.6f} to {lat_max:.6f}")
-        _log_info(f"Rotated SI range X 0.000 to {(x_max - x_min):.3f} m Y 0.000 to {(y_max - y_min):.3f} m")
+        _log_info(f"Target domain range X 0.000 to {si_x_range:.3f} m Y 0.000 to {si_y_range:.3f} m")
         _log_info(f"Grid spacing dx={dx:.3f} m dy={dy:.3f} m dz={dz:.3f} m")
         _log_info("buildBC_dev finished")
 
