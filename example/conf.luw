@@ -36,6 +36,7 @@ cell_size =
 validation = pass
 high_order = true
 flux_correction = true
+coriolis_term = true
 
 
 
