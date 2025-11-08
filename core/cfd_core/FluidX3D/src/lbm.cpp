@@ -1,9 +1,13 @@
 #include "lbm.hpp"
 #include <cstring>
+extern float coriolis_Omegax_lbmu;
+extern float coriolis_Omegay_lbmu;
+extern float coriolis_Omegaz_lbmu;
 
 
 
 Units units; // for unit conversion
+float coriolis_f_lbmu = 0.0f;
 
 #if defined(D2Q9)
 const uint velocity_set = 9u;
@@ -140,8 +144,8 @@ void LBM_Domain::allocate(Device& device) {
 	u = Memory<float>(device, N, 3u);
 	flags = Memory<uchar>(device, N);
 	kernel_initialize = Kernel(device, N, "initialize", fi, rho, u, flags);
-	kernel_stream_collide = Kernel(device, N, "stream_collide", fi, rho, u, flags, t, fx, fy, fz);
-	kernel_update_fields = Kernel(device, N, "update_fields", fi, rho, u, flags, t, fx, fy, fz);
+	kernel_stream_collide = Kernel(device, N, "stream_collide", fi, rho, u, flags, t, fx, fy, fz, omega_x, omega_y, omega_z);
+	kernel_update_fields = Kernel(device, N, "update_fields", fi, rho, u, flags, t, fx, fy, fz, omega_x, omega_y, omega_z);
 
 #ifdef FORCE_FIELD
 	F = Memory<float>(device, N, 3u);
@@ -193,13 +197,15 @@ void LBM_Domain::allocate(Device& device) {
 void LBM_Domain::enqueue_initialize() { // call kernel_initialize
 	kernel_initialize.enqueue_run();
 }
+
 void LBM_Domain::enqueue_stream_collide() { // call kernel_stream_collide to perform one LBM time step
-	kernel_stream_collide.set_parameters(4u, t, fx, fy, fz).enqueue_run();
+	kernel_stream_collide.set_parameters(4u, t, fx, fy, fz, omega_x, omega_y, omega_z).enqueue_run();
 }
+
 void LBM_Domain::enqueue_update_fields() { // update fields (rho, u, T) manually
 #ifndef UPDATE_FIELDS
 	if(t!=t_last_update_fields) { // only run kernel_update_fields if the time step has changed since last update
-		kernel_update_fields.set_parameters(4u, t, fx, fy, fz).enqueue_run();
+		kernel_update_fields.set_parameters(7u, t, fx, fy, fz, omega_x, omega_y, omega_z).enqueue_run();
 		t_last_update_fields = t;
 	}
 #endif // UPDATE_FIELDS
@@ -451,13 +457,13 @@ string LBM_Domain::device_defines() const { return
 	"\n	#define def_Ny "+to_string(Ny)+"u"
 	"\n	#define def_Nz "+to_string(Nz)+"u"
 	"\n	#define def_N "+to_string(get_N())+"ul"
-	"\n	#define uxx "+(get_N()<=(ulong)max_uint ? "uint" : "ulong")+"" // switchable data type for index calculation (32-bit uint / 64-bit ulong)
+	"\n	#define uxx "+(get_N()<=(ulong)max_uint ? "uint" : "ulong")+""
 
 	"\n	#define def_Dx "+to_string(Dx)+"u"
 	"\n	#define def_Dy "+to_string(Dy)+"u"
 	"\n	#define def_Dz "+to_string(Dz)+"u"
 
-	"\n	#define def_Ox "+to_string(Ox)+"" // offsets are signed integer!
+	"\n	#define def_Ox "+to_string(Ox)+""
 	"\n	#define def_Oy "+to_string(Oy)+""
 	"\n	#define def_Oz "+to_string(Oz)+""
 
@@ -465,117 +471,128 @@ string LBM_Domain::device_defines() const { return
 	"\n	#define def_Ay "+to_string(Nz*Nx)+"u"
 	"\n	#define def_Az "+to_string(Nx*Ny)+"u"
 
-	"\n	#define def_domain_offset_x "+to_string(0.5f*(float)((int)Nx+2*Ox+(int)Dx*(2*(int)(Dx>1u)-(int)Nx)))+"f"
-	"\n	#define def_domain_offset_y "+to_string(0.5f*(float)((int)Ny+2*Oy+(int)Dy*(2*(int)(Dy>1u)-(int)Ny)))+"f"
-	"\n	#define def_domain_offset_z "+to_string(0.5f*(float)((int)Nz+2*Oz+(int)Dz*(2*(int)(Dz>1u)-(int)Nz)))+"f"
+	"\n	#define D"+to_string(dimensions)+"Q"+to_string(velocity_set)+""
+	"\n	#define def_velocity_set "+to_string(velocity_set)+"u"
+	"\n	#define def_dimensions "+to_string(dimensions)+"u"
+	"\n	#define def_transfers "+to_string(transfers)+"u"
 
-	"\n	#define D"+to_string(dimensions)+"Q"+to_string(velocity_set)+"" // D2Q9/D3Q15/D3Q19/D3Q27
-	"\n	#define def_velocity_set "+to_string(velocity_set)+"u" // LBM velocity set (D2Q9/D3Q15/D3Q19/D3Q27)
-	"\n	#define def_dimensions "+to_string(dimensions)+"u" // number spatial dimensions (2D or 3D)
-	"\n	#define def_transfers "+to_string(transfers)+"u" // number of DDFs that are transferred between multiple domains
-
-	"\n	#define def_c 0.57735027f" // lattice speed of sound c = 1/sqrt(3)*dt
-	"\n	#define def_w " +to_string(1.0f/get_tau())+"f" // relaxation rate w = dt/tau = dt/(nu/c^2+dt/2) = 1/(3*nu+1/2)
+	"\n	#define def_c 0.57735027f"
+	"\n	#define def_w "+to_string(1.0f/get_tau())+"f"
 #if defined(D2Q9)
-	"\n	#define def_w0 (1.0f/2.25f)" // center (0)
-	"\n	#define def_ws (1.0f/9.0f)" // straight (1-4)
-	"\n	#define def_we (1.0f/36.0f)" // edge (5-8)
+	"\n	#define def_w0 (1.0f/2.25f)"
+	"\n	#define def_ws (1.0f/9.0f)"
+	"\n	#define def_we (1.0f/36.0f)"
 #elif defined(D3Q15)
-	"\n	#define def_w0 (1.0f/4.5f)" // center (0)
-	"\n	#define def_ws (1.0f/9.0f)" // straight (1-6)
-	"\n	#define def_wc (1.0f/72.0f)" // corner (7-14)
+	"\n	#define def_w0 (1.0f/4.5f)"
+	"\n	#define def_ws (1.0f/9.0f)"
+	"\n	#define def_wc (1.0f/72.0f)"
 #elif defined(D3Q19)
-	"\n	#define def_w0 (1.0f/3.0f)" // center (0)
-	"\n	#define def_ws (1.0f/18.0f)" // straight (1-6)
-	"\n	#define def_we (1.0f/36.0f)" // edge (7-18)
+	"\n	#define def_w0 (1.0f/3.0f)"
+	"\n	#define def_ws (1.0f/18.0f)"
+	"\n	#define def_we (1.0f/36.0f)"
 #elif defined(D3Q27)
-	"\n	#define def_w0 (1.0f/3.375f)" // center (0)
-	"\n	#define def_ws (1.0f/13.5f)" // straight (1-6)
-	"\n	#define def_we (1.0f/54.0f)" // edge (7-18)
-	"\n	#define def_wc (1.0f/216.0f)" // corner (19-26)
-#endif // D3Q27
+	"\n	#define def_w0 (1.0f/3.375f)"
+	"\n	#define def_ws (1.0f/13.5f)"
+	"\n	#define def_we (1.0f/54.0f)"
+	"\n	#define def_wc (1.0f/216.0f)"
+#endif
 
 #if defined(SRT)
 	"\n	#define SRT"
 #elif defined(TRT)
 	"\n	#define TRT"
-#endif // TRT
+#endif
 
-	"\n	#define TYPE_S 0x01" // 0b00000001 // (stationary or moving) solid boundary
-	"\n	#define TYPE_E 0x02" // 0b00000010 // equilibrium boundary (inflow/outflow)
-	"\n	#define TYPE_T 0x04" // 0b00000100 // temperature boundary
-	"\n	#define TYPE_F 0x08" // 0b00001000 // fluid
-	"\n	#define TYPE_I 0x10" // 0b00010000 // interface
-	"\n	#define TYPE_G 0x20" // 0b00100000 // gas
-	"\n	#define TYPE_X 0x40" // 0b01000000 // reserved type X
-	"\n	#define TYPE_Y 0x80" // 0b10000000 // reserved type Y
+	"\n	#define TYPE_S 0x01"
+	"\n	#define TYPE_E 0x02"
+	"\n	#define TYPE_T 0x04"
+	"\n	#define TYPE_F 0x08"
+	"\n	#define TYPE_I 0x10"
+	"\n	#define TYPE_G 0x20"
+	"\n	#define TYPE_X 0x40"
+	"\n	#define TYPE_Y 0x80"
 
-	"\n	#define TYPE_MS 0x03" // 0b00000011 // cell next to moving solid boundary
-	"\n	#define TYPE_BO 0x03" // 0b00000011 // any flag bit used for boundaries (temperature excluded)
-	"\n	#define TYPE_IF 0x18" // 0b00011000 // change from interface to fluid
-	"\n	#define TYPE_IG 0x30" // 0b00110000 // change from interface to gas
-	"\n	#define TYPE_GI 0x38" // 0b00111000 // change from gas to interface
-	"\n	#define TYPE_SU 0x38" // 0b00111000 // any flag bit used for SURFACE
+	"\n	#define TYPE_MS 0x03"
+	"\n	#define TYPE_BO 0x03"
+	"\n	#define TYPE_IF 0x18"
+	"\n	#define TYPE_IG 0x30"
+	"\n	#define TYPE_GI 0x38"
+	"\n	#define TYPE_SU 0x38"
 
 #if defined(FP16S)
-	"\n	#define fpxx half" // switchable data type (scaled IEEE-754 16-bit floating-point format: 1-5-10, exp-30, +-1.99902344, +-1.86446416E-9, +-1.81898936E-12, 3.311 digits)
-	"\n	#define fpxx_copy ushort" // switchable data type for direct copying (scaled IEEE-754 16-bit floating-point format: 1-5-10, exp-30, +-1.99902344, +-1.86446416E-9, +-1.81898936E-12, 3.311 digits)
-	"\n	#define load(p,o) vload_half(o,p)*3.0517578E-5f" // special function for loading half
-	"\n	#define store(p,o,x) vstore_half_rte((x)*32768.0f,o,p)" // special function for storing half
+	"\n	#define fpxx half"
+	"\n	#define fpxx_copy ushort"
+	"\n	#define load(p,o) vload_half(o,p)*3.0517578E-5f"
+	"\n	#define store(p,o,x) vstore_half_rte((x)*32768.0f,o,p)"
 #elif defined(FP16C)
-	"\n	#define fpxx ushort" // switchable data type (custom 16-bit floating-point format: 1-4-11, exp-15, +-1.99951168, +-6.10351562E-5, +-2.98023224E-8, 3.612 digits), 12.5% slower than IEEE-754 16-bit
-	"\n	#define fpxx_copy ushort" // switchable data type for direct copying (custom 16-bit floating-point format: 1-4-11, exp-15, +-1.99951168, +-6.10351562E-5, +-2.98023224E-8, 3.612 digits), 12.5% slower than IEEE-754 16-bit
-	"\n	#define load(p,o) half_to_float_custom(p[o])" // special function for loading half
-	"\n	#define store(p,o,x) p[o]=float_to_half_custom(x)" // special function for storing half
-#else // FP32
-	"\n	#define fpxx float" // switchable data type (regular 32-bit float)
-	"\n	#define fpxx_copy float" // switchable data type for direct copying (regular 32-bit float)
-	"\n	#define load(p,o) p[o]" // regular float read
-	"\n	#define store(p,o,x) p[o]=x" // regular float write
-#endif // FP32
+	"\n	#define fpxx ushort"
+	"\n	#define fpxx_copy ushort"
+	"\n	#define load(p,o) half_to_float_custom(p[o])"
+	"\n	#define store(p,o,x) p[o]=float_to_half_custom(x)"
+#else
+	"\n	#define fpxx float"
+	"\n	#define fpxx_copy float"
+	"\n	#define load(p,o) p[o]"
+	"\n	#define store(p,o,x) p[o]=x"
+#endif
 
 #ifdef UPDATE_FIELDS
 	"\n	#define UPDATE_FIELDS"
-#endif // UPDATE_FIELDS
+#endif
 
 #ifdef VOLUME_FORCE
 	"\n	#define VOLUME_FORCE"
-#endif // VOLUME_FORCE
+#endif
 
 #ifdef MOVING_BOUNDARIES
 	"\n	#define MOVING_BOUNDARIES"
-#endif // MOVING_BOUNDARIES
+#endif
 
 #ifdef EQUILIBRIUM_BOUNDARIES
 	"\n	#define EQUILIBRIUM_BOUNDARIES"
-#endif // EQUILIBRIUM_BOUNDARIES
+#endif
 
 #ifdef FORCE_FIELD
 	"\n	#define FORCE_FIELD"
-#endif // FORCE_FIELD
+#endif
 
 #ifdef SURFACE
 	"\n	#define SURFACE"
-	"\n	#define def_6_sigma "+to_string(6.0f*sigma)+"f" // rho_laplace = 2*o*K, rho = 1-rho_laplace/c^2 = 1-(6*o)*K
-#endif // SURFACE
+	"\n	#define def_6_sigma "+to_string(6.0f*sigma)+"f"
+#endif
 
 #ifdef TEMPERATURE
 	"\n	#define TEMPERATURE"
-	"\n	#define def_w_T "+to_string(1.0f/(2.0f*alpha+0.5f))+"f" // wT = dt/tauT = 1/(2*alpha+1/2), alpha = thermal diffusion coefficient
-	"\n	#define def_beta "+to_string(beta)+"f" // thermal expansion coefficient
-	"\n	#define def_T_avg "+to_string(T_avg)+"f" // average temperature
-#endif // TEMPERATURE
+	"\n	#define def_w_T "+to_string(1.0f/(2.0f*alpha+0.5f))+"f"
+	"\n	#define def_beta "+to_string(beta)+"f"
+	"\n	#define def_T_avg "+to_string(T_avg)+"f"
+#endif
 
 #ifdef SUBGRID
 	"\n	#define SUBGRID"
-#endif // SUBGRID
+#endif
 
 #ifdef PARTICLES
-	"\n	#define PARTICLES"
-	"\n	#define def_particles_N "+to_string(particles_N)+"ul"
-	"\n	#define def_particles_rho "+to_string(particles_rho)+"f"
-#endif // PARTICLES
+	"\n\t#define PARTICLES"
+	"\n\t#define def_particles_N " + to_string(particles_N) + "ul"
+	"\n\t#define def_particles_rho " + to_string(particles_rho) + "f"
+#endif
+
+	"\n\t#define CORIOLIS"
+	"\n\t#define def_Omegax " + to_string(coriolis_Omegax_lbmu) + "f"
+	"\n\t#define def_Omegay " + to_string(coriolis_Omegay_lbmu) + "f"
+	"\n\t#define def_Omegaz " + to_string(coriolis_Omegaz_lbmu) + "f"
+	"\n\t#define def_coriolis_f " + to_string(coriolis_f_lbmu) + "f"
 ;}
+
+string LBM_Domain::full_opencl_c_code() const {
+#ifdef GRAPHICS
+	return device_defines() + graphics.device_defines() + get_opencl_c_code();
+#else
+	return device_defines() + get_opencl_c_code();
+#endif
+}
+
 
 #ifdef GRAPHICS
 void LBM_Domain::Graphics::allocate(Device& device) {

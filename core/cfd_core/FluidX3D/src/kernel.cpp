@@ -1,5 +1,11 @@
 #include "kernel.hpp" // note: unbalanced round brackets () are not allowed and string literals can't be arbitrarily long, so periodically interrupt with )+R(
-string opencl_c_container() { return R( // ########################## begin of OpenCL C code ####################################################################
+
+string opencl_c_container() {
+	return R( // ########################## begin of OpenCL C code ####################################################################
+
+	const float def_domain_offset_x = 0.0f;
+	const float def_domain_offset_y = 0.0f;
+	const float def_domain_offset_z = 0.0f;
 
 
 
@@ -611,7 +617,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 		const float scale = 2.0f/fmin((float)def_Nx, (float)def_Ny);
 		int a = abs((int)floor(scale*intersection.x));
 		int b = abs((int)floor(scale*intersection.y));
-		const float r = scale*sqrt(sq(intersection.x)+sq(intersection.y));
+		const float r = scale * sqrt((float)(sq(intersection.x) + sq(intersection.y)));
 		const int w = (a%2==b%2);
 		return color_mix(w*c1+(1-w)*c2, color_mix(c1, c2, 0.5f), clamp(10.0f/r, 0.0f, 1.0f));
 	} else {
@@ -755,7 +761,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 	ray ray_internal; // compute internal ray and transmission ray
 	ray_internal.origin = ray_in.origin+(d+0.005f)*ray_in.direction; // start intersection points a bit behind triangle to avoid self-transmission
 	ray_internal.direction = refract(ray_in.direction, normal, def_n);
-	const float wr = clamp(sq(cb(2.0f*acospi(fabs(ray_in_normal)))), 0.0f, 1.0f); // increase reflectivity if ray intersects surface at shallow angle
+	const float wr = clamp((float)(sq(cb(2.0f * acospi(fabs(ray_in_normal))))), 0.0f, 1.0f);// increase reflectivity if ray intersects surface at shallow angle
 	if(is_inside) { // swap ray_reflect and ray_internal
 		const float3 ray_internal_origin = ray_internal.origin;
 		ray_internal.origin = ray_reflect->origin;
@@ -1466,8 +1472,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 )+"#endif"+R( // MOVING_BOUNDARIES
 
 
-
-)+R(kernel void stream_collide)+"("+R(global fpxx* fi, global float* rho, global float* u, global uchar* flags, const ulong t, const float fx, const float fy, const float fz // ) { // main LBM kernel
+) + R(kernel void stream_collide) + "(" + R(global fpxx * fi, global float* rho, global float* u, global uchar * flags, const ulong t, const float fx, const float fy, const float fz, const float omega_x, const float omega_y, const float omega_z // ) { // main LBM kernel
 )+"#ifdef FORCE_FIELD"+R(
 	, const global float* F // argument order is important
 )+"#endif"+R( // FORCE_FIELD
@@ -1490,47 +1495,54 @@ string opencl_c_container() { return R( // ########################## begin of O
 	float fhn[def_velocity_set]; // local DDFs
 	load_f(n, fhn, fi, j, t); // perform streaming (part 2)
 
-)+"#ifdef MOVING_BOUNDARIES"+R(
-	if(flagsn_bo==TYPE_MS) apply_moving_boundaries(fhn, j, u, flags); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
-)+"#endif"+R( // MOVING_BOUNDARIES
+		) + "#ifdef MOVING_BOUNDARIES" + R(
+		if (flagsn_bo == TYPE_MS) apply_moving_boundaries(fhn, j, u, flags); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
+		) + "#endif" + R( // MOVING_BOUNDARIES
 
-	float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
-)+"#ifndef EQUILIBRIUM_BOUNDARIES"+R(
-	calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn); // calculate density and velocity fields from fi
-)+"#else"+R( // EQUILIBRIUM_BOUNDARIES
-	if(flagsn_bo==TYPE_E) {
-		rhon = rho[               n]; // apply preset velocity/density
-		uxn  = u[                 n];
-		uyn  = u[    def_N+(ulong)n];
-		uzn  = u[2ul*def_N+(ulong)n];
-	} else {
-		calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn); // calculate density and velocity fields from fi
-	}
-)+"#endif"+R( // EQUILIBRIUM_BOUNDARIES
-	float fxn=fx, fyn=fy, fzn=fz; // force starts as constant volume force, can be modified before call of calculate_forcing_terms(...)
+			float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
+		) + "#ifndef EQUILIBRIUM_BOUNDARIES" + R(
+			calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn); // calculate density and velocity fields from fi
+		) + "#else" + R( // EQUILIBRIUM_BOUNDARIES
+			if (flagsn_bo == TYPE_E) {
+				rhon = rho[n]; // apply preset velocity/density
+				uxn = u[n];
+				uyn = u[def_N + (ulong)n];
+				uzn = u[2ul * def_N + (ulong)n];
+			}
+			else {
+				calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn); // calculate density and velocity fields from fi
+			}
+				) + "#endif" + R( // EQUILIBRIUM_BOUNDARIES
+					float fxn = fx, fyn = fy, fzn = fz;
+	const float cor_x = 2.0f * rhon * (omega_y * uzn - omega_z * uyn);
+	const float cor_y = 2.0f * rhon * (omega_z * uxn - omega_x * uzn);
+	const float cor_z = 2.0f * rhon * (omega_x * uyn - omega_y * uxn);
+	fxn += cor_x;
+	fyn += cor_y;
+	fzn += cor_z;
+
 	float Fin[def_velocity_set]; // forcing terms
+		) + "#ifdef FORCE_FIELD" + R(
+			{ // separate block to avoid variable name conflicts
+				fxn += F[n]; // apply force field
+				fyn += F[def_N + (ulong)n];
+				fzn += F[2ul * def_N + (ulong)n];
+			}
+		) + "#endif" + R( // FORCE_FIELD
+		) + "#ifdef SURFACE" + R(
+			if (flagsn_su == TYPE_I) { // cell was interface, eventually initiate flag change
+				bool TYPE_NO_F = true, TYPE_NO_G = true; // temporary flags for no fluid or gas neighbors
+				for (uint i = 1u; i < def_velocity_set; i++) {
+					const uchar flagsji_su = flags[j[i]] & TYPE_SU; // extract SURFACE flags
+					TYPE_NO_F = TYPE_NO_F && flagsji_su != TYPE_F;
+					TYPE_NO_G = TYPE_NO_G && flagsji_su != TYPE_G;
+				}
+				const float massn = mass[n]; // load mass
+				if (massn > rhon || TYPE_NO_G) flags[n] = (flagsn & ~TYPE_SU) | TYPE_IF; // set flag interface->fluid
+				else if (massn < 0.0f || TYPE_NO_F) flags[n] = (flagsn & ~TYPE_SU) | TYPE_IG; // set flag interface->gas
+			}
+				) + "#endif" + R( // SURFACE
 
-)+"#ifdef FORCE_FIELD"+R(
-	{ // separate block to avoid variable name conflicts
-		fxn += F[                 n]; // apply force field
-		fyn += F[    def_N+(ulong)n];
-		fzn += F[2ul*def_N+(ulong)n];
-	}
-)+"#endif"+R( // FORCE_FIELD
-
-)+"#ifdef SURFACE"+R(
-	if(flagsn_su==TYPE_I) { // cell was interface, eventually initiate flag change
-		bool TYPE_NO_F=true, TYPE_NO_G=true; // temporary flags for no fluid or gas neighbors
-		for(uint i=1u; i<def_velocity_set; i++) {
-			const uchar flagsji_su = flags[j[i]]&TYPE_SU; // extract SURFACE flags
-			TYPE_NO_F = TYPE_NO_F&&flagsji_su!=TYPE_F;
-			TYPE_NO_G = TYPE_NO_G&&flagsji_su!=TYPE_G;
-		}
-		const float massn = mass[n]; // load mass
-		     if(massn>rhon || TYPE_NO_G) flags[n] = (flagsn&~TYPE_SU)|TYPE_IF; // set flag interface->fluid
-		else if(massn<0.0f || TYPE_NO_F) flags[n] = (flagsn&~TYPE_SU)|TYPE_IG; // set flag interface->gas
-	}
-)+"#endif"+R( // SURFACE
 
 )+"#ifdef TEMPERATURE"+R(
 	{ // separate block to avoid variable name conflicts
@@ -1815,14 +1827,14 @@ string opencl_c_container() { return R( // ########################## begin of O
 } // possible types at the end of surface_3(): TYPE_F / TYPE_I / TYPE_G
 )+"#endif"+R( // SURFACE
 
-)+R(kernel void update_fields)+"("+R(const global fpxx* fi, global float* rho, global float* u, const global uchar* flags, const ulong t, const float fx, const float fy, const float fz // ) { // calculate fields from DDFs
-)+"#ifdef FORCE_FIELD"+R(
-	, const global float* F // argument order is important
-)+"#endif"+R( // FORCE_FIELD
-)+"#ifdef TEMPERATURE"+R(
-	, const global fpxx* gi, global float* T // argument order is important
-)+"#endif"+R( // TEMPERATURE
-)+") {"+R( // update_fields()
+) + R(kernel void update_fields) + "(" + R(const global fpxx * fi, global float* rho, global float* u, const global uchar * flags, const ulong t, const float fx, const float fy, const float fz, const float omega_x, const float omega_y, const float omega_z // ) { // calculate fields from DDFs
+) + "#ifdef FORCE_FIELD" + R(
+, const global float* F // argument order is important
+) + "#endif" + R( // FORCE_FIELD
+) + "#ifdef TEMPERATURE" + R(
+, const global fpxx * gi, global float* T // argument order is important
+) + "#endif" + R( // TEMPERATURE
+) + ") {" + R( // update_fields()
 	const uxx n = get_global_id(0); // n = x+(y+z*Ny)*Nx
 	if(n>=(uxx)def_N||is_halo(n)) return; // don't execute update_fields() on halo
 	const uchar flagsn = flags[n];
@@ -1838,9 +1850,17 @@ string opencl_c_container() { return R( // ########################## begin of O
 	if(flagsn_bo==TYPE_MS) apply_moving_boundaries(fhn, j, u, flags); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
 )+"#endif"+R( // MOVING_BOUNDARIES
 
-	float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
-	calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn); // calculate density and velocity fields from fi
-	float fxn=fx, fyn=fy, fzn=fz; // force starts as constant volume force, can be modified before call of calculate_forcing_terms(...)
+	float rhon, uxn, uyn, uzn;
+	calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
+	float fxn = fx, fyn = fy, fzn = fz;
+	const float cor_x = 2.0f * rhon * (omega_y * uzn - omega_z * uyn);
+	const float cor_y = 2.0f * rhon * (omega_z * uxn - omega_x * uzn);
+	const float cor_z = 2.0f * rhon * (omega_x * uyn - omega_y * uxn);
+	fxn += cor_x;
+	fyn += cor_y;
+	fzn += cor_z;
+		) + R(
+
 
 )+"#ifdef FORCE_FIELD"+R(
 	{ // separate block to avoid variable name conflicts
@@ -2345,10 +2365,10 @@ string opencl_c_container() { return R( // ########################## begin of O
 )+R(kernel void unvoxelize_mesh(global uchar* flags, const uchar flag, float x0, float y0, float z0, float x1, float y1, float z1) { // remove voxelized triangle mesh
 	const uxx n = get_global_id(0);
 	const float3 p = position(coordinates(n))+(float3)(0.5f*(float)((int)def_Nx+2*def_Ox)-0.5f, 0.5f*(float)((int)def_Ny+2*def_Oy)-0.5f, 0.5f*(float)((int)def_Nz+2*def_Oz)-0.5f);
-	if(p.x>=x0-1.0f&&p.y>=y0-1.0f&&p.z>=z0-1.0f&&p.x<=x1+1.0f&&p.y<=y1+1.0f&&p.z<=z1+1.0f) flags[n] &= ~flag;
+	if (p.x >= x0 - 1.0f && p.y >= y0 - 1.0f && p.z >= z0 - 1.0f && p.x <= x1 + 1.0f && p.y <= y1 + 1.0f && p.z <= z1 + 1.0f) flags[n] &= ~flag;
 } // unvoxelize_mesh()
 
-kernel void finalize_voxelize_and(global uchar* flags, float x0, float y0, float z0, float x1, float y1, float z1) {
+) + R(kernel void finalize_voxelize_and(global uchar * flags, float x0, float y0, float z0, float x1, float y1, float z1) {
 	const uxx n = get_global_id(0);
 	const float3 p = position(coordinates(n)) + (float3)(
 		0.5f * (float)((int)def_Nx + 2 * def_Ox) - 0.5f,
@@ -2365,9 +2385,9 @@ kernel void finalize_voxelize_and(global uchar* flags, float x0, float y0, float
 }
 
 
-// ################################################## graphics code ##################################################
+) + R(// ################################################## graphics code ##################################################
 
-)+"#ifdef GRAPHICS"+R(
+) + "#ifdef GRAPHICS" + R(
 
 )+R(void calculate_j8(const uint3 xyz, uxx* j) {
 	const uxx x0 = (uxx)  xyz.x; // cube stencil

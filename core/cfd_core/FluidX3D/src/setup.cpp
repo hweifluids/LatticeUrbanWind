@@ -5,8 +5,8 @@
 #include <limits>
 #include <cfloat> 
 #include <chrono>   
-#include <ctime>    // std::localtime
-#include <iomanip>  // std::put_time
+#include <ctime>   
+#include <iomanip> 
 #include <thread>
 #include <atomic>
 #include <algorithm>
@@ -17,6 +17,7 @@
 #include "interpolation.hpp"
 #include "interpolation_hd.hpp"
 #include "fluxcorrection.hpp"
+extern float coriolis_f_lbmu;
 
 // ────────────── Global configuration ───────────────
 std::string caseName = "example";
@@ -32,8 +33,19 @@ std::string conf_used_path = "Integrated defaults (*.luw not found)";
 bool use_high_order = false;
 bool flux_correction = false;
 uint research_output_steps = 0u; 
+std::string validation_status = "fail"; 
+bool enable_coriolis = false;       
 
 struct SamplePoint { float3 p; float3 u; };
+
+// for Coriolis source term
+float coriolis_Omegax_lbmu = 0.0f;
+float coriolis_Omegay_lbmu = 0.0f;
+float coriolis_Omegaz_lbmu = 0.0f;
+float cut_lon_min_deg = 0.0f; // longitude/latitude given in *.luw, degrees
+float cut_lon_max_deg = 0.0f;
+float cut_lat_min_deg = 0.0f;
+float cut_lat_max_deg = 0.0f;
 
 
 // helper: read SurfData.csv (columns X,Y,Z,u,v,w in SI units, with header)
@@ -82,23 +94,13 @@ static std::vector<SamplePoint> read_samples(const string& csv_path) {
      return ss.str();
  }
 
-//static string now_str() {
-//    // Get timecode
-//   time_t now = time(nullptr);
-//   struct tm* local_time = localtime(&now);
-//   char buffer[80];
-//   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", local_time);
-//   //std::cout << "Formatted: " << buffer << std::endl;
-//   return buffer;
-//}
-
 void main_setup() {
     println("|-----------------------------------------------------------------------------|");
     println("|                                                                             |");
     println("|      LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation      |");
     println("|                                                                             |");
     println("|                                        Developed by Huanxia Wei's Team      |");
-    println("|                                        Version - v3.0-251107                |");
+    println("|                                        Version - v3.0-251108                |");
     println("|                                                                             |");
     println("|-----------------------------------------------------------------------------|");
  
@@ -130,6 +132,7 @@ void main_setup() {
         }
 
         std::ifstream fin;
+
         if (!luw_path_input.empty()) {
             std::filesystem::path luw_path_fs(luw_path_input);
             fin.open(luw_path_fs);
@@ -140,6 +143,20 @@ void main_setup() {
         auto second_val = [](const std::string& rng) {
             size_t c = rng.find(','); size_t r = rng.find(']', c);
             return (float)atof(rng.substr(c + 1, r - c - 1).c_str());
+            };
+        auto parse_pair_float = [&](const std::string& rng, float& a, float& b) {
+            size_t lb = rng.find('[');
+            size_t rb = rng.find(']', lb);
+            if (lb == std::string::npos || rb == std::string::npos) { a = 0.0f; b = 0.0f; return; }
+            std::string inside = rng.substr(lb + 1, rb - lb - 1);
+            std::stringstream ss(inside);
+            std::string token;
+            std::vector<float> vals;
+            while (std::getline(ss, token, ',')) {
+                vals.push_back((float)atof(trim(token).c_str()));
+            }
+            if (vals.size() >= 1) a = vals[0];
+            if (vals.size() >= 2) b = vals[1];
             };
         auto parse_triplet_uint = [&](const std::string& rng, uint& a, uint& b, uint& c) {
             size_t lb = rng.find('[');
@@ -171,6 +188,7 @@ void main_setup() {
 
                 std::string key = trim(line.substr(0, eq));
                 std::string val = trim(line.substr(eq + 1));
+                std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
                 auto unquote = [&](std::string s) {
                     s = trim(s);
@@ -205,6 +223,17 @@ void main_setup() {
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "validation") validation_status = unquote(val);
+                else if (key == "coriolis_term") {
+                    std::string v = unquote(val);
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    if (v == "true" || v == "1") enable_coriolis = true;
+                }
+
+                else if (key == "cut_lon_manual") parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
+                else if (key == "cut_lat_manual") parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
+
+
             }
             // si_size.z += z_si_offset;
             if (!memory) memory = 6000u;
@@ -223,8 +252,8 @@ void main_setup() {
                     uint mm = static_cast<uint>(atoi(trim(gpu_memory_val).c_str()));
                     if (mm > 0u) {
                         memory = mm;
-                        const uint3 Nfit = resolution(si_size, memory);  // 已在工程内，原本就有同名调用被注释
-                        cell_m = si_size.x / std::max(1u, Nfit.x);       // 用推得的 Nx 回推 cell_m，后续统一用 cell_m 计算 lbm_N
+                        const uint3 Nfit = resolution(si_size, memory); 
+                        cell_m = si_size.x / std::max(1u, Nfit.x);
                         applied = true;
                     }
                 }
@@ -242,6 +271,39 @@ void main_setup() {
             }
             parent = std::filesystem::path(conf_used_path).parent_path().string();
 
+        }
+    }
+
+    // ---------------------- Validation Check -----------------------------------
+    {
+        std::string v_check = validation_status;
+        std::transform(v_check.begin(), v_check.end(), v_check.begin(), ::tolower);
+
+        if (v_check != "pass" && v_check != "true" && v_check != "1") {
+            println("|-----------------------------------------------------------------------------|");
+            println("| WARNING: Validation status is '" + validation_status + "'. Pre-processing may be incomplete or invalid. |");
+            println("| Do you wish to continue with the simulation? (Press ENTER or type 'y'/'yes'):  |");
+
+            std::string user_choice;
+            std::getline(std::cin, user_choice);
+
+            // trim (lambda from file-reading scope must be redefined here)
+            auto trim = [](std::string s) {
+                const char* ws = " \t";
+                size_t b = s.find_first_not_of(ws);
+                size_t e = s.find_last_not_of(ws);
+                return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1);
+                };
+            user_choice = trim(user_choice);
+            std::transform(user_choice.begin(), user_choice.end(), user_choice.begin(), ::tolower);
+
+            if (user_choice != "" && user_choice != "y" && user_choice != "yes") {
+                println("| Aborting simulation at user's request.                                      |");
+                println("|-----------------------------------------------------------------------------|");
+                wait();
+                exit(0); // Graceful exit
+            }
+            println("| User confirmed to proceed despite validation warning.                       |");
         }
     }
 
@@ -294,7 +356,45 @@ void main_setup() {
     const float z_off = units.x(z_si_offset); 
 
     const float lbm_nu = units.nu(si_nu);
+
     println("| LBM viscosity = " + to_string(lbm_nu, 6u) + "                                                    |");
+
+    // Coriolis based on domain center lat/lon from *.luw
+    if (enable_coriolis) {
+        // 1. center in degrees
+        const float center_lon_deg = 0.5f * (cut_lon_min_deg + cut_lon_max_deg);
+        const float center_lat_deg = 0.5f * (cut_lat_min_deg + cut_lat_max_deg);
+
+        // 2. Earth rotation in SI
+        const float Omega_earth_si = 7.292115e-5f; // [1/s]
+        const float deg2rad = 3.14159265358979323846f / 180.0f;
+        const float lat_rad = center_lat_deg * deg2rad;
+
+        // local ENU frame: x east, y north, z up
+        const float Omegax_si = 0.0f;
+        const float Omegay_si = Omega_earth_si * cosf(lat_rad);
+        const float Omegaz_si = Omega_earth_si * sinf(lat_rad);
+
+        // 3. convert to lattice units
+        // dx_SI is your cell size in meters, dt_SI = dx_SI * (u_lbm / u_SI)
+        const float dx_si = cell_m;
+        const float dt_si = dx_si * (lbm_ref_u / si_ref_u);
+
+        coriolis_Omegax_lbmu = Omegax_si * dt_si;
+        coriolis_Omegay_lbmu = Omegay_si * dt_si;
+        coriolis_Omegaz_lbmu = Omegaz_si * dt_si;
+
+        // 4. give a short host-side info
+        println("| Coriolis enabled. Center lon,lat = " + to_string(center_lon_deg, 6u) + "," + to_string(center_lat_deg, 6u) + "               |");
+        println("| Coriolis Omega(lbmu)    = ("
+            + to_string(coriolis_Omegax_lbmu, 8u) + ","
+            + to_string(coriolis_Omegay_lbmu, 8u) + ","
+            + to_string(coriolis_Omegaz_lbmu, 8u) + ") per step                        |");
+    }
+    else {
+        println("| Coriolis term disabled by 'coriolis_term' setting in .luw.                      |");
+    }
+
 
     // read CSV
     const std::string csv_path = parent + "/proj_temp/SurfData_" + datetime + ".csv";
@@ -305,6 +405,30 @@ void main_setup() {
 
     // convert samples to LBM units
     const float u_scale = lbm_ref_u / si_ref_u;
+    if (enable_coriolis)
+    {
+        const float deg2rad = 3.14159265358979323846f / 180.0f;
+        const float center_lon_deg = 0.5f * (cut_lon_min_deg + cut_lon_max_deg);
+        const float center_lat_deg = 0.5f * (cut_lat_min_deg + cut_lat_max_deg);
+        const float omega_si = 7.292e-5f;           // Earth rotation [1/s]
+        float f_si = 0.0f;
+        if (cut_lat_min_deg != 0.0f || cut_lat_max_deg != 0.0f) {
+            f_si = 2.0f * omega_si * std::sin(center_lat_deg * deg2rad);
+        }
+        const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+        coriolis_f_lbmu = f_si * dt_si;
+        {
+            std::ostringstream os;
+            os << "| Coriolis (f): center(lon,lat)=(" << center_lon_deg << ", " << center_lat_deg << ") deg.";
+            println(os.str());
+        }
+        {
+            std::ostringstream os;
+            os << "| Coriolis (f): f_SI=" << f_si << " 1/s, f_LBM=" << coriolis_f_lbmu << ".";
+            println(os.str());
+        }
+    }
+
     std::vector<SamplePoint> samples; samples.reserve(samples_si.size());
     for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z)); sp.u = s.u * u_scale; samples.push_back(sp);}
 

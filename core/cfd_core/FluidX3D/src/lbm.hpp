@@ -6,6 +6,9 @@
 #include "units.hpp"
 #include "info.hpp"
 
+extern float coriolis_f_lbmu;
+
+
 uint bytes_per_cell_host(); // returns the number of Bytes per cell allocated in host memory
 uint bytes_per_cell_device(); // returns the number of Bytes per cell allocated in device memory
 uint bandwidth_bytes_per_cell_device(); // returns the bandwidth in Bytes per cell per time step from/to device memory
@@ -28,6 +31,7 @@ private:
 
 	float nu = 1.0f/6.0f; // kinematic shear viscosity
 	float fx=0.0f, fy=0.0f, fz=0.0f; // global force per volume
+	float omega_x = 0.0f, omega_y = 0.0f, omega_z = 0.0f; // global rotation for Coriolis
 	float sigma=0.0f; // surface tension coefficient
 	float alpha=1.0f, beta=1.0f, T_avg=1.0f; // alpha = thermal diffusion coefficient, beta = (volumetric) thermal expansion coefficient, T_avg = 1 = average temperature
 	uint particles_N = 0u;
@@ -67,9 +71,10 @@ private:
 
 	void allocate(Device& device); // allocate all memory for data fields on host and device and set up kernels
 	string device_defines() const; // returns preprocessor constants for embedding in OpenCL C code
+	string full_opencl_c_code() const; // returns device_defines + possible graphics defines + kernel code
 
 public:
-	Memory<float> rho; // density of every cell
+	Memory<float> rho;
 	Memory<float> u; // velocity of every cell
 	Memory<uchar> flags; // flags of every cell
 #ifdef FORCE_FIELD
@@ -144,7 +149,11 @@ public:
 	void set_fy(const float fy) { this->fy = fy; } // set global froce per volume
 	void set_fz(const float fz) { this->fz = fz; } // set global froce per volume
 	void set_f(const float fx, const float fy, const float fz) { set_fx(fx); set_fy(fy); set_fz(fz); } // set global froce per volume
-
+	void set_coriolis(const float omega_x, const float omega_y, const float omega_z) {
+		this->omega_x = omega_x;
+		this->omega_y = omega_y;
+		this->omega_z = omega_z;
+	}
 	void voxelize_mesh_on_device(const Mesh* mesh, const uchar flag=TYPE_S, const float3& rotation_center=float3(0.0f), const float3& linear_velocity=float3(0.0f), const float3& rotational_velocity=float3(0.0f)); // voxelize mesh
 	void enqueue_unvoxelize_mesh_on_device(const Mesh* mesh, const uchar flag=TYPE_S); // remove voxelized triangle mesh from LBM grid
 
@@ -470,6 +479,9 @@ public:
 	void set_fy(const float fy) { for(uint d=0u; d<get_D(); d++) lbm_domain[d]->set_fy(fy); } // set global froce per volume
 	void set_fz(const float fz) { for(uint d=0u; d<get_D(); d++) lbm_domain[d]->set_fz(fz); } // set global froce per volume
 	void set_f(const float fx, const float fy, const float fz) { set_fx(fx); set_fy(fy); set_fz(fz); } // set global froce per volume
+	void set_coriolis(const float omega_x, const float omega_y, const float omega_z) {
+		for (uint d = 0u; d < get_D(); d++) lbm_domain[d]->set_coriolis(omega_x, omega_y, omega_z);
+	}
 
 	void coordinates(const ulong n, uint& x, uint& y, uint& z) const { // disassemble 1D linear index to 3D coordinates (n -> x,y,z)
 		const ulong t = n%((ulong)Nx*(ulong)Ny); // n = x+(y+z*Ny)*Nx
