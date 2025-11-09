@@ -89,17 +89,17 @@
 
 ## Usage:
 
-The $project_path$ mentioned below is the parent folder of deck file (*.luw, the configuration file). You can actually place it anywhere you would like, and name the folder as you like (casename is suggested).
+The $project\_path$ mentioned below is the parent folder of deck file (*.luw, the configuration file). You can actually place it anywhere you would like, and name the folder as you like (casename is suggested).
 
-Project folder $project_path$ includes: xxx.luw (configuration deck), building_db (folder for building database), terrain_db (folder for terrain database, under development), wind_bc (netcdf boundary data), proj_temp (intermedia files), and RESULTS folder for output.
+Project folder $project\_path$ includes: xxx.luw (configuration deck), building\_db (folder for building database), terrain_db (folder for terrain database, under development), wind_bc (netcdf boundary data), proj_temp (intermedia files), and RESULTS folder for output.
 
 Commands:
 
 The following commands are provided by this package. The deck file could be automatically detected, if "conf.luw" exists in current folder of console.
 
-"luwbc <path-to-deck>" to build the boundary condition. The netcdf file (.nc) should be placed in $project_path$/wind_bc, with the name of "casename_datetime.nc". If the netcdf file name is incorrect, the only .nc file in the wind_bc folder will be treated as input, which is not recommended. It is supposed to be called for each datetime code under batch mode.
+"luwbc <path-to-deck>" to build the boundary condition. The netcdf file (.nc) should be placed in $project\_path$/wind\_bc, with the name of "casename\_datetime.nc". If the netcdf file name is incorrect, the only .nc file in the wind_bc folder will be treated as input, which is not recommended. It is supposed to be called for each datetime code under batch mode.
 
-"luwcut <path-to-deck>" to cut out the building data within the given lat-lon range, indicated in the deck. The input is $project_path$/building_db. Only one *.shp file is allowed to be in this folder, and it is insensitive to the *.shp file name.
+"luwcut <path-to-deck>" to cut out the building data within the given lat-lon range, indicated in the deck. The input is $project\_path$/building\_db. Only one *.shp file is allowed to be in this folder, and it is insensitive to the *.shp file name.
 
 "luwvox <path-to-deck>" to voxelize the buildings (build the *.stl 3D file), preparing for CFD, based on the cutted *.shp file by a previous run of luwcut.
 
