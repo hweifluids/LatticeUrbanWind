@@ -8,6 +8,7 @@ import math
 import vtk
 from vtk.util import numpy_support as nps
 import geopandas as gpd
+from auto_UTM import get_utm_crs_from_conf_raw
 from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shapely_transform
 import shutil
@@ -413,14 +414,19 @@ def _crop_wind_by_utm_bounds(ds: xr.Dataset, conf_raw: str | None, utm_crs: str)
 
     return ds_cropped
 
-
-def _get_fixed_utm_crs():
+def _get_fixed_utm_crs(conf_raw: str | None) -> str:
     """
-    Return fixed UTM CRS to match main.ipynb configuration.
-    Uses EPSG:32651 as specified in main.ipynb.
+    Determine UTM CRS from deck file if possible.
+    Fallback to EPSG:32651 for backward compatibility.
     """
+    if conf_raw:
+        try:
+            return get_utm_crs_from_conf_raw(conf_raw, default_epsg="EPSG:32651")
+        except Exception as e:
+            _log_warn(f"Failed to auto detect UTM CRS from conf, fallback to EPSG:32651. Reason: {e}")
+            return "EPSG:32651"
+    _log_warn("conf_raw is empty when detecting UTM CRS, use EPSG:32651 as fallback")
     return "EPSG:32651"
-
 
 def _project_bbox_and_rotation(lon_min: float, lon_max: float, lat_min: float, lat_max: float, utm_crs) -> Tuple[np.ndarray, np.ndarray, float, Tuple[float, float]]:
     """
@@ -608,14 +614,14 @@ def buildBC_dev(
         _log_info(f"Set parallel workers: {max_workers}")
 
         # Get UTM CRS first
-        utm_crs = _get_fixed_utm_crs()
+        utm_crs = _get_fixed_utm_crs(conf.get("__raw__"))
 
         # Load DEM data (will be reprojected to UTM)
         project_home = conf_file.parent
         dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs)
 
         # Get UTM CRS first
-        utm_crs = _get_fixed_utm_crs()
+        utm_crs = _get_fixed_utm_crs(conf.get("__raw__"))
 
         ds = xr.open_dataset(nc_path_resolved, chunks={"lon": 64, "lat": 64})
 
@@ -689,10 +695,10 @@ def buildBC_dev(
             _log_warn("NaNs found. Apply vertical forward fill")
             _forward_fill_whole_layer(u, v)
 
-        # projection and rotation - use fixed UTM CRS to match main.ipynb
+        # projection and rotation, use UTM CRS for CFD domain
         lon_min, lon_max = float(lon.min()), float(lon.max())
         lat_min, lat_max = float(lat.min()), float(lat.max())
-        _log_info(f"Using fixed UTM CRS to match main.ipynb: {utm_crs}")
+        _log_info(f"Using UTM CRS for CFD domain: {utm_crs}")
 
         pts_xy, center_xy, rotate_deg, pivot_xy = _project_bbox_and_rotation(lon_min, lon_max, lat_min, lat_max, utm_crs)
         _log_info(f"Estimated convergence angle = {rotate_deg:.6f} deg, use projected bbox centroid as pivot")

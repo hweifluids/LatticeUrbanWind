@@ -16,6 +16,7 @@ from shapely import prepared
 from pyproj import Transformer
 import sys
 import numpy as np
+from auto_UTM import get_utm_epsg_from_lonlat, get_utm_crs_from_bounds
 
 # ----------------------- Helpers -----------------------
 
@@ -89,11 +90,25 @@ def select_height_column(gdf: gpd.GeoDataFrame):
 
 
 def _area_mask_chunk(geoms, min_area):
-    # Use EPSG:32651 to match main.ipynb projection system
-    transformer = Transformer.from_crs(4326, 32651, always_xy=True)
+    """Filter geometries by area in meters, with UTM CRS auto detection."""
+    # Auto detect UTM CRS from a representative geometry
+    first_valid = None
+    for g in geoms:
+        if g is not None and not g.is_empty:
+            first_valid = g
+            break
+    if first_valid is None:
+        return [False] * len(geoms)
+
+    rep = first_valid.representative_point()
+    utm_crs = get_utm_epsg_from_lonlat(rep.x, rep.y)
+
+    transformer = Transformer.from_crs(4326, utm_crs, always_xy=True)
+
     def _proj(x, y, z=None):
         x2, y2 = transformer.transform(x, y)
         return x2, y2
+
     out = []
     for g in geoms:
         if g is None or g.is_empty:
@@ -326,14 +341,19 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
 
 def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, output_dir: Path, bbox_wgs84) -> None:
     print("Preview step started. Preparing map outline and info panel.")
-    min_lon, min_lat, max_lon, max_lat = gdf.to_crs(epsg=4326).total_bounds
+    gdf_wgs84 = gdf.to_crs(epsg=4326)
+    min_lon, min_lat, max_lon, max_lat = gdf_wgs84.total_bounds
 
     if (gdf.crs is None) or (not gdf.crs.is_projected):
-        print("Preview step uses EPSG 32651 for plotting to match main.ipynb.")
-        gdf_plot = gdf.to_crs(epsg=32651)
+        lon_center = 0.5 * (min_lon + max_lon)
+        lat_center = 0.5 * (min_lat + max_lat)
+        utm_crs = get_utm_epsg_from_lonlat(lon_center, lat_center)
+        print(f"Preview step uses auto detected UTM CRS for plotting: {utm_crs}.")
+        gdf_plot = gdf_wgs84.to_crs(utm_crs)
     else:
         print(f"Preview step uses projected CRS: {gdf.crs}")
         gdf_plot = gdf
+
 
     height_col = select_height_column(gdf_plot)
     if height_col is not None:
@@ -531,10 +551,11 @@ def main():
     merged = merged.loc[mask_area].copy()
     print(f"Features after area filter: {len(merged)}")
 
-    # Corner squares - use EPSG:32651 to match main.ipynb
+    # Corner squares, use auto detected UTM CRS based on bbox
     print("Adding four 1m by 1m corner squares inside the bbox.")
-    bbox_32651_geom = gpd.GeoSeries([bbox], crs="EPSG:4326").to_crs(epsg=32651).iloc[0]
-    minx_m, miny_m, maxx_m, maxy_m = bbox_32651_geom.bounds
+    utm_crs = get_utm_crs_from_bounds((minx, maxx), (miny, maxy))
+    bbox_utm_geom = gpd.GeoSeries([bbox], crs="EPSG:4326").to_crs(utm_crs).iloc[0]
+    minx_m, miny_m, maxx_m, maxy_m = bbox_utm_geom.bounds
     d = 1.0
     half = 0.5
     corner_centers = [
@@ -543,15 +564,16 @@ def main():
         (maxx_m - d, maxy_m - d),
         (minx_m + d, maxy_m - d),
     ]
-    corner_boxes_32651 = [box(cx - half, cy - half, cx + half, cy + half) for cx, cy in corner_centers]
+    corner_boxes_utm = [box(cx - half, cy - half, cx + half, cy + half) for cx, cy in corner_centers]
 
-    corner_gdf_32651 = gpd.GeoDataFrame(
+    corner_gdf_utm = gpd.GeoDataFrame(
         {height_col: [1.0, 1.0, 1.0, 1.0], "corner_id": [1, 2, 3, 4]},
-        geometry=corner_boxes_32651,
-        crs="EPSG:32651",
+        geometry=corner_boxes_utm,
+        crs=utm_crs,
     )
-    corner_gdf_wgs84 = corner_gdf_32651.to_crs(epsg=4326)
+    corner_gdf_wgs84 = corner_gdf_utm.to_crs(epsg=4326)
     print("Corner squares prepared and reprojected to EPSG 4326.")
+
 
     result_wgs84 = pd.concat([merged, corner_gdf_wgs84], ignore_index=True, sort=False)
     print(f"Corner squares appended. Total features now: {len(result_wgs84)}")
