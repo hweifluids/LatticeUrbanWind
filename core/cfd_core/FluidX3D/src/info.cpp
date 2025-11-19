@@ -30,14 +30,14 @@ void Info::print_logo() const {
 	print("|                      "); print(  " ______________  ", a);                  print(" ______________ ", b); print("                      |\n");
 	print("|                       "); print( "\\   ________  | ", a);                  print("|  ________   /", b); print("                       |\n");
 	print("|                        "); print("\\  \\       | | ", a);                  print("| |       /  /", b); print("                        |\n");
-	print("|                         "); print("\\  \\      | | ", a);                  print("| |      /  /", b); print("                         |\n");
+	print("|                         "); print("\\  \\   L  | | ", a);                  print("| |  U   /  /", b); print("                         |\n");
 	print("|                          "); print("\\  \\     | | ", a);                  print("| |     /  /", b); print("                          |\n");
 	print("|                           "); print("\\  \\_.-\"  | ", a);                print("|  \"-._/  /", b); print("                           |\n");
 	print("|                            "); print("\\    _.-\" ", a);  print("_ ", c);  print("\"-._    /", b); print("                            |\n");
 	print("|                             "); print("\\.-\" ", a); print("_.-\" \"-._ ", c); print("\"-./", b); print("                             |\n");
 	print("|                              ");                 print(" .-\"  .-\"-.  \"-. ", c);               print("                              |\n");
 	print("|                               ");                 print("\\  v\"     \"v  /", c);               print("                               |\n");
-	print("|                                ");                 print("\\  \\     /  /", c);                print("                                |\n");
+	print("|                                ");                 print("\\  \\  W  /  /", c);                print("                                |\n");
 	print("|                                 ");                 print("\\  \\   /  /", c);                print("                                 |\n");
 	print("|                                  ");                 print("\\  \\ /  /", c);                print("                                  |\n");
 	print("|                                   ");                 print("\\  '  /", c);                 print("                                   |\n");

@@ -222,6 +222,7 @@ def main() -> None:
 
     input_path = Path(args.input_path).resolve()
     tailname = args.tailname.strip()
+    print(f"[INFO] Processing input: {input_path} with tailname: '{tailname}'")
 
     if not input_path.exists():
         sys.exit(f"[ERROR] Input path does not exist: {input_path}")

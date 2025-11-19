@@ -70,7 +70,7 @@ float3 KNNInterpolatorHD::eval(const float3& pos) const {
     const int used = filled;
     if (used == 0) return float3{0.0f, 0.0f, 0.0f};
 
-    const float delta2 = 1e-6f * std::max(max_r2_kept, 1e-12f);
+    const float delta2 = 0.00005f * std::max(max_r2_kept, 1e-12f);
 
     double wx = 0.0, wy = 0.0, wz = 0.0, wsum = 0.0;
     for (int k = 0; k < used; ++k) {
@@ -101,7 +101,7 @@ float3 InletVelocityFieldHD::operator()(const float3& pos) const {
 // ======================= Parellel computing =======================
 
 static inline void print_progress_inline_hd(double pct, bool final_flush = false) {
-    std::fprintf(stdout, "\r| [%s] inlet/outlet init (HD): %6.2f%%                      |",
+    std::fprintf(stdout, "\r| [%s] inlet/outlet init (HD): %6.3f%%                      |",
                  now_str_local_hd().c_str(), pct);
     if (final_flush) std::fflush(stdout);
 }

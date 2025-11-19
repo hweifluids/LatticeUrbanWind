@@ -95,12 +95,12 @@ static std::vector<SamplePoint> read_samples(const string& csv_path) {
  }
 
 void main_setup() {
-    println("|-----------------------------------------------------------------------------|");
+  //println("|-----------------------------------------------------------------------------|");
     println("|                                                                             |");
     println("|      LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation      |");
     println("|                                                                             |");
     println("|                                        Developed by Huanxia Wei's Team      |");
-    println("|                                        Version - v3.0-251108                |");
+    println("|                                        Version - v3.5-251119                |");
     println("|                                                                             |");
     println("|-----------------------------------------------------------------------------|");
  
@@ -283,7 +283,6 @@ void main_setup() {
             println("|-----------------------------------------------------------------------------|");
             println("| WARNING: Validation status is '" + validation_status + "'. Pre-processing may be incomplete or invalid. |");
             println("| Do you wish to continue with the simulation? (Press ENTER or type 'y'/'yes'):  |");
-
             std::string user_choice;
             std::getline(std::cin, user_choice);
 
@@ -314,26 +313,25 @@ void main_setup() {
         return os.str();
     };
 
-
-    // print configurations
-    println("| Using configuration deck: " + conf_used_path + " |");
-    println("| caseName=" + caseName + ", datetime=" + datetime + "                                    |");
-    println("| Height of basement: " + fmtf(z_si_offset) + ", GPU memory allocation: " + to_string(memory) + "                     |");
-    println("| si_size [m] = [" + fmtf(si_size.x) + ", " + fmtf(si_size.y) + ", " + fmtf(si_size.z) + "]                                 |");
-
-
-
-    println("| Downstream of estimated potential flow is " + downstream_bc + " BC.                            |");
-    println("| Yaw between potential flow and surface normal is " + downstream_bc_yaw + " degree.              |");
-    println("| GPU domain split Dx,Dy,Dz = " + to_string(Dx) + "," + to_string(Dy) + "," + to_string(Dz) + "                                           |");
-
+    println("|                                                                             |");
     println("|-----------------------------------------------------------------------------|");
-    const float lbm_ref_u = 0.05f, si_ref_u = 2.0f; 
+    println("|                            PARAMETER INFORMATION                            |");
+    println("|-----------------------------------------------------------------------------|");
+ // println("| Grid Domains    | " + alignr(57u,to_string()) + " |");
+    println("| Configure deck  | " + alignr(57u, to_string(conf_used_path)) + " |");
+    println("| Casename / Time | " + alignr(40u, to_string(caseName)) + alignr(17u, to_string(datetime)) + " |");
+    println("| Basement Height | " + alignr(55u, to_string(fmtf(z_si_offset))) + " m |");
+    println("| SI Size (m)     | " + alignr(21u, " X:") + alignr(8u, to_string(fmtf(si_size.x))) + "   Y: " + alignr(8u, to_string(fmtf(si_size.y))) + "   Z: " + alignr(8u, to_string(fmtf(si_size.z))) + " | ");
+    println("| Downstream BC   | " + alignr(57u, to_string(downstream_bc)) + " |");
+    println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
+    println("| GPU Decompose   | " + alignr(49u, to_string(Dx)) + ", " + alignr(2u, to_string(Dy)) + ", " + alignr(2u, to_string(Dz)) + " |");
+    println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
+
+    const float lbm_ref_u = 0.10f; // 0.1731 is Ma=0.3
+    float si_ref_u = 10.0f;
     const float si_nu = 1.48E-5f, si_rho = 1.225f;
 
     //const uint3 lbm_N = resolution(si_size, memory);
-
-
     const uint Nx_cells = std::max(1, (int)(si_size.x / cell_m + 0.5f));
     const uint Ny_cells = std::max(1, (int)(si_size.y / cell_m + 0.5f));
     #ifndef D2Q9
@@ -343,21 +341,41 @@ void main_setup() {
     #endif
     const uint3 lbm_N = uint3(Nx_cells, Ny_cells, Nz_cells);
 
+    println("|-----------------------------------------------------------------------------|");
+    println("|                          DOMAIN AND TRANFORMATION                           |");
+    println("|-----------------------------------------------------------------------------|");
+    println("| Grid Resolution | " + alignr(45u, to_string(lbm_N.x)) + "," + alignr(5u, to_string(lbm_N.y)) + "," + alignr(5u, to_string(lbm_N.z)) + " |");
 
-
-
-    println("| Grid resolution Nx,Ny,Nz = " + to_string(lbm_N.x) + "," + to_string(lbm_N.y) + "," + to_string(lbm_N.z) + "                                    |");
     const uint mem_per_dev_mb = vram_required_mb_per_device(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
     const uint mem_total_mb = vram_required_mb_total(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
-    println("| Required VRAM = " + to_string(Dx * Dy * Dz) + "x " + to_string(mem_per_dev_mb) + " MB = " + to_string(mem_total_mb) + " MB total |");
+    {
+        const std::string csv_path_ref = parent + "/proj_temp/SurfData_" + datetime + ".csv";
+        auto samples_ref = read_samples(csv_path_ref);
+        if (samples_ref.empty()) {
+            println("| ERROR: no inlet samples when computing si_ref_u. Aborting...                |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+        float max_u = 0.0f;
+        for (const auto& s : samples_ref) {
+            const float speed = std::sqrt(
+                s.u.x * s.u.x +
+                s.u.y * s.u.y +
+                s.u.z * s.u.z
+            );
+            if (speed > max_u) {
+                max_u = speed;
+            }
+        }
+        si_ref_u = max_u;
+    }
 
     units.set_m_kg_s((float)lbm_N.y, lbm_ref_u, 1.0f, si_size.y, si_ref_u, si_rho);
 
     const float z_off = units.x(z_si_offset); 
 
     const float lbm_nu = units.nu(si_nu);
-
-    println("| LBM viscosity = " + to_string(lbm_nu, 6u) + "                                                    |");
 
     // Coriolis based on domain center lat/lon from *.luw
     if (enable_coriolis) {
@@ -379,7 +397,8 @@ void main_setup() {
         // dx_SI is your cell size in meters, dt_SI = dx_SI * (u_lbm / u_SI)
         const float dx_si = cell_m;
         const float dt_si = dx_si * (lbm_ref_u / si_ref_u);
-
+        println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
+        println("| LBM Reference U | " + alignl(7u, to_string(fmtf(lbm_ref_u))) + alignl(50u, "(Nondimensionalized)") + " |");
         coriolis_Omegax_lbmu = Omegax_si * dt_si;
         coriolis_Omegay_lbmu = Omegay_si * dt_si;
         coriolis_Omegaz_lbmu = Omegaz_si * dt_si;
@@ -392,7 +411,7 @@ void main_setup() {
             + to_string(coriolis_Omegaz_lbmu, 8u) + ") per step                        |");
     }
     else {
-        println("| Coriolis term disabled by 'coriolis_term' setting in .luw.                      |");
+        println("| Coriolis term disabled by 'coriolis_term' setting in .luw.                  |");
     }
 
 
@@ -400,7 +419,7 @@ void main_setup() {
     const std::string csv_path = parent + "/proj_temp/SurfData_" + datetime + ".csv";
 
     auto samples_si = read_samples(csv_path);
-    println("| CDF data loaded = " + to_string(samples_si.size()) + "                                                    |");
+
     if (samples_si.empty()) { println("ERROR: no inlet samples. Aborting."); wait(); exit(-1); }
 
     // convert samples to LBM units
@@ -432,8 +451,6 @@ void main_setup() {
     std::vector<SamplePoint> samples; samples.reserve(samples_si.size());
     for (const auto& s : samples_si) { SamplePoint sp; sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z)); sp.u = s.u * u_scale; samples.push_back(sp);}
 
-
-    // lwg 多GPU
     // const uint Dx = 2u, Dy = 1u, Dz = 1u;
     LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu);
 
@@ -445,11 +462,12 @@ void main_setup() {
         sp.p.y += origin_lbmu.y;
         sp.p.z += origin_lbmu.z;        
     }
-    const float z0_lbmu = origin_lbmu.z;                    
+    const float z0_lbmu = origin_lbmu.z;
 
-    //const float z0_lbmu = lbm.position(0u, 0u, 0u).z;   
 
 	// ------------------------------- MESH LOADING -------------------------------
+    println("|-----------------------------------------------------------------------------|");
+    println("|                        LOADING GEOMETRY AND VOXELIZE                        |");
     println("|-----------------------------------------------------------------------------|");
     println("| Loading buildings as geometry, meshing...                                   |");
 
@@ -501,9 +519,9 @@ void main_setup() {
     lbm.voxelize_mesh_on_device(mesh);
     println("| Voxelization done.                                                          |");
     println("|-----------------------------------------------------------------------------|");
-
-    println("| Building BC: Connecting to CDF data with adaptive multi-threading.          |");
-    println("| Time code: " + now_str() + "                                              |");
+    println("|                         BUILD BOUNDARY CONDITIONS                           |");
+    println("|-----------------------------------------------------------------------------|");
+    println("| CDF data loaded | " + alignl(57u, to_string(samples_si.size())) + " |");
 
     std::vector<float3> P; P.reserve(samples.size());
     std::vector<float3> Uv; Uv.reserve(samples.size());
@@ -548,13 +566,14 @@ void main_setup() {
             println("| Skipping flux correction. Use flux_correction = true to enable.   |"); }
     }
 
+    println("|-----------------------------------------------------------------------------|");
+    println("|                           LBM SOLVER INFORMATION                            |");
 
-
-    // ------------------------------------------------------------------- graphics & run --------------------------------------------------------------------
+    // ------------------------------------------------------------------- RUN LBM --------------------------------------------------------------------
     lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
     const ulong lbm_T = 40001ull; 
-    const uint  vtk_dt = 20000u;        // export VTK
+    const uint  vtk_dt = 10000u;        // export VTK
 
     const std::string vtk_dir = parent + "/proj_temp/vtk/" + datetime + "_raw_";
     const std::string snapshots_dir = parent + "/proj_temp/snapshots";
