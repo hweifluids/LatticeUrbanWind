@@ -307,7 +307,7 @@ void main_setup() {
     }
 
 
-    auto fmtf = [](float v, int prec = 2) {
+    auto fmtf = [](float v, int prec = 4) {
         std::ostringstream os;
         os << std::fixed << std::setprecision(prec) << v;
         return os.str();
@@ -321,7 +321,7 @@ void main_setup() {
     println("| Configure deck  | " + alignr(57u, to_string(conf_used_path)) + " |");
     println("| Casename / Time | " + alignr(40u, to_string(caseName)) + alignr(17u, to_string(datetime)) + " |");
     println("| Basement Height | " + alignr(55u, to_string(fmtf(z_si_offset))) + " m |");
-    println("| SI Size (m)     | " + alignr(21u, " X:") + alignr(8u, to_string(fmtf(si_size.x))) + "   Y: " + alignr(8u, to_string(fmtf(si_size.y))) + "   Z: " + alignr(8u, to_string(fmtf(si_size.z))) + " | ");
+    println("| SI Size (m)     | " + alignr(12u, " X:") + alignl(11u, to_string(fmtf(si_size.x))) + "   Y: " + alignl(11u, to_string(fmtf(si_size.y))) + "   Z: " + alignl(11u, to_string(fmtf(si_size.z))) + " | ");
     println("| Downstream BC   | " + alignr(57u, to_string(downstream_bc)) + " |");
     println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
     println("| GPU Decompose   | " + alignr(49u, to_string(Dx)) + ", " + alignr(2u, to_string(Dy)) + ", " + alignr(2u, to_string(Dz)) + " |");
@@ -376,7 +376,8 @@ void main_setup() {
     const float z_off = units.x(z_si_offset); 
 
     const float lbm_nu = units.nu(si_nu);
-
+    println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
+    println("| LBM Reference U | " + alignl(7u, to_string(fmtf(lbm_ref_u))) + alignl(50u, "(Nondimensionalized)") + " |");
     // Coriolis based on domain center lat/lon from *.luw
     if (enable_coriolis) {
         // 1. center in degrees
@@ -397,8 +398,7 @@ void main_setup() {
         // dx_SI is your cell size in meters, dt_SI = dx_SI * (u_lbm / u_SI)
         const float dx_si = cell_m;
         const float dt_si = dx_si * (lbm_ref_u / si_ref_u);
-        println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
-        println("| LBM Reference U | " + alignl(7u, to_string(fmtf(lbm_ref_u))) + alignl(50u, "(Nondimensionalized)") + " |");
+
         coriolis_Omegax_lbmu = Omegax_si * dt_si;
         coriolis_Omegay_lbmu = Omegay_si * dt_si;
         coriolis_Omegaz_lbmu = Omegaz_si * dt_si;
