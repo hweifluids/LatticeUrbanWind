@@ -29,7 +29,7 @@ import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dask import config as dask_config
 from pyproj import Transformer
-from scipy.interpolate import griddata, LinearNDInterpolator
+from scipy.interpolate import griddata, LinearNDInterpolator, interp1d
 from scipy.spatial import Delaunay, cKDTree
 
 
@@ -492,12 +492,11 @@ def _progress_draw(completed: int, total: int, last_percent: int, last_len: int)
     return last_percent, last_len
 
 
-
-
 def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
                                   src_x: np.ndarray, src_y: np.ndarray,
                                   nx: int, ny: int,
-                                  x_min: float, x_max: float, y_min: float, y_max: float) -> Tuple[np.ndarray, np.ndarray, float, float]:
+                                  x_min: float, x_max: float, y_min: float, y_max: float,
+                                  verbose: bool = True) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
     Interpolate rotated UTM wind fields u v onto a uniform Cartesian grid.
     Linear in-plane interpolation with nearest fallback outside convex hull.
@@ -533,16 +532,17 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     u_out = np.empty((nz, ny, nx), dtype=np.float32)
     v_out = np.empty((nz, ny, nx), dtype=np.float32)
 
-    _log_info(f"Total vertical levels to interpolate: {nz}")
-    _log_info("Start horizontal interpolation onto uniform grid: precomputed barycentric weights with nearest fallback")
+    M = qpts.shape[0]
 
     import sys
-    sys.stdout.write("[INFO] Horizontal interpolation progress (# is 5%): |")
-    sys.stdout.flush()
+
+    if verbose:
+        _log_info(f"Total vertical levels to interpolate: {nz}")
+        _log_info("Start horizontal interpolation onto uniform grid: precomputed barycentric weights with nearest fallback")
+        sys.stdout.write("[INFO] Horizontal interpolation progress (# is 5%): |")
+        sys.stdout.flush()
+
     next_percent_idx = 1  # 1..20
-
-
-    M = qpts.shape[0]
 
     for k in range(nz):
         uk = u[k].astype(np.float64).ravel()
@@ -566,26 +566,27 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
         u_out[k] = out_u_flat.reshape(ny, nx)
         v_out[k] = out_v_flat.reshape(ny, nx)
 
-        progress_ratio = (k + 1) / nz if nz > 0 else 1.0
-        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-            sys.stdout.write("#")
-            if next_percent_idx % 4 == 0:
-                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+        if verbose:
+            progress_ratio = (k + 1) / nz if nz > 0 else 1.0
+            while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                sys.stdout.write("#")
+                if next_percent_idx % 4 == 0:
+                    sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                sys.stdout.flush()
+                next_percent_idx += 1
+
+    if verbose:
+        if next_percent_idx <= 20:
+            while next_percent_idx <= 20:
+                sys.stdout.write("#")
+                if next_percent_idx % 4 == 0:
+                    sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                next_percent_idx += 1
             sys.stdout.flush()
-            next_percent_idx += 1
 
-    if next_percent_idx <= 20:
-        while next_percent_idx <= 20:
-            sys.stdout.write("#")
-            if next_percent_idx % 4 == 0:
-                sys.stdout.write(f"|{next_percent_idx * 5}%|")
-            next_percent_idx += 1
+        sys.stdout.write("|Finished|\n")
         sys.stdout.flush()
-
-    sys.stdout.write("|Finished|\n")
-    sys.stdout.flush()
-    _log_info("Horizontal interpolation finished")
-
+        _log_info("Horizontal interpolation finished")
 
     dx = (x_max - x_min) / (nx - 1) if nx > 1 else 0.0
     dy = (y_max - y_min) / (ny - 1) if ny > 1 else 0.0
@@ -687,8 +688,8 @@ def buildBC_dev(
         orig_lat_min = float(ds["lat"].min())
         orig_lat_max = float(ds["lat"].max())
 
-        nz, ny, nx = u.shape
-        _log_info(f"Data shape nz={nz} ny={ny} nx={nx}")
+        nz, ny_src, nx_src = u.shape
+        _log_info(f"Data shape nz={nz} ny={ny_src} nx={nx_src}")
 
         # fill NaNs
         if np.isnan(u).any() or np.isnan(v).any():
@@ -748,11 +749,41 @@ def buildBC_dev(
             y_range_target = y_max_data - y_min_data
             _log_info(f"Using data range for interpolation: {x_range_target:.3f} x {y_range_target:.3f} m")
 
-        # interpolate to uniform grid using target domain size
-        u_m, v_m, dx, dy = _interp_to_uniform_meter_grid(
-            u, v, x_src, y_src, nx=nx, ny=ny, x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target
+        # Choose target grid resolution in each horizontal direction:
+        # make the spacing close to 50 m and exactly divide the domain length
+        def _choose_n_points_for_approx_spacing(length_m: float, target_spacing: float = 50.0) -> int:
+            if not math.isfinite(length_m) or length_m <= 0.0:
+                return 1
+            n_cells = max(1, int(round(length_m / target_spacing)))
+            return n_cells + 1
+
+        nx = _choose_n_points_for_approx_spacing(x_range_target, 50.0)
+        ny = _choose_n_points_for_approx_spacing(y_range_target, 50.0)
+        _log_info(
+            "Target grid points (nx, ny) = "
+            f"({nx}, {ny}) -> nominal spacing ~ "
+            f"{x_range_target / max(nx - 1, 1):.3f} m x {y_range_target / max(ny - 1, 1):.3f} m"
         )
+
+        # interpolate to uniform grid using target domain size and chosen resolution
+        u_m, v_m, dx, dy = _interp_to_uniform_meter_grid(
+            u, v, x_src, y_src,
+            nx=nx, ny=ny,
+            x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target
+        )
+
+        # horizontally interpolate w onto the same uniform grid (silent)
+        w_m, _, _, _ = _interp_to_uniform_meter_grid(
+            w, w, x_src, y_src,
+            nx=nx, ny=ny,
+            x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target,
+            verbose=False
+        )
+        w = w_m
+
         dz = float(lev[-1] - lev[0]) / (nz - 1) if nz > 1 else 0.0
+
+
 
         # Interpolate DEM to wind grid (if available)
         dem_grid = None
@@ -820,6 +851,32 @@ def buildBC_dev(
         else:
             _log_info("No vertical padding applied. Either dz=0 or zmin<=0")
 
+        # after vertical padding, resample vertical grid to make dz close to 50 m
+        if dz > 0.0 and nz > 1:
+            Lz = float((nz - 1) * dz)
+            n_cell_z = max(1, int(round(Lz / 50.0)))
+            nz_new = n_cell_z + 1
+            z_old = np.linspace(0.0, Lz, nz, dtype=np.float32)
+            z_new = np.linspace(0.0, Lz, nz_new, dtype=np.float32)
+
+            _log_info(
+                "Resample vertical grid to ~50 m: "
+                f"Lz={Lz:.3f} m, nz={nz} -> nz_new={nz_new}, dz_new={z_new[1] - z_new[0]:.3f} m"
+            )
+
+            f_u_z = interp1d(z_old, u_m, axis=0, bounds_error=False, fill_value="extrapolate")
+            f_v_z = interp1d(z_old, v_m, axis=0, bounds_error=False, fill_value="extrapolate")
+            f_w_z = interp1d(z_old, w,   axis=0, bounds_error=False, fill_value="extrapolate")
+
+            u_m = f_u_z(z_new).astype(np.float32)
+            v_m = f_v_z(z_new).astype(np.float32)
+            w   = f_w_z(z_new).astype(np.float32)
+
+            nz = nz_new
+            dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
+        else:
+            _log_info("Skip vertical resampling because nz<=1 or dz<=0")
+
         # volume-mean velocity
         um_vol = np.array([
             float(np.nanmean(u_m)),
@@ -848,9 +905,10 @@ def buildBC_dev(
 
             conf_lines[15] = f"si_x_cfd = [0.000000, {si_x_range:.6f}]"
             conf_lines[16] = f"si_y_cfd = [0.000000, {si_y_range:.6f}]"
-            # vertical range starts at 0
-            z_max_new = float(lev[-1]) if float(lev[0]) <= 0 else float(lev[-1]) + float(lev[0])
+            # vertical range starts at 0, use resampled grid top
+            z_max_new = float((nz - 1) * dz) if nz > 1 else 0.0
             conf_lines[17] = f"si_z_cfd = [0.000000, {z_max_new:.6f}]"
+
             conf_lines[20:23] = [
                 f"utm_crs = \"{utm_crs}\"",
                 f"rotate_deg = {rotate_deg:.6f}",
@@ -963,23 +1021,23 @@ def buildBC_dev(
         with open(csv_path, "w", encoding="utf-8") as f:
             f.write("X,Y,Z,u,v,w\n")
             # bottom face (k=0)
-            for j in range(ny):
-                y = j * dy
-                for i in range(nx):
-                    x = i * dx
-                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                    # Apply elevation scale to CSV output
-                    dem_diff_scaled = dem_diff * elevation_scale
-                    z_output = base_height + dem_diff_scaled
+            # for j in range(ny):
+            #     y = j * dy
+            #     for i in range(nx):
+            #         x = i * dx
+            #         dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+            #         # Apply elevation scale to CSV output
+            #         dem_diff_scaled = dem_diff * elevation_scale
+            #         z_output = base_height + dem_diff_scaled
 
-                    # Use bottom layer data
-                    uval = u_m[0, j, i]
-                    vval = v_m[0, j, i]
-                    wval = 0.0
+            #         # Use bottom layer data
+            #         uval = u_m[0, j, i]
+            #         vval = v_m[0, j, i]
+            #         wval = 0.0
 
-                    f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
-                    bc_sum += np.array([uval, vval, wval])
-                    bc_cnt += 1
+            #         f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+            #         bc_sum += np.array([uval, vval, wval])
+            #         bc_cnt += 1
 
             # top face: interpolate at z_max_output for each (x,y)
             for j in range(ny):

@@ -572,8 +572,8 @@ void main_setup() {
     // ------------------------------------------------------------------- RUN LBM --------------------------------------------------------------------
     lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
-    const ulong lbm_T = 40001ull; 
-    const uint  vtk_dt = 10000u;        // export VTK
+    const ulong lbm_T = 100001ull; 
+    const uint  vtk_dt = 20000u;        // export VTK
 
     const std::string vtk_dir = parent + "/proj_temp/vtk/" + datetime + "_raw_";
     const std::string snapshots_dir = parent + "/proj_temp/snapshots";
