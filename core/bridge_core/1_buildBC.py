@@ -32,6 +32,107 @@ from pyproj import Transformer
 from scipy.interpolate import griddata, LinearNDInterpolator, interp1d
 from scipy.spatial import Delaunay, cKDTree
 
+def _pick_first_existing_var(ds: xr.Dataset, candidates: Tuple[str, ...]) -> Optional[str]:
+    for name in candidates:
+        if name in ds.variables:
+            return name
+    return None
+
+
+def _isel_first_time_if_present(da: xr.DataArray) -> xr.DataArray:
+    for tdim in ("Time", "time"):
+        if tdim in da.dims:
+            return da.isel({tdim: 0})
+    return da
+
+
+def _detect_and_rename_wrf_dims(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Normalize common WRF dimension names to internal names.
+    Geographic lon/lat should be handled via lon_geo/lat_geo, not via dim coords.
+    """
+    stag_dims = []
+    for d in ("west_east_stag", "south_north_stag", "bottom_top_stag"):
+        if d in ds.dims:
+            stag_dims.append(d)
+    if stag_dims:
+        _log_info(f"Detected WRF staggered dimensions in input: {', '.join(stag_dims)}")
+
+    rename_map = {}
+    if "west_east" in ds.dims and "lon" not in ds.dims:
+        rename_map["west_east"] = "lon"
+    if "south_north" in ds.dims and "lat" not in ds.dims:
+        rename_map["south_north"] = "lat"
+    if "west_east_stag" in ds.dims and "lon_stag" not in ds.dims:
+        rename_map["west_east_stag"] = "lon_stag"
+    if "south_north_stag" in ds.dims and "lat_stag" not in ds.dims:
+        rename_map["south_north_stag"] = "lat_stag"
+
+    if rename_map:
+        ds = ds.rename(rename_map)
+        _log_info(f"Renamed WRF dims to internal names: {rename_map}")
+    return ds
+
+
+def _ensure_lonlat_geo_coords(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Ensure ds has lon_geo and lat_geo coordinates.
+    lon_geo and lat_geo can be 1D or 2D.
+    Priority:
+      1) existing lon/lat
+      2) WRF XLONG/XLAT
+    """
+    if "lon_geo" in ds.coords and "lat_geo" in ds.coords:
+        return ds
+
+    if "lon" in ds.variables and "lat" in ds.variables:
+        lon_da = ds["lon"]
+        lat_da = ds["lat"]
+        lon_da = _isel_first_time_if_present(lon_da)
+        lat_da = _isel_first_time_if_present(lat_da)
+        ds = ds.assign_coords(lon_geo=lon_da, lat_geo=lat_da)
+        return ds
+
+    lon_name = _pick_first_existing_var(ds, ("XLONG", "XLONG_M", "XLONG_U", "XLONG_V"))
+    lat_name = _pick_first_existing_var(ds, ("XLAT", "XLAT_M", "XLAT_U", "XLAT_V"))
+    if lon_name and lat_name:
+        lon_da = _isel_first_time_if_present(ds[lon_name])
+        lat_da = _isel_first_time_if_present(ds[lat_name])
+        ds = ds.assign_coords(lon_geo=lon_da, lat_geo=lat_da)
+        _log_info(f"Using WRF lon/lat coords: {lon_name}/{lat_name}")
+        return ds
+
+    raise KeyError("Cannot find lon/lat or XLONG/XLAT in dataset")
+
+
+def _resolve_wind_var_name(ds: xr.Dataset, preferred: str, fallbacks: Tuple[str, ...], kind: str) -> str:
+    if preferred in ds.variables:
+        return preferred
+    for name in fallbacks:
+        if name in ds.variables:
+            _log_warn(f"Wind variable {preferred} not found, use {name} for {kind}")
+            return name
+    raise KeyError(f"Wind variable {preferred} not found, and fallbacks also missing for {kind}")
+
+
+def _destagger_wrf(da: xr.DataArray) -> xr.DataArray:
+    """
+    Destagger common WRF staggered dimensions by averaging adjacent grid points.
+    """
+    if "lon_stag" in da.dims:
+        _log_info("Destagger along lon_stag to lon for WRF staggered grid")
+        da = 0.5 * (da.isel(lon_stag=slice(0, -1)) + da.isel(lon_stag=slice(1, None)))
+        da = da.rename({"lon_stag": "lon"})
+    if "lat_stag" in da.dims:
+        _log_info("Destagger along lat_stag to lat for WRF staggered grid")
+        da = 0.5 * (da.isel(lat_stag=slice(0, -1)) + da.isel(lat_stag=slice(1, None)))
+        da = da.rename({"lat_stag": "lat"})
+    if "bottom_top_stag" in da.dims:
+        _log_info("Destagger along bottom_top_stag to bottom_top for WRF staggered grid")
+        da = 0.5 * (da.isel(bottom_top_stag=slice(0, -1)) + da.isel(bottom_top_stag=slice(1, None)))
+        da = da.rename({"bottom_top_stag": "bottom_top"})
+    return da
+
 
 def _log_info(msg: str) -> None:
     print(f"[INFO] {msg}")
@@ -332,22 +433,23 @@ def _crop_wind_by_utm_bounds(ds: xr.Dataset, conf_raw: str | None, utm_crs: str)
     """
     Crop wind data in UTM coordinate space (same as DEM).
     Converts lon/lat bounds from config to UTM, then crops wind grid points.
+    Supports both 1D lon/lat and 2D lon/lat mesh (WRF XLONG/XLAT).
+    Also slices staggered dims lon_stag and lat_stag when present.
     """
     if not conf_raw:
         _log_info("No manual crop range from conf, skip cropping")
         return ds
 
-    # Try to read cut_utm_x and cut_utm_y first (direct UTM specification)
+    ds = _ensure_lonlat_geo_coords(ds)
+
     m_utm_x = re.search(r"cut_utm_x\s*=\s*\[([^\]]+)\]", conf_raw)
     m_utm_y = re.search(r"cut_utm_y\s*=\s*\[([^\]]+)\]", conf_raw)
 
     if m_utm_x and m_utm_y and m_utm_x.group(1).strip() and m_utm_y.group(1).strip():
-        # Direct UTM bounds specified
         x_lo, x_hi = [float(v) for v in m_utm_x.group(1).split(",")]
         y_lo, y_hi = [float(v) for v in m_utm_y.group(1).split(",")]
         _log_info(f"Using direct UTM bounds from config: X=[{x_lo}, {x_hi}], Y=[{y_lo}, {y_hi}]")
     else:
-        # Convert lon/lat bounds to UTM
         m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
         m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
         if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
@@ -359,60 +461,60 @@ def _crop_wind_by_utm_bounds(ds: xr.Dataset, conf_raw: str | None, utm_crs: str)
         lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
         lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
 
-        # Convert to UTM
-        transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-        x_lo, y_lo = transformer.transform(lon_lo, lat_lo)
-        x_hi, y_hi = transformer.transform(lon_hi, lat_hi)
+        transformer_ll2utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+        x_lo, y_lo = transformer_ll2utm.transform(lon_lo, lat_lo)
+        x_hi, y_hi = transformer_ll2utm.transform(lon_hi, lat_hi)
 
         _log_info(f"Converted lon/lat bounds [{lon_lo:.6f}, {lon_hi:.6f}] x [{lat_lo:.6f}, {lat_hi:.6f}]")
         _log_info(f"  to UTM bounds X=[{x_lo:.2f}, {x_hi:.2f}], Y=[{y_lo:.2f}, {y_hi:.2f}]")
 
-    # Project all wind grid points to UTM
-    lon = ds["lon"].values
-    lat = ds["lat"].values
+    lon_geo = ds["lon_geo"].values
+    lat_geo = ds["lat_geo"].values
 
-    transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+    transformer_ll2utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
 
-    if lon.ndim == 1 and lat.ndim == 1:
-        # 1D coordinates - create meshgrid
-        lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='ij')
+    if lon_geo.ndim == 1 and lat_geo.ndim == 1:
+        Lon2d, Lat2d = np.meshgrid(lon_geo, lat_geo, indexing="xy")
+    elif lon_geo.ndim == 2 and lat_geo.ndim == 2:
+        if lon_geo.shape != lat_geo.shape:
+            _log_warn("lon_geo and lat_geo have mismatched 2D shapes, skip cropping")
+            return ds
+        Lon2d, Lat2d = lon_geo, lat_geo
     else:
-        # Already 2D
-        lon_2d, lat_2d = lon, lat
+        _log_warn("lon/lat geo dims are not both 1D or both 2D, skip cropping")
+        return ds
 
-    # Transform to UTM
-    x_utm, y_utm = transformer.transform(lon_2d.ravel(), lat_2d.ravel())
-    x_utm = x_utm.reshape(lon_2d.shape)
-    y_utm = y_utm.reshape(lat_2d.shape)
+    x_utm, y_utm = transformer_ll2utm.transform(Lon2d.ravel(), Lat2d.ravel())
+    x_utm = x_utm.reshape(Lon2d.shape)
+    y_utm = y_utm.reshape(Lat2d.shape)
 
-    # Find points within UTM bounds
     mask = (x_utm >= x_lo) & (x_utm <= x_hi) & (y_utm >= y_lo) & (y_utm <= y_hi)
 
-    if lon.ndim == 1:
-        # For 1D coords, find the range of indices
-        mask_lon = mask.any(axis=1)  # Any point in this lon is within bounds
-        mask_lat = mask.any(axis=0)  # Any point in this lat is within bounds
+    rows = np.where(mask.any(axis=1))[0]
+    cols = np.where(mask.any(axis=0))[0]
+    if rows.size == 0 or cols.size == 0:
+        _log_warn("No wind data points within UTM bounds, returning original dataset")
+        return ds
 
-        lon_indices = np.where(mask_lon)[0]
-        lat_indices = np.where(mask_lat)[0]
+    lat_idx_min, lat_idx_max = int(rows[0]), int(rows[-1])
+    lon_idx_min, lon_idx_max = int(cols[0]), int(cols[-1])
 
-        if len(lon_indices) == 0 or len(lat_indices) == 0:
-            _log_warn("No wind data points within UTM bounds, returning original dataset")
-            return ds
+    sel = {
+        "lat": slice(lat_idx_min, lat_idx_max + 1),
+        "lon": slice(lon_idx_min, lon_idx_max + 1),
+    }
 
-        lon_idx_min, lon_idx_max = lon_indices[0], lon_indices[-1]
-        lat_idx_min, lat_idx_max = lat_indices[0], lat_indices[-1]
+    if "lat_stag" in ds.dims:
+        sel["lat_stag"] = slice(lat_idx_min, lat_idx_max + 2)
+    if "lon_stag" in ds.dims:
+        sel["lon_stag"] = slice(lon_idx_min, lon_idx_max + 2)
 
-        _log_info(f"Cropped wind data from {len(lon)}x{len(lat)} to {lon_idx_max-lon_idx_min+1}x{lat_idx_max-lat_idx_min+1} points")
+    _log_info(
+        f"Cropped wind data by UTM bounds: lat [{lat_idx_min}, {lat_idx_max}] lon [{lon_idx_min}, {lon_idx_max}]"
+    )
 
-        # Crop dataset
-        ds_cropped = ds.isel(lon=slice(lon_idx_min, lon_idx_max+1), lat=slice(lat_idx_min, lat_idx_max+1))
-    else:
-        # For 2D coords, this is more complex - for now just return original
-        _log_warn("2D lon/lat coordinates not fully supported for UTM cropping, using original dataset")
-        ds_cropped = ds
+    return ds.isel(**sel)
 
-    return ds_cropped
 
 def _get_fixed_utm_crs(conf_raw: str | None) -> str:
     """
@@ -470,9 +572,19 @@ def _rotate_xy(x: np.ndarray, y: np.ndarray, deg: float, cx: float, cy: float) -
 def _project_rotate_grid(lon: np.ndarray, lat: np.ndarray, utm_crs, rotate_deg: float, pivot_xy: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Project lon/lat grid to UTM, then rotate around pivot.
+    Supports lon/lat as 1D vectors or 2D mesh (WRF XLONG/XLAT).
     """
     transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-    Lon, Lat = np.meshgrid(lon, lat, indexing="xy")
+
+    if lon.ndim == 1 and lat.ndim == 1:
+        Lon, Lat = np.meshgrid(lon, lat, indexing="xy")
+    elif lon.ndim == 2 and lat.ndim == 2:
+        if lon.shape != lat.shape:
+            raise ValueError("lon and lat 2D shapes mismatch")
+        Lon, Lat = lon, lat
+    else:
+        raise ValueError("lon/lat must be both 1D or both 2D")
+
     x, y = transformer.transform(Lon, Lat)
     xr, yr = _rotate_xy(x, y, rotate_deg, pivot_xy[0], pivot_xy[1])
     return xr, yr
@@ -624,7 +736,11 @@ def buildBC_dev(
         # Get UTM CRS first
         utm_crs = _get_fixed_utm_crs(conf.get("__raw__"))
 
-        ds = xr.open_dataset(nc_path_resolved, chunks={"lon": 64, "lat": 64})
+        ds = xr.open_dataset(nc_path_resolved, chunks="auto")
+        ds = _detect_and_rename_wrf_dims(ds)
+        ds = _ensure_lonlat_geo_coords(ds)
+        if "lon" in ds.dims and "lat" in ds.dims:
+            ds = ds.chunk({"lon": 64, "lat": 64})
 
         # UTM-based crop (same coordinate system as DEM)
         ds = _crop_wind_by_utm_bounds(ds, conf.get("__raw__"), utm_crs)
@@ -638,8 +754,11 @@ def buildBC_dev(
             vert = "height"
         elif "elevation" in ds.coords:
             vert = "elevation"
+        elif "bottom_top" in ds.coords:
+            vert = "bottom_top"
         else:
-            raise ValueError("Vertical coord not found. Expect lev or height_agl")
+            raise ValueError("Vertical coord not found. Expect lev or height_agl or bottom_top")
+
 
         # upsample if too small
         target_n_map = {"lon": 200, "lat": 200, vert: 10}
@@ -673,20 +792,45 @@ def buildBC_dev(
             ds = ds.persist()
             _log_info("Finished lon/lat/vertical interpolation")
 
-        # extract variables
-        var_w = "w"
-        u = ds[var_u].transpose(vert, "lat", "lon").astype(np.float32).values
-        v = ds[var_v].transpose(vert, "lat", "lon").astype(np.float32).values
-        w = ds[var_w].transpose(vert, "lat", "lon").astype(np.float32).values if var_w in ds.variables else np.zeros_like(u)
-        lev = ds[vert].values
-        lon = ds["lon"].values
-        lat = ds["lat"].values
+        # extract variables (support WRF names and WRF staggered grids)
+        u_name = _resolve_wind_var_name(ds, var_u, ("u", "U"), "u")
+        v_name = _resolve_wind_var_name(ds, var_v, ("v", "V"), "v")
 
-        # original lon/lat range
-        orig_lon_min = float(ds["lon"].min())
-        orig_lon_max = float(ds["lon"].max())
-        orig_lat_min = float(ds["lat"].min())
-        orig_lat_max = float(ds["lat"].max())
+        w_name = None
+        if "w" in ds.variables:
+            w_name = "w"
+        elif "W" in ds.variables:
+            w_name = "W"
+            _log_warn("Wind variable w not found, use W for w")
+        else:
+            w_name = None
+
+        da_u = _destagger_wrf(_isel_first_time_if_present(ds[u_name]))
+        da_v = _destagger_wrf(_isel_first_time_if_present(ds[v_name]))
+
+        if w_name is None:
+            da_w = None
+        else:
+            da_w = _destagger_wrf(_isel_first_time_if_present(ds[w_name]))
+
+        u = da_u.transpose(vert, "lat", "lon").astype(np.float32).values
+        v = da_v.transpose(vert, "lat", "lon").astype(np.float32).values
+        if da_w is None:
+            w = np.zeros_like(u)
+        else:
+            w = da_w.transpose(vert, "lat", "lon").astype(np.float32).values
+
+        lev = ds[vert].values
+
+        lon = ds["lon_geo"].values
+        lat = ds["lat_geo"].values
+
+
+        # original lon/lat range (use geographic lon_geo/lat_geo)
+        orig_lon_min = float(np.nanmin(lon))
+        orig_lon_max = float(np.nanmax(lon))
+        orig_lat_min = float(np.nanmin(lat))
+        orig_lat_max = float(np.nanmax(lat))
 
         nz, ny_src, nx_src = u.shape
         _log_info(f"Data shape nz={nz} ny={ny_src} nx={nx_src}")
@@ -793,12 +937,25 @@ def buildBC_dev(
             x_grid = np.linspace(0.0, x_range_target, nx)
             y_grid = np.linspace(0.0, y_range_target, ny)
             # Shift DEM points to match wind grid origin
-            dem_points_shifted = dem_points_utm - np.array([x_min_data, y_min_data])
+            # dem_points_shifted = dem_points_utm - np.array([x_min_data, y_min_data])
+            # dem_grid = _interpolate_dem_to_grid(
+            #     dem_points_shifted, dem_elevations,
+            #     x_grid, y_grid,
+            #     rotate_deg, pivot_xy,
+            #     x_min_data, y_min_data
+            # )
+            # Rotate DEM points into the same rotated UTM frame as wind grid, then shift to local origin
+            dem_x = dem_points_utm[:, 0]
+            dem_y = dem_points_utm[:, 1]
+            dem_x_rot, dem_y_rot = _rotate_xy(dem_x, dem_y, rotate_deg, pivot_xy[0], pivot_xy[1])
+            dem_points_shifted = np.column_stack([dem_x_rot - x_min_data, dem_y_rot - y_min_data])
+
+            # DEM points are already in rotated local coordinates, so set rotate_deg=0 here
             dem_grid = _interpolate_dem_to_grid(
                 dem_points_shifted, dem_elevations,
                 x_grid, y_grid,
-                rotate_deg, pivot_xy,
-                x_min_data, y_min_data
+                0.0, (0.0, 0.0),
+                0.0, 0.0
             )
 
             # Prepare DEM data for saving (will save later after proj_temp is created)

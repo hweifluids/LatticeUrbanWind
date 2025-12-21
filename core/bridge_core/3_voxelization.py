@@ -748,7 +748,7 @@ def main():
     print(f"[INFO] Height field: {args.height_field}")
     print(f"[INFO] Min valid height: {args.min_height} m")
 
-    combined_file = proj_temp / f"{case_name}_DEM.stl"
+    combined_file = proj_temp / f"{case_name}.stl"
 
     print(f"[INFO] Reading features from file")
     gdf = gpd.read_file(shp_path)
@@ -851,16 +851,33 @@ def main():
     print(f"[INFO] Projected bounds: x=[{x_lo:.3f}, {x_hi:.3f}], y=[{y_lo:.3f}, {y_hi:.3f}]")
     print(f"[INFO] Domain size: {x_hi - x_lo:.3f} x {y_hi - y_lo:.3f} m")
 
-    # Create axis-aligned bounding box
-    minx, miny, maxx, maxy = x_lo, y_lo, x_hi, y_hi
-    base_rot = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
-    rotate_deg = 0.0
-    pivot_xy = ((minx + maxx) / 2, (miny + maxy) / 2)
-    print(f"[INFO] Using axis-aligned bounding box (no rotation)")
+    # Build boundary box and rotation
+    if use_pkl_dem and dem_data_pkl is not None:
+        x_min_pkl = float(dem_data_pkl["x_min"])
+        y_min_pkl = float(dem_data_pkl["y_min"])
 
-    # No rotation needed for DEM points (rotate_deg = 0)
-    if dem_points is not None:
-        print("[INFO] DEM points ready (no rotation needed)")
+        x_grid_pkl = np.asarray(dem_data_pkl["x_grid"])
+        y_grid_pkl = np.asarray(dem_data_pkl["y_grid"])
+
+        minx = x_min_pkl
+        miny = y_min_pkl
+        maxx = x_min_pkl + float(x_grid_pkl.max())
+        maxy = y_min_pkl + float(y_grid_pkl.max())
+
+
+        rotate_deg = float(dem_data_pkl.get("rotate_deg", 0.0))
+        pivot_xy_raw = dem_data_pkl.get("pivot_xy", ((minx + maxx) / 2, (miny + maxy) / 2))
+        pivot_xy = (float(pivot_xy_raw[0]), float(pivot_xy_raw[1]))
+
+        base_rot = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
+        print(f"[INFO] Using pkl DEM bounds: x=[{minx:.3f}, {maxx:.3f}], y=[{miny:.3f}, {maxy:.3f}]")
+        print(f"[INFO] Using pkl rotation: rotate_deg={rotate_deg:.6f}, pivot=({pivot_xy[0]:.3f}, {pivot_xy[1]:.3f})")
+    else:
+        minx, miny, maxx, maxy = x_lo, y_lo, x_hi, y_hi
+        base_rot = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
+        rotate_deg = 0.0
+        pivot_xy = ((minx + maxx) / 2, (miny + maxy) / 2)
+        print("[INFO] Using axis-aligned bounding box (no rotation)")
 
     # Filter buildings by height (no rotation needed)
     print("[INFO] Filtering building polygons by height")
@@ -881,11 +898,15 @@ def main():
             continue
         for poly in polys:
             try:
-                # No rotation needed (rotate_deg = 0)
-                rotated_polygons.append(poly)
+                if rotate_deg != 0.0:
+                    poly_use = affinity.rotate(poly, rotate_deg, origin=pivot_xy, use_radians=False)
+                else:
+                    poly_use = poly
+                rotated_polygons.append(poly_use)
                 heights.append(h)
             except Exception:
                 continue
+
 
     if not rotated_polygons:
         raise RuntimeError("[ERROR] No valid building polygons available")
@@ -956,7 +977,13 @@ def main():
         base_height=args.base_height,
         proj_temp=proj_temp
     )
-
+    
+    dem_used = terrain_mesh is not None
+    if dem_used:
+        combined_file = proj_temp / f"{case_name}_dem.stl"
+    else:
+        combined_file = proj_temp / f"{case_name}.stl"
+    print(f"[INFO] Combined STL output path: {combined_file}")
     # Create fast elevation lookup grid for building placement
     # Use finer resolution (10m) for more accurate building base elevations
     # Note: dem_elevations are already adjusted to datum (min=0)
