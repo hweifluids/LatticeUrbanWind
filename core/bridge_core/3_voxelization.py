@@ -980,7 +980,7 @@ def main():
     
     dem_used = terrain_mesh is not None
     if dem_used:
-        combined_file = proj_temp / f"{case_name}_dem.stl"
+        combined_file = proj_temp / f"{case_name}_DEM.stl"
     else:
         combined_file = proj_temp / f"{case_name}.stl"
     print(f"[INFO] Combined STL output path: {combined_file}")
