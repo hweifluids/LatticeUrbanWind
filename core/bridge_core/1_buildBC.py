@@ -1176,7 +1176,30 @@ def buildBC_dev(
         # make the spacing close to midmesh_basesize (default 50 m) and exactly divide the domain length
         conf_raw = conf.get("__raw__")
 
+        base_height = 50.0
+        if conf_raw:
+            m_bh = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+            if m_bh:
+                try:
+                    base_height = float(m_bh.group(1))
+                except Exception:
+                    base_height = 50.0
+        if (not math.isfinite(base_height)) or (base_height < 0.0):
+            base_height = 50.0
+
+        z_limit_agl = None
+        if conf_raw:
+            m_zlim = re.search(r"z_limit\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+            if m_zlim:
+                try:
+                    z_limit_agl = float(m_zlim.group(1))
+                except Exception:
+                    z_limit_agl = None
+        if (z_limit_agl is not None) and ((not math.isfinite(z_limit_agl)) or (z_limit_agl <= 0.0)):
+            z_limit_agl = None
+
         mesh_base = 50.0
+
         if conf_raw:
             m_mb = re.search(r"midmesh_basesize\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
             if m_mb:
@@ -1369,9 +1392,24 @@ def buildBC_dev(
 
             conf_lines[15] = f"si_x_cfd = [0.000000, {si_x_range:.6f}]"
             conf_lines[16] = f"si_y_cfd = [0.000000, {si_y_range:.6f}]"
-            # vertical range starts at 0, use resampled grid top
-            z_max_new = float((nz - 1) * dz) if nz > 1 else 0.0
-            conf_lines[17] = f"si_z_cfd = [0.000000, {z_max_new:.6f}]"
+            # vertical range starts at 0, use final CSV Z max (includes base_height, terrain, optional z_limit)
+            z_max_csv = float((nz - 1) * dz) + float(base_height) if nz > 1 else float(base_height)
+
+            if z_limit_agl is not None:
+                max_agl_available = z_max_csv - float(base_height)
+                if max_agl_available > float(z_limit_agl):
+                    if dem_grid is not None:
+                        dem_max_scaled = float(np.nanmax(dem_grid)) * float(elevation_scale)
+                        if (not math.isfinite(dem_max_scaled)) or (dem_max_scaled < 0.0):
+                            dem_max_scaled = 0.0
+                        ground_z_max = float(base_height) + dem_max_scaled
+                    else:
+                        ground_z_max = float(base_height)
+
+                    z_max_csv = min(z_max_csv, ground_z_max + float(z_limit_agl))
+
+            conf_lines[17] = f"si_z_cfd = [0.000000, {z_max_csv:.6f}]"
+
 
             conf_lines[20:23] = [
                 f"utm_crs = \"{utm_crs}\"",
@@ -1418,18 +1456,7 @@ def buildBC_dev(
 
         # Prepare interpolation for terrain-adjusted wind field
         # Fixed top height: z_max_output = z_top_from_wind + base_height
-        conf_raw = conf.get("__raw__")
-
-        base_height = 50.0
-        if conf_raw:
-            m_bh = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-            if m_bh:
-                try:
-                    base_height = float(m_bh.group(1))
-                except Exception:
-                    base_height = 50.0
-
-        z_max_output = float((nz - 1) * dz) + base_height  # absolute Z in CSV coordinates (includes base_height)
+        z_max_output = float((nz - 1) * dz) + float(base_height)  # absolute Z in CSV coordinates (includes base_height)
 
         z_original = np.arange(nz, dtype=np.float32) * dz  # AGL in wind grid (0, dz, 2*dz, ...)
 
