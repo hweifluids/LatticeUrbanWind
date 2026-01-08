@@ -1,7 +1,7 @@
-casename = testcase
+casename = example
 cut_lon_manual=[121.3,121.7]
 cut_lat_manual=[31.1,31.4]
-datetime = 20990101120000
+datetime = 20251010120000
 
 
 
@@ -29,8 +29,21 @@ downstream_bc = "+y"
 downstream_bc_yaw = 30.19
 
 // CFD control
-n_gpu = [1, 1, 1]
+n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
-gpu_memory = 19148
-
+gpu_memory = 20000
+cell_size = 
 validation = pass
+high_order = true
+flux_correction = true
+coriolis_term = true
+
+
+
+
+
+
+
+
+
+

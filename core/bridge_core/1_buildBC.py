@@ -114,24 +114,226 @@ def _resolve_wind_var_name(ds: xr.Dataset, preferred: str, fallbacks: Tuple[str,
             return name
     raise KeyError(f"Wind variable {preferred} not found, and fallbacks also missing for {kind}")
 
-
 def _destagger_wrf(da: xr.DataArray) -> xr.DataArray:
     """
     Destagger common WRF staggered dimensions by averaging adjacent grid points.
+    IMPORTANT: Do not rely on xarray coordinate alignment when averaging; use positional averaging.
     """
+    def _avg_along_dim_positional(x: xr.DataArray, dim_in: str, dim_out: str) -> xr.DataArray:
+        if dim_in not in x.dims:
+            return x
+
+        x0 = x.isel({dim_in: slice(0, -1)}).data
+        x1 = x.isel({dim_in: slice(1, None)}).data
+        data = 0.5 * (x0 + x1)
+
+        dims_out = list(x.dims)
+        dim_idx = dims_out.index(dim_in)
+        dims_out[dim_idx] = dim_out
+
+        coords_out = {}
+        for d in dims_out:
+            if d == dim_out:
+                if dim_in in x.coords:
+                    c = np.asarray(x.coords[dim_in].values)
+                    if c.ndim == 1 and c.size == x.sizes[dim_in]:
+                        c_mid = 0.5 * (c[:-1] + c[1:])
+                        coords_out[dim_out] = (dim_out, c_mid.astype(np.float32))
+                    else:
+                        coords_out[dim_out] = (dim_out, np.arange(data.shape[dim_idx], dtype=np.float32))
+                else:
+                    coords_out[dim_out] = (dim_out, np.arange(data.shape[dim_idx], dtype=np.float32))
+            else:
+                if d in x.coords:
+                    coords_out[d] = x.coords[d]
+
+        out = xr.DataArray(
+            data,
+            dims=tuple(dims_out),
+            coords=coords_out,
+            attrs=x.attrs,
+            name=x.name,
+        )
+        return out
+
     if "lon_stag" in da.dims:
         _log_info("Destagger along lon_stag to lon for WRF staggered grid")
-        da = 0.5 * (da.isel(lon_stag=slice(0, -1)) + da.isel(lon_stag=slice(1, None)))
-        da = da.rename({"lon_stag": "lon"})
+        da = _avg_along_dim_positional(da, "lon_stag", "lon")
     if "lat_stag" in da.dims:
         _log_info("Destagger along lat_stag to lat for WRF staggered grid")
-        da = 0.5 * (da.isel(lat_stag=slice(0, -1)) + da.isel(lat_stag=slice(1, None)))
-        da = da.rename({"lat_stag": "lat"})
+        da = _avg_along_dim_positional(da, "lat_stag", "lat")
     if "bottom_top_stag" in da.dims:
         _log_info("Destagger along bottom_top_stag to bottom_top for WRF staggered grid")
-        da = 0.5 * (da.isel(bottom_top_stag=slice(0, -1)) + da.isel(bottom_top_stag=slice(1, None)))
-        da = da.rename({"bottom_top_stag": "bottom_top"})
+        da = _avg_along_dim_positional(da, "bottom_top_stag", "bottom_top")
+
     return da
+
+
+def _ensure_dim_index_coords(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Ensure every internal dimension used by interp/isel has a numeric 1D coordinate.
+    This is required for WRF-style datasets where renamed dims often have no coord variable.
+    """
+    dims_need = []
+    for d in ("lon", "lat", "lon_stag", "lat_stag", "bottom_top", "bottom_top_stag"):
+        if d in ds.dims and d not in ds.coords:
+            dims_need.append(d)
+
+    if not dims_need:
+        return ds
+
+    coords = {d: (d, np.arange(ds.sizes[d], dtype=np.float32)) for d in dims_need}
+    return ds.assign_coords(coords)
+
+def _ensure_wrf_height_agl_1d(ds: xr.Dataset) -> xr.Dataset:
+    """
+    For WRF: build a 1D vertical height (AGL) coordinate for bottom_top using PH/PHB (and HGT if present).
+    Saved as coord name: height_agl_1d with dim bottom_top.
+    IMPORTANT: Use positional averaging on bottom_top_stag to avoid coordinate-alignment NaNs.
+    """
+    if "bottom_top" not in ds.dims:
+        return ds
+    if "height_agl_1d" in ds.coords:
+        return ds
+    if "bottom_top_stag" not in ds.dims:
+        return ds
+    if ("PH" not in ds.variables) or ("PHB" not in ds.variables):
+        return ds
+
+    try:
+        ph = _isel_first_time_if_present(ds["PH"])
+        phb = _isel_first_time_if_present(ds["PHB"])
+
+        g = np.float32(9.81)
+        z_w = (ph + phb) / g  # (bottom_top_stag, lat, lon) in meters
+
+        z0 = z_w.isel(bottom_top_stag=slice(0, -1)).data
+        z1 = z_w.isel(bottom_top_stag=slice(1, None)).data
+        z_m_data = 0.5 * (z0 + z1)
+
+        coords_out = {}
+        if "bottom_top_stag" in z_w.coords:
+            c = np.asarray(z_w.coords["bottom_top_stag"].values)
+            if c.ndim == 1 and c.size == ds.sizes["bottom_top_stag"]:
+                c_mid = 0.5 * (c[:-1] + c[1:])
+                coords_out["bottom_top"] = ("bottom_top", c_mid.astype(np.float32))
+            else:
+                coords_out["bottom_top"] = ("bottom_top", np.arange(ds.sizes["bottom_top"], dtype=np.float32))
+        else:
+            coords_out["bottom_top"] = ("bottom_top", np.arange(ds.sizes["bottom_top"], dtype=np.float32))
+
+        if "lat" in z_w.dims and "lat" in z_w.coords:
+            coords_out["lat"] = z_w.coords["lat"]
+        if "lon" in z_w.dims and "lon" in z_w.coords:
+            coords_out["lon"] = z_w.coords["lon"]
+
+        z_m = xr.DataArray(
+            z_m_data,
+            dims=("bottom_top",) + tuple(d for d in z_w.dims if d != "bottom_top_stag"),
+            coords=coords_out,
+            name="z_mass",
+        )
+
+        if "HGT" in ds.variables:
+            hgt = _isel_first_time_if_present(ds["HGT"])
+            z_m = z_m - hgt
+
+        if ("lat" in z_m.dims) and ("lon" in z_m.dims):
+            z1d = z_m.mean(dim=("lat", "lon"), skipna=True).astype(np.float32).values
+        else:
+            z1d = z_m.astype(np.float32).values
+            if z1d.ndim > 1:
+                z1d = np.nanmean(z1d.reshape(z1d.shape[0], -1), axis=1).astype(np.float32)
+
+        if z1d.ndim != 1 or z1d.size != ds.sizes["bottom_top"]:
+            return ds
+
+        if not np.isfinite(z1d).all():
+            return ds
+
+        # Enforce monotonic increasing (required by later 1D interpolation)
+        z1d = z1d.astype(np.float32)
+        for k in range(1, z1d.size):
+            if z1d[k] <= z1d[k - 1]:
+                z1d[k] = z1d[k - 1] + np.float32(1e-3)
+
+        da_h = xr.DataArray(z1d, dims=("bottom_top",), name="height_agl_1d")
+        da_h.attrs["units"] = "m"
+        da_h.attrs["description"] = "WRF AGL height (domain-mean) on mass levels"
+
+        return ds.assign_coords(height_agl_1d=da_h)
+
+    except Exception:
+        return ds
+
+def _ensure_wrf_pressure_hpa_1d(ds: xr.Dataset) -> xr.Dataset:
+    """
+    For WRF: provide a 1D pressure (hPa) coordinate on bottom_top for reference (domain-mean).
+    This does NOT replace height-based z used by VTK/CFD.
+    """
+    if "bottom_top" not in ds.dims:
+        return ds
+    if "pressure_hpa_1d" in ds.coords:
+        return ds
+    if ("P" not in ds.variables) or ("PB" not in ds.variables):
+        return ds
+
+    try:
+        p = _isel_first_time_if_present(ds["P"] + ds["PB"])  # Pa
+        if ("lat" in p.dims) and ("lon" in p.dims):
+            p1d = (p.mean(dim=("lat", "lon"), skipna=True).astype(np.float32).values) / np.float32(100.0)
+        else:
+            v = p.astype(np.float32).values
+            if v.ndim > 1:
+                v = np.nanmean(v.reshape(v.shape[0], -1), axis=1).astype(np.float32)
+            p1d = v / np.float32(100.0)
+
+        if p1d.ndim != 1 or p1d.size != ds.sizes["bottom_top"]:
+            return ds
+
+        if not np.isfinite(p1d).all():
+            return ds
+
+        da_p = xr.DataArray(p1d.astype(np.float32), dims=("bottom_top",), name="pressure_hpa_1d")
+        da_p.attrs["units"] = "hPa"
+        da_p.attrs["description"] = "WRF pressure (domain-mean) on mass levels"
+
+        return ds.assign_coords(pressure_hpa_1d=da_p)
+
+    except Exception:
+        return ds
+
+def _detect_vertical_dim_and_levels(ds: xr.Dataset) -> Tuple[xr.Dataset, str, np.ndarray]:
+    """
+    Return (ds, vert_dim_name, lev_1d_values).
+    lev_1d_values must be 1D and length == ds.sizes[vert_dim_name].
+    """
+    # prefer true vertical dims first
+    for cand in ("lev", "height_agl", "height", "elevation"):
+        if cand in ds.dims:
+            lev = np.asarray(ds[cand].values, dtype=np.float32)
+            if lev.ndim == 1 and lev.size == ds.sizes[cand]:
+                return ds, cand, lev
+
+    # WRF mass vertical dimension
+    if "bottom_top" in ds.dims:
+        ds = _ensure_wrf_pressure_hpa_1d(ds)
+        ds = _ensure_wrf_height_agl_1d(ds)
+
+        if "height_agl_1d" in ds.coords:
+            lev = np.asarray(ds["height_agl_1d"].values, dtype=np.float32)
+            if lev.ndim == 1 and lev.size == ds.sizes["bottom_top"]:
+                return ds, "bottom_top", lev
+
+        if "bottom_top" in ds.coords:
+            lev = np.asarray(ds["bottom_top"].values, dtype=np.float32)
+            if lev.ndim == 1 and lev.size == ds.sizes["bottom_top"]:
+                return ds, "bottom_top", lev
+
+        lev = np.arange(ds.sizes["bottom_top"], dtype=np.float32)
+        return ds, "bottom_top", lev
+
+    raise ValueError("Vertical coord not found. Expect lev or height_agl or height or elevation or bottom_top")
 
 
 def _log_info(msg: str) -> None:
@@ -372,6 +574,32 @@ def _forward_fill_whole_layer(u: np.ndarray, v: np.ndarray) -> None:
             u[k] = u[k - 1]
             v[k] = v[k - 1]
 
+def _fill_nan_3d_nearest(arr: np.ndarray, x2d: np.ndarray, y2d: np.ndarray) -> np.ndarray:
+    """
+    Fill NaNs/Inf in a (nz, ny, nx) array using nearest neighbor in (x,y) space per level.
+    """
+    ny, nx = x2d.shape
+    pts = np.column_stack([x2d.ravel(), y2d.ravel()]).astype(np.float64)
+
+    for k in range(arr.shape[0]):
+        flat = arr[k].astype(np.float64).ravel()
+        good = np.isfinite(flat)
+        if good.all():
+            continue
+        if not good.any():
+            continue
+
+        tree = cKDTree(pts[good])
+        _, idx = tree.query(pts[~good], k=1)
+
+        flat_bad = flat[~good]
+        flat_good = flat[good]
+        flat_bad[:] = flat_good[idx]
+        flat[~good] = flat_bad
+
+        arr[k] = flat.reshape(ny, nx).astype(np.float32)
+
+    return arr
 
 def _read_conf_and_nc_path(conf_path: Union[str, Path]) -> Tuple[Path | None, dict, Path]:
     conf_file = Path(conf_path).expanduser().resolve()
@@ -622,9 +850,24 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     pts = np.column_stack([src_x.ravel(), src_y.ravel()])  # source points
     qpts = np.column_stack([Xg.ravel(), Yg.ravel()])       # target points
 
-    # build geometry once
-    tri = Delaunay(pts)
-    tree = cKDTree(pts)
+    if u.shape[1] * u.shape[2] != pts.shape[0]:
+        raise ValueError(
+            f"Source grid size mismatch: u has {u.shape[1]}x{u.shape[2]}={u.shape[1]*u.shape[2]} points, "
+            f"but src_x/src_y provide {pts.shape[0]} points"
+        )
+
+    valid_mask = np.isfinite(pts).all(axis=1)
+    if not valid_mask.all():
+        n_bad = int((~valid_mask).sum())
+        _log_warn(f"Found {n_bad} NaN/Inf points in src grid, drop them for triangulation")
+
+    pts_valid = pts[valid_mask]
+    if pts_valid.shape[0] < 3:
+        raise ValueError("Not enough valid points for triangulation after dropping NaNs")
+
+    # build geometry once (on valid points only)
+    tri = Delaunay(pts_valid)
+    tree = cKDTree(pts_valid)
     _, nn_idx = tree.query(qpts, k=1)  # nearest neighbor for fallback
 
     # for all target points, find containing simplex and precompute barycentric weights
@@ -636,6 +879,7 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     w0 = r[:, 0]
     w1 = r[:, 1]
     w2 = 1.0 - w0 - w1
+
     i0 = idx_tri[:, 0]
     i1 = idx_tri[:, 1]
     i2 = idx_tri[:, 2]
@@ -657,8 +901,11 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     next_percent_idx = 1  # 1..20
 
     for k in range(nz):
-        uk = u[k].astype(np.float64).ravel()
-        vk = v[k].astype(np.float64).ravel()
+        uk_all = u[k].astype(np.float64).ravel()
+        vk_all = v[k].astype(np.float64).ravel()
+        uk = uk_all[valid_mask]
+        vk = vk_all[valid_mask]
+
 
         out_u_flat = np.empty(M, dtype=np.float32)
         out_v_flat = np.empty(M, dtype=np.float32)
@@ -704,9 +951,6 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     dy = (y_max - y_min) / (ny - 1) if ny > 1 else 0.0
     return u_out, v_out, dx, dy
 
-
-
-
 def buildBC_dev(
     conf_path: Union[str, Path],
     var_u: str = "u",
@@ -739,32 +983,38 @@ def buildBC_dev(
         ds = xr.open_dataset(nc_path_resolved, chunks="auto")
         ds = _detect_and_rename_wrf_dims(ds)
         ds = _ensure_lonlat_geo_coords(ds)
+        ds = _ensure_dim_index_coords(ds)
         if "lon" in ds.dims and "lat" in ds.dims:
             ds = ds.chunk({"lon": 64, "lat": 64})
 
         # UTM-based crop (same coordinate system as DEM)
         ds = _crop_wind_by_utm_bounds(ds, conf.get("__raw__"), utm_crs)
 
-        # vertical coordinate detection
-        if "lev" in ds.coords:
-            vert = "lev"
-        elif "height_agl" in ds.coords:
-            vert = "height_agl"
-        elif "height" in ds.coords:
-            vert = "height"
-        elif "elevation" in ds.coords:
-            vert = "elevation"
-        elif "bottom_top" in ds.coords:
-            vert = "bottom_top"
-        else:
-            raise ValueError("Vertical coord not found. Expect lev or height_agl or bottom_top")
+        # vertical coordinate detection (support WRF: bottom_top as dim without coord)
+        ds, vert, lev = _detect_vertical_dim_and_levels(ds)
 
 
-        # upsample if too small
+
+        # upsample if too small (support WRF staggered dims: lon_stag/lat_stag)
         target_n_map = {"lon": 200, "lat": 200, vert: 10}
+        if "lon_stag" in ds.dims:
+            target_n_map["lon_stag"] = target_n_map["lon"] + 1
+        if "lat_stag" in ds.dims:
+            target_n_map["lat_stag"] = target_n_map["lat"] + 1
+
+        dims_to_check = ["lon", "lat"]
+        if "lon_stag" in ds.dims:
+            dims_to_check.append("lon_stag")
+        if "lat_stag" in ds.dims:
+            dims_to_check.append("lat_stag")
+        if vert not in dims_to_check:
+            dims_to_check.append(vert)
+
         new_coords = {}
-        for dim in ("lon", "lat", vert):
-            target_n = target_n_map[dim]
+        for dim in dims_to_check:
+            if dim not in ds.dims:
+                continue
+            target_n = target_n_map.get(dim, ds.sizes[dim])
             if ds.sizes[dim] < target_n:
                 coords = ds[dim].values
                 new_coords[dim] = np.linspace(coords[0], coords[-1], target_n, dtype=coords.dtype)
@@ -772,17 +1022,15 @@ def buildBC_dev(
 
         if new_coords:
             _log_info("Start interpolation on lon, lat and vertical (Dense Compute)...")
-            # Use different methods for single and multi-dim interpolation
             if len(new_coords) == 1:
-                # Single-dimension interpolation can use PCHIP
                 ds = ds.interp(new_coords, method="pchip")
             else:
-                # Linear for horizontal, PCHIP for vertical
-                horizontal_coords = {k: v for k, v in new_coords.items() if k in ["lon", "lat"]}
-                vertical_coords = {k: v for k, v in new_coords.items() if k not in ["lon", "lat"]}
+                horizontal_keys = ["lon", "lat", "lon_stag", "lat_stag"]
+                horizontal_coords = {k: v for k, v in new_coords.items() if k in horizontal_keys}
+                vertical_coords = {k: v for k, v in new_coords.items() if k not in horizontal_keys}
 
                 if horizontal_coords:
-                    _log_info("Interpolating horizontal dimensions (lon, lat) with linear method...")
+                    _log_info("Interpolating horizontal dimensions with linear method...")
                     ds = ds.interp(horizontal_coords, method="linear")
 
                 if vertical_coords:
@@ -813,6 +1061,14 @@ def buildBC_dev(
         else:
             da_w = _destagger_wrf(_isel_first_time_if_present(ds[w_name]))
 
+        if ("lat" in da_u.dims) and ("lon" in da_u.dims):
+            if ("lat" in da_v.dims) and ("lon" in da_v.dims):
+                if (da_v.sizes["lat"] != da_u.sizes["lat"]) or (da_v.sizes["lon"] != da_u.sizes["lon"]):
+                    da_v = da_v.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
+            if (da_w is not None) and ("lat" in da_w.dims) and ("lon" in da_w.dims):
+                if (da_w.sizes["lat"] != da_u.sizes["lat"]) or (da_w.sizes["lon"] != da_u.sizes["lon"]):
+                    da_w = da_w.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
+
         u = da_u.transpose(vert, "lat", "lon").astype(np.float32).values
         v = da_v.transpose(vert, "lat", "lon").astype(np.float32).values
         if da_w is None:
@@ -820,10 +1076,25 @@ def buildBC_dev(
         else:
             w = da_w.transpose(vert, "lat", "lon").astype(np.float32).values
 
-        lev = ds[vert].values
+        # lev is resolved earlier by _detect_vertical_dim_and_levels(ds)
+        lev = np.asarray(lev, dtype=np.float32)
 
-        lon = ds["lon_geo"].values
-        lat = ds["lat_geo"].values
+        lon_geo_da = ds["lon_geo"]
+        lat_geo_da = ds["lat_geo"]
+
+        if (
+            (lon_geo_da.ndim == 2) and (lat_geo_da.ndim == 2) and
+            ("lat" in lon_geo_da.dims) and ("lon" in lon_geo_da.dims) and
+            ("lat" in da_u.dims) and ("lon" in da_u.dims)
+        ):
+            lon_geo_on = lon_geo_da.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
+            lat_geo_on = lat_geo_da.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
+            lon = lon_geo_on.values
+            lat = lat_geo_on.values
+        else:
+            lon = lon_geo_da.values
+            lat = lat_geo_da.values
+
 
 
         # original lon/lat range (use geographic lon_geo/lat_geo)
@@ -883,6 +1154,14 @@ def buildBC_dev(
 
         x_src = x_rot - x_min_data
         y_src = y_rot - y_min_data
+        if (x_src.shape == u[0].shape) and (y_src.shape == u[0].shape):
+            if np.isnan(u).any() or np.isnan(v).any() or np.isnan(w).any():
+                _log_warn("NaNs found in wind components, fill horizontally by nearest neighbor in projected space")
+                u = _fill_nan_3d_nearest(u, x_src, y_src)
+                v = _fill_nan_3d_nearest(v, x_src, y_src)
+                w = _fill_nan_3d_nearest(w, x_src, y_src)
+        else:
+            _log_warn("Skip NaN horizontal fill because projected grid shape mismatch")
 
         # Use target domain size if available, otherwise use data range
         if target_domain_size is not None:
@@ -894,20 +1173,42 @@ def buildBC_dev(
             _log_info(f"Using data range for interpolation: {x_range_target:.3f} x {y_range_target:.3f} m")
 
         # Choose target grid resolution in each horizontal direction:
-        # make the spacing close to 50 m and exactly divide the domain length
-        def _choose_n_points_for_approx_spacing(length_m: float, target_spacing: float = 50.0) -> int:
+        # make the spacing close to midmesh_basesize (default 50 m) and exactly divide the domain length
+        conf_raw = conf.get("__raw__")
+
+        mesh_base = 50.0
+        if conf_raw:
+            m_mb = re.search(r"midmesh_basesize\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+            if m_mb:
+                try:
+                    mesh_base = float(m_mb.group(1))
+                except Exception:
+                    mesh_base = 50.0
+        if (not math.isfinite(mesh_base)) or (mesh_base <= 0.0):
+            mesh_base = 50.0
+
+        _log_info(f"midmesh_basesize for output grid = {mesh_base:.3f} m (default 50.0 m if not set)")
+
+        def _choose_n_points_for_approx_spacing(length_m: float, target_spacing: float) -> int:
             if not math.isfinite(length_m) or length_m <= 0.0:
                 return 1
             n_cells = max(1, int(round(length_m / target_spacing)))
             return n_cells + 1
 
-        nx = _choose_n_points_for_approx_spacing(x_range_target, 50.0)
-        ny = _choose_n_points_for_approx_spacing(y_range_target, 50.0)
+        nx = _choose_n_points_for_approx_spacing(x_range_target, mesh_base)
+        ny = _choose_n_points_for_approx_spacing(y_range_target, mesh_base)
+
         _log_info(
             "Target grid points (nx, ny) = "
             f"({nx}, {ny}) -> nominal spacing ~ "
             f"{x_range_target / max(nx - 1, 1):.3f} m x {y_range_target / max(ny - 1, 1):.3f} m"
         )
+
+        if (not np.isfinite(x_src).all()) or (not np.isfinite(y_src).all()):
+            _log_warn("src_x/src_y contain NaN/Inf after projection. Fallback to structured meter grid for interpolation.")
+            x1 = np.linspace(0.0, x_range_target, nx_src, dtype=np.float32)
+            y1 = np.linspace(0.0, y_range_target, ny_src, dtype=np.float32)
+            x_src, y_src = np.meshgrid(x1, y1, indexing="xy")
 
         # interpolate to uniform grid using target domain size and chosen resolution
         u_m, v_m, dx, dy = _interp_to_uniform_meter_grid(
@@ -915,6 +1216,7 @@ def buildBC_dev(
             nx=nx, ny=ny,
             x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target
         )
+
 
         # horizontally interpolate w onto the same uniform grid (silent)
         w_m, _, _, _ = _interp_to_uniform_meter_grid(
@@ -925,7 +1227,8 @@ def buildBC_dev(
         )
         w = w_m
 
-        dz = float(lev[-1] - lev[0]) / (nz - 1) if nz > 1 else 0.0
+        dz = 0.0
+
 
 
 
@@ -966,7 +1269,7 @@ def buildBC_dev(
                 'y_grid': y_grid,      # 1D y coordinates
                 'dx': dx,
                 'dy': dy,
-                'base_height': 50.0,   # Fixed base height
+                'base_height': base_height,
                 'rotate_deg': rotate_deg,
                 'pivot_xy': pivot_xy,
                 'x_min': x_min_data,
@@ -977,62 +1280,66 @@ def buildBC_dev(
         else:
             _log_info("No DEM data, proceeding with flat terrain")
 
-        # extend from z=0 to zmin by duplicating the first valid layer at zmin
-        # build new arrays whose origin starts at z=0
-        if dz > 0.0 and float(lev[0]) > 0.0:
-            n_pad = int(round(float(lev[0]) / dz))
-            if n_pad > 0:
-                _log_info(f"Pad {n_pad} layers below zmin={float(lev[0]):.3f} so that vertical origin starts at 0")
-                nz_new = nz + n_pad
-                u_ext = np.empty((nz_new, ny, nx), dtype=np.float32)
-                v_ext = np.empty((nz_new, ny, nx), dtype=np.float32)
-                w_ext = np.empty((nz_new, ny, nx), dtype=np.float32)
+        # Remap vertical levels to a uniform z grid in meters (required by VTK/CFD).
+        # Use lev (meters) when available; keep fallback for older inputs.
+        lev_m = np.asarray(lev, dtype=np.float32)
 
-                # fill 0 < z < zmin using values at zmin
-                for k in range(n_pad):
-                    u_ext[k] = u_m[0]
-                    v_ext[k] = v_m[0]
-                    w_ext[k] = w[0]
+        if (lev_m.ndim != 1) or (lev_m.size != nz) or (not np.isfinite(lev_m).all()):
+            _log_warn("Invalid vertical levels detected, fallback to index-based z levels (1 m spacing)")
+            lev_m = np.arange(nz, dtype=np.float32)
 
-                # copy original layers upward
-                u_ext[n_pad:n_pad + nz] = u_m
-                v_ext[n_pad:n_pad + nz] = v_m
-                w_ext[n_pad:n_pad + nz] = w
+        # If lev looks pressure-like, do not treat it as meters here.
+        lev_min = float(np.nanmin(lev_m))
+        lev_max = float(np.nanmax(lev_m))
+        if (lev_min > 1.0) and (lev_max < 2000.0) and (lev_max - lev_min > 10.0):
+            _log_warn("Vertical levels look pressure-like; keep index-based meters for VTK/CFD compatibility")
+            lev_m = np.arange(nz, dtype=np.float32)
 
-                u_m = u_ext
-                v_m = v_ext
-                w = w_ext
-                nz = nz_new
-            else:
-                _log_info("No padding needed. zmin already near zero within dz")
-        else:
-            _log_info("No vertical padding applied. Either dz=0 or zmin<=0")
+        # Ensure increasing upward
+        if lev_m.size >= 2 and lev_m[1] < lev_m[0]:
+            lev_m = lev_m[::-1].copy()
+            u_m = u_m[::-1].copy()
+            v_m = v_m[::-1].copy()
+            w   = w[::-1].copy()
 
-        # after vertical padding, resample vertical grid to make dz close to 50 m
-        if dz > 0.0 and nz > 1:
-            Lz = float((nz - 1) * dz)
-            n_cell_z = max(1, int(round(Lz / 50.0)))
-            nz_new = n_cell_z + 1
-            z_old = np.linspace(0.0, Lz, nz, dtype=np.float32)
-            z_new = np.linspace(0.0, Lz, nz_new, dtype=np.float32)
+        # Build strictly increasing z source (AGL, do NOT prepend z=0 here)
+        z_src_raw = lev_m.copy().astype(np.float32)
+        for k in range(1, z_src_raw.size):
+            if z_src_raw[k] <= z_src_raw[k - 1]:
+                z_src_raw[k] = z_src_raw[k - 1] + np.float32(1e-3)
 
-            _log_info(
-                "Resample vertical grid to ~50 m: "
-                f"Lz={Lz:.3f} m, nz={nz} -> nz_new={nz_new}, dz_new={z_new[1] - z_new[0]:.3f} m"
-            )
+        z_min_raw = float(z_src_raw[0])
+        z_top = float(z_src_raw[-1])
 
-            f_u_z = interp1d(z_old, u_m, axis=0, bounds_error=False, fill_value="extrapolate")
-            f_v_z = interp1d(z_old, v_m, axis=0, bounds_error=False, fill_value="extrapolate")
-            f_w_z = interp1d(z_old, w,   axis=0, bounds_error=False, fill_value="extrapolate")
+        if (not math.isfinite(z_top)) or (z_top <= 0.0):
+            _log_warn("Invalid z_top detected, fallback to 1 m vertical spacing")
+            z_src_raw = np.arange(nz, dtype=np.float32)
+            z_min_raw = float(z_src_raw[0])
+            z_top = float(z_src_raw[-1])
 
-            u_m = f_u_z(z_new).astype(np.float32)
-            v_m = f_v_z(z_new).astype(np.float32)
-            w   = f_w_z(z_new).astype(np.float32)
+        n_cell_z = max(1, int(round(z_top / mesh_base)))
+        nz_new = n_cell_z + 1
+        z_new = np.linspace(0.0, z_top, nz_new, dtype=np.float32)
 
-            nz = nz_new
-            dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
-        else:
-            _log_info("Skip vertical resampling because nz<=1 or dz<=0")
+        _log_info(
+            f"Resample vertical grid to ~{mesh_base:.3f} m with zmin-below nearest fill and ground=0: "
+            f"z_min_raw={z_min_raw:.3f} m, z_top={z_top:.3f} m, nz_src={int(z_src_raw.size)} -> "
+            f"nz_new={nz_new}, dz_new={z_new[1] - z_new[0]:.3f} m"
+        )
+
+        # Nearest fill outside range: below zmin -> first layer; above top -> last layer
+        f_u_z = interp1d(z_src_raw, u_m, axis=0, bounds_error=False, fill_value=(u_m[0], u_m[-1]))
+        f_v_z = interp1d(z_src_raw, v_m, axis=0, bounds_error=False, fill_value=(v_m[0], v_m[-1]))
+        f_w_z = interp1d(z_src_raw, w,   axis=0, bounds_error=False, fill_value=(w[0],   w[-1]))
+
+        u_m = f_u_z(z_new).astype(np.float32)
+        v_m = f_v_z(z_new).astype(np.float32)
+        w   = f_w_z(z_new).astype(np.float32)
+
+        nz = int(nz_new)
+        dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
+
+
 
         # volume-mean velocity
         um_vol = np.array([
@@ -1110,10 +1417,49 @@ def buildBC_dev(
             _log_info(f"Saved DEM grid data to: {dem_pkl_path}")
 
         # Prepare interpolation for terrain-adjusted wind field
-        # Fixed top height: z_max_output = original_z_max + base_height
-        base_height = 50.0  # Fixed base height
-        z_max_output = float((nz - 1) * dz) + base_height  # Fixed top boundary
-        z_original = np.arange(nz, dtype=np.float32) * dz  # Original z levels (0, dz, 2*dz, ...)
+        # Fixed top height: z_max_output = z_top_from_wind + base_height
+        conf_raw = conf.get("__raw__")
+
+        base_height = 50.0
+        if conf_raw:
+            m_bh = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+            if m_bh:
+                try:
+                    base_height = float(m_bh.group(1))
+                except Exception:
+                    base_height = 50.0
+
+        z_max_output = float((nz - 1) * dz) + base_height  # absolute Z in CSV coordinates (includes base_height)
+
+        z_original = np.arange(nz, dtype=np.float32) * dz  # AGL in wind grid (0, dz, 2*dz, ...)
+
+        # Optional z_limit cropping for CSV output
+        # z_limit is treated as AGL height above local ground (ground = base_height + dem_diff_scaled)
+        z_limit_agl = None
+        crop_csv_by_zlimit = False
+
+        if conf_raw:
+            m_zlim = re.search(r"z_limit\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+            if m_zlim:
+                try:
+                    z_limit_agl = float(m_zlim.group(1))
+                except Exception:
+                    z_limit_agl = None
+
+        if (z_limit_agl is not None) and math.isfinite(z_limit_agl) and (z_limit_agl > 0.0):
+            # max available AGL (at lowest terrain, dem_diff min is expected 0)
+            max_agl_available = z_max_output - base_height
+            if max_agl_available > z_limit_agl:
+                crop_csv_by_zlimit = True
+                _log_info(
+                    f"Apply z_limit cropping for CSV (AGL): z_limit_agl={z_limit_agl:.3f} m, "
+                    f"base_height={base_height:.3f} m -> lowest-ground cap Z={base_height + z_limit_agl:.3f} m"
+                )
+            else:
+                _log_info(
+                    f"Skip z_limit cropping for CSV because input top AGL {max_agl_available:.3f} m <= z_limit_agl {z_limit_agl:.3f} m"
+                )
+
 
         if dem_grid is not None:
             _log_info(f"Applying terrain-following coordinates with fixed top at {z_max_output:.2f}m")
@@ -1196,24 +1542,34 @@ def buildBC_dev(
             #         bc_sum += np.array([uval, vval, wval])
             #         bc_cnt += 1
 
-            # top face: interpolate at z_max_output for each (x,y)
+            # top face: interpolate at capped top height for each (x,y)
             for j in range(ny):
                 y = j * dy
                 for i in range(nx):
                     x = i * dx
                     dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                    # Apply elevation scale to CSV output
                     dem_diff_scaled = dem_diff * elevation_scale
 
-                    # Map z_max_output back to original coordinate
-                    z_in_original = z_max_output - base_height - dem_diff_scaled
+                    ground_z = base_height + dem_diff_scaled
 
-                    # Interpolate wind at this z
+                    if crop_csv_by_zlimit:
+                        z_cap_here = ground_z + z_limit_agl
+                        if z_cap_here > z_max_output:
+                            z_top_here = z_max_output
+                        else:
+                            z_top_here = z_cap_here
+                    else:
+                        z_top_here = z_max_output
+
+                    if ground_z >= z_top_here:
+                        continue
+
+                    z_in_original = z_top_here - ground_z  # AGL
+
                     u_col = u_m[:, j, i]
                     v_col = v_m[:, j, i]
                     w_col = w[:, j, i]
 
-                    # Find two nearest levels for interpolation
                     if z_in_original <= z_original[0]:
                         uval, vval, wval = u_col[0], v_col[0], w_col[0]
                     elif z_in_original >= z_original[-1]:
@@ -1225,7 +1581,6 @@ def buildBC_dev(
                         z_lower = z_original[k_lower]
                         z_upper = z_original[k_upper]
 
-                        # IDW interpolation
                         d_lower = abs(z_in_original - z_lower)
                         d_upper = abs(z_in_original - z_upper)
 
@@ -1242,61 +1597,122 @@ def buildBC_dev(
                             vval = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
                             wval = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
 
-                    f.write(f"{x:.3f},{y:.3f},{z_max_output:.3f},{uval},{vval},0.0\n")
+                    f.write(f"{x:.3f},{y:.3f},{z_top_here:.3f},{uval},{vval},0.0\n")
                     bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
+
             # south and north faces
             for j in (0, ny - 1):
                 y = j * dy
-                for k in range(1, nz - 1):
-                    z_grid = float(k) * dz
-                    for i in range(nx):
-                        x = i * dx
-                        dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                        # Apply elevation scale to CSV output
-                        dem_diff_scaled = dem_diff * elevation_scale
+                for i in range(nx):
+                    x = i * dx
+                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                    dem_diff_scaled = dem_diff * elevation_scale
 
-                        # Output z with DEM offset
-                        z_output = z_grid + base_height + dem_diff_scaled
+                    ground_z = base_height + dem_diff_scaled
 
-                        # Skip if exceeds max (remove超出部分)
-                        if z_output > z_max_output:
+                    if crop_csv_by_zlimit:
+                        z_cap_here = ground_z + z_limit_agl
+                        if z_cap_here > z_max_output:
+                            z_cap_here = z_max_output
+                    else:
+                        z_cap_here = z_max_output
+
+                    z_top_here = z_cap_here
+
+                    if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (z_top_here <= ground_z):
+                        continue
+
+                    # ground point (always)
+                    k0 = 0
+                    uval = float(u_m[k0, j, i])
+                    vval = float(v_m[k0, j, i])
+                    wval = 0.0
+                    f.write(f"{x:.3f},{y:.3f},{ground_z:.3f},{uval},{vval},{wval}\n")
+                    bc_sum += np.array([uval, vval, wval])
+                    bc_cnt += 1
+
+                    if dz <= 0.0 or (not math.isfinite(dz)):
+                        continue
+
+                    # step upward from ground by dz, exclude the very top plane (handled by top face)
+                    max_agl = z_top_here - ground_z
+                    k_max_here = int(math.floor(max_agl / dz + 1e-6))
+                    if k_max_here < 1:
+                        continue
+
+                    if k_max_here > (nz - 1):
+                        k_max_here = nz - 1
+
+                    for k_agl in range(1, k_max_here + 1):
+                        z_out = ground_z + float(k_agl) * dz
+                        if z_out >= z_top_here - 1e-6:
                             continue
 
-                        # Use original layer data (no interpolation for middle layers)
-                        uval = u_m[k, j, i]
-                        vval = v_m[k, j, i]
+                        uval = float(u_m[k_agl, j, i])
+                        vval = float(v_m[k_agl, j, i])
                         wval = 0.0
-
-                        f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+                        f.write(f"{x:.3f},{y:.3f},{z_out:.3f},{uval},{vval},{wval}\n")
                         bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
+
+
             # west and east faces
             for i in (0, nx - 1):
                 x = i * dx
-                for k in range(1, nz - 1):
-                    z_grid = float(k) * dz
-                    for j in range(ny):
-                        y = j * dy
-                        dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                        # Apply elevation scale to CSV output
-                        dem_diff_scaled = dem_diff * elevation_scale
+                for j in range(ny):
+                    y = j * dy
+                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
+                    dem_diff_scaled = dem_diff * elevation_scale
 
-                        # Output z with DEM offset
-                        z_output = z_grid + base_height + dem_diff_scaled
+                    ground_z = base_height + dem_diff_scaled
 
-                        # Skip if exceeds max (remove超出部分)
-                        if z_output > z_max_output:
+                    if crop_csv_by_zlimit:
+                        z_cap_here = ground_z + z_limit_agl
+                        if z_cap_here > z_max_output:
+                            z_cap_here = z_max_output
+                    else:
+                        z_cap_here = z_max_output
+
+                    z_top_here = z_cap_here
+
+                    if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (z_top_here <= ground_z):
+                        continue
+
+                    # ground point (always)
+                    k0 = 0
+                    uval = float(u_m[k0, j, i])
+                    vval = float(v_m[k0, j, i])
+                    wval = 0.0
+                    f.write(f"{x:.3f},{y:.3f},{ground_z:.3f},{uval},{vval},{wval}\n")
+                    bc_sum += np.array([uval, vval, wval])
+                    bc_cnt += 1
+
+                    if dz <= 0.0 or (not math.isfinite(dz)):
+                        continue
+
+                    # step upward from ground by dz, exclude the very top plane (handled by top face)
+                    max_agl = z_top_here - ground_z
+                    k_max_here = int(math.floor(max_agl / dz + 1e-6))
+                    if k_max_here < 1:
+                        continue
+
+                    if k_max_here > (nz - 1):
+                        k_max_here = nz - 1
+
+                    for k_agl in range(1, k_max_here + 1):
+                        z_out = ground_z + float(k_agl) * dz
+                        if z_out >= z_top_here - 1e-6:
                             continue
 
-                        # Use original layer data (no interpolation for middle layers)
-                        uval = u_m[k, j, i]
-                        vval = v_m[k, j, i]
+                        uval = float(u_m[k_agl, j, i])
+                        vval = float(v_m[k_agl, j, i])
                         wval = 0.0
-
-                        f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
+                        f.write(f"{x:.3f},{y:.3f},{z_out:.3f},{uval},{vval},{wval}\n")
                         bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
+
+
         _log_info(f"Wrote boundary CSV: {csv_path}")
 
         # copy timestamped CSV

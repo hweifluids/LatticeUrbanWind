@@ -22,6 +22,15 @@ private:
     const std::vector<float3> U;
 };
 
+class ConstantInletInterpolator final : public InletInterpolator {
+public:
+    explicit ConstantInletInterpolator(const float3& velocity) : velocity_(velocity) {}
+    float3 eval(const float3& pos) const override { (void)pos; return velocity_; }
+
+private:
+    float3 velocity_;
+};
+
 class InletVelocityField {
 public:
     InletVelocityField(const InletInterpolator& interp, float z0_lbmu, float z_off)
