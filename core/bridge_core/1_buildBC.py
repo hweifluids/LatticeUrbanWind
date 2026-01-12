@@ -1119,9 +1119,10 @@ def buildBC_dev(
         pts_xy, center_xy, rotate_deg, pivot_xy = _project_bbox_and_rotation(lon_min, lon_max, lat_min, lat_max, utm_crs)
         _log_info(f"Estimated convergence angle = {rotate_deg:.6f} deg, use projected bbox centroid as pivot")
 
-        # Calculate target domain size from config bounds (for si_x_cfd and si_y_cfd)
-        # Simply project the two corner points and calculate the difference
+        # Calculate target domain and rotation from config bounds when available
+        # In rotated CFD coordinates, the domain size must be computed after applying rotate_deg.
         target_domain_size = None
+        domain_origin_rot = None
         if conf.get("__raw__"):
             conf_raw = conf.get("__raw__")
             m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
@@ -1132,17 +1133,37 @@ def buildBC_dev(
                 lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
                 lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
 
-                # Project two corner points to UTM
                 transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-                x_lo, y_lo = transformer.transform(lon_lo, lat_lo)
-                x_hi, y_hi = transformer.transform(lon_hi, lat_hi)
+                x00, y00 = transformer.transform(lon_lo, lat_lo)
+                x10, y10 = transformer.transform(lon_hi, lat_lo)
+                x11, y11 = transformer.transform(lon_hi, lat_hi)
+                x01, y01 = transformer.transform(lon_lo, lat_hi)
 
-                # Calculate size directly (no rotation needed for domain size definition)
-                si_x_target = x_hi - x_lo
-                si_y_target = y_hi - y_lo
+                pts_xy_conf = np.array([[x00, y00], [x10, y10], [x11, y11], [x01, y01]], dtype=float)
+                cx = float(pts_xy_conf[:, 0].mean())
+                cy = float(pts_xy_conf[:, 1].mean())
+
+                dx0 = x10 - x00
+                dy0 = y10 - y00
+                angle_rad = math.atan2(dy0, dx0)
+                rotate_deg = - math.degrees(angle_rad)
+                pivot_xy = (cx, cy)
+                _log_info(f"Override rotation/pivot from config bounds: rotate_deg={rotate_deg:.6f}, pivot=({cx:.3f}, {cy:.3f})")
+
+                xr_c, yr_c = _rotate_xy(pts_xy_conf[:, 0], pts_xy_conf[:, 1], rotate_deg, cx, cy)
+                x_min_conf, x_max_conf = float(np.min(xr_c)), float(np.max(xr_c))
+                y_min_conf, y_max_conf = float(np.min(yr_c)), float(np.max(yr_c))
+
+                si_x_target = x_max_conf - x_min_conf
+                si_y_target = y_max_conf - y_min_conf
 
                 target_domain_size = (si_x_target, si_y_target)
-                _log_info(f"Target domain size from config (UTM projection): {si_x_target:.3f} x {si_y_target:.3f} m")
+                domain_origin_rot = (x_min_conf, y_min_conf)
+                _log_info(
+                    f"Target domain (rotated) from config: {si_x_target:.3f} x {si_y_target:.3f} m; "
+                    f"origin=({x_min_conf:.3f}, {y_min_conf:.3f})"
+                )
+
 
         # project each grid point and rotate
         x_rot, y_rot = _project_rotate_grid(lon, lat, utm_crs, rotate_deg, pivot_xy)
@@ -1152,8 +1173,15 @@ def buildBC_dev(
         y_min_data, y_max_data = float(y_rot.min()), float(y_rot.max())
         _log_info(f"Wind data range after rotation X [{x_min_data:.3f}, {x_max_data:.3f}] Y [{y_min_data:.3f}, {y_max_data:.3f}]")
 
-        x_src = x_rot - x_min_data
-        y_src = y_rot - y_min_data
+        if domain_origin_rot is not None:
+            x_origin, y_origin = float(domain_origin_rot[0]), float(domain_origin_rot[1])
+            _log_info(f"Use config-rotated origin shift: X0={x_origin:.3f} Y0={y_origin:.3f}")
+        else:
+            x_origin, y_origin = x_min_data, y_min_data
+
+        x_src = x_rot - x_origin
+        y_src = y_rot - y_origin
+
         if (x_src.shape == u[0].shape) and (y_src.shape == u[0].shape):
             if np.isnan(u).any() or np.isnan(v).any() or np.isnan(w).any():
                 _log_warn("NaNs found in wind components, fill horizontally by nearest neighbor in projected space")
@@ -1274,7 +1302,8 @@ def buildBC_dev(
             dem_x = dem_points_utm[:, 0]
             dem_y = dem_points_utm[:, 1]
             dem_x_rot, dem_y_rot = _rotate_xy(dem_x, dem_y, rotate_deg, pivot_xy[0], pivot_xy[1])
-            dem_points_shifted = np.column_stack([dem_x_rot - x_min_data, dem_y_rot - y_min_data])
+            dem_points_shifted = np.column_stack([dem_x_rot - x_origin, dem_y_rot - y_origin])
+
 
             # DEM points are already in rotated local coordinates, so set rotate_deg=0 here
             dem_grid = _interpolate_dem_to_grid(
@@ -1295,10 +1324,11 @@ def buildBC_dev(
                 'base_height': base_height,
                 'rotate_deg': rotate_deg,
                 'pivot_xy': pivot_xy,
-                'x_min': x_min_data,
-                'y_min': y_min_data,
-                'x_max': x_max_data,
-                'y_max': y_max_data
+                'x_min': x_origin,
+                'y_min': y_origin,
+                'x_max': x_origin + float(x_range_target),
+                'y_max': y_origin + float(y_range_target)
+
             }
         else:
             _log_info("No DEM data, proceeding with flat terrain")

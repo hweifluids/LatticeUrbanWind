@@ -790,19 +790,21 @@ def main():
         if args.dem_path:
             dem_path = Path(args.dem_path)
         else:
-            # Look for DEM folder in project home
-            dem_folder = project_home / "DEM"
-            if dem_folder.exists():
-                dem_files = list(dem_folder.glob("*.shp"))
-                if dem_files:
-                    dem_path = dem_files[0]
-                    print(f"[INFO] Auto-detected DEM file: {dem_path}")
-                else:
-                    print("[WARN] No DEM shapefile found in DEM folder")
-                    dem_path = None
-            else:
-                print("[WARN] No DEM folder found")
-                dem_path = None
+            # Look for DEM folder in project home (prefer terrain_db, then DEM)
+            dem_path = None
+            for folder_name in ("terrain_db", "DEM"):
+                dem_folder = project_home / folder_name
+                if dem_folder.exists():
+                    dem_files = sorted(dem_folder.glob("*.shp"))
+                    if dem_files:
+                        dem_path = dem_files[0]
+                        print(f"[INFO] Auto-detected DEM file: {dem_path}")
+                        break
+                    else:
+                        print(f"[WARN] No DEM shapefile found in {folder_name} folder")
+            if dem_path is None:
+                print("[WARN] No DEM shapefile found under terrain_db or DEM")
+
 
         if dem_path and dem_path.exists():
             dem_points, dem_elevations = load_dem_data(dem_path, work_crs)
