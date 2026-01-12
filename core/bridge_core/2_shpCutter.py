@@ -510,9 +510,19 @@ def main():
     bbox = box(minx, miny, maxx, maxy)
     print(f"Bbox constructed. MinLon: {minx}, MinLat: {miny}, MaxLon: {maxx}, MaxLat: {maxy}")
 
-    print("Clipping to bbox. Geometry cleaning before clipping.")
+    utm_crs = get_utm_crs_from_bounds((minx, maxx), (miny, maxy))
+    transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+    xa, ya = transformer.transform(minx, miny)
+    xb, yb = transformer.transform(maxx, maxy)
+    x_lo, x_hi = (xa, xb) if xa <= xb else (xb, xa)
+    y_lo, y_hi = (ya, yb) if ya <= yb else (yb, ya)
+    bbox_utm = box(x_lo, y_lo, x_hi, y_hi)
+
+    print("Clipping to UTM bbox (two-corner projected). Geometry cleaning before clipping.")
     gdf_wgs84_cleaned = clean_building_geometries(gdf_wgs84)
-    clipped_wgs84 = gpd.clip(gdf_wgs84_cleaned, bbox)
+    gdf_utm = gdf_wgs84_cleaned.to_crs(utm_crs)
+    clipped_utm = gpd.clip(gdf_utm, bbox_utm)
+    clipped_wgs84 = clipped_utm.to_crs(epsg=4326)
 
     clipped_wgs84 = clipped_wgs84[clipped_wgs84.geometry.notna() & ~clipped_wgs84.geometry.is_empty]
     print(f"Clipping completed. Features after clip: {len(clipped_wgs84)}")
@@ -553,9 +563,8 @@ def main():
 
     # Corner squares, use auto detected UTM CRS based on bbox
     print("Adding four 1m by 1m corner squares inside the bbox.")
-    utm_crs = get_utm_crs_from_bounds((minx, maxx), (miny, maxy))
-    bbox_utm_geom = gpd.GeoSeries([bbox], crs="EPSG:4326").to_crs(utm_crs).iloc[0]
-    minx_m, miny_m, maxx_m, maxy_m = bbox_utm_geom.bounds
+    minx_m, miny_m, maxx_m, maxy_m = x_lo, y_lo, x_hi, y_hi
+
     d = 1.0
     half = 0.5
     corner_centers = [
