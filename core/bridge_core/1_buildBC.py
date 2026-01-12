@@ -1311,12 +1311,26 @@ def buildBC_dev(
             _log_warn("Invalid vertical levels detected, fallback to index-based z levels (1 m spacing)")
             lev_m = np.arange(nz, dtype=np.float32)
 
-        # If lev looks pressure-like, do not treat it as meters here.
-        lev_min = float(np.nanmin(lev_m))
-        lev_max = float(np.nanmax(lev_m))
-        if (lev_min > 1.0) and (lev_max < 2000.0) and (lev_max - lev_min > 10.0):
-            _log_warn("Vertical levels look pressure-like; keep index-based meters for VTK/CFD compatibility")
-            lev_m = np.arange(nz, dtype=np.float32)
+        # Treat lev as pressure only when metadata strongly suggests pressure (units/name).
+        units = ""
+        try:
+            if isinstance(vert, str) and ((vert in ds.variables) or (vert in ds.coords)):
+                units = str(ds[vert].attrs.get("units", "")).lower()
+        except Exception:
+            units = ""
+
+        vert_lc = str(vert).lower()
+        is_length_units = (units in ("m", "meter", "meters", "metre", "metres")) or (units.strip() == "m")
+        is_pressure_units = (units in ("pa", "hpa", "mb")) or ("mbar" in units) or ("millibar" in units)
+        is_pressure_name = vert_lc in ("plev", "pressure", "isobaric", "isobaric1", "isobaric_inpa", "isobaric_inhpa")
+
+        if is_pressure_units or (is_pressure_name and (not is_length_units)):
+            lev_min = float(np.nanmin(lev_m))
+            lev_max = float(np.nanmax(lev_m))
+            if (lev_min > 10.0) and (lev_max < 2000.0) and (lev_max - lev_min > 10.0):
+                _log_warn("Vertical levels appear to be pressure; keep index-based meters for VTK/CFD compatibility")
+                lev_m = np.arange(nz, dtype=np.float32)
+
 
         # Ensure increasing upward
         if lev_m.size >= 2 and lev_m[1] < lev_m[0]:
