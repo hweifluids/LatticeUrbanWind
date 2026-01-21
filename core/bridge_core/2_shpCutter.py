@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import math
 from shapely.ops import transform, unary_union
-from shapely import prepared
+from shapely import prepared, affinity
 from pyproj import Transformer
 import sys
 import numpy as np
@@ -512,13 +512,42 @@ def main():
 
     utm_crs = get_utm_crs_from_bounds((minx, maxx), (miny, maxy))
     transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-    xa, ya = transformer.transform(minx, miny)
-    xb, yb = transformer.transform(maxx, maxy)
-    x_lo, x_hi = (xa, xb) if xa <= xb else (xb, xa)
-    y_lo, y_hi = (ya, yb) if ya <= yb else (yb, ya)
-    bbox_utm = box(x_lo, y_lo, x_hi, y_hi)
 
-    print("Clipping to UTM bbox (two-corner projected). Geometry cleaning before clipping.")
+    x00, y00 = transformer.transform(minx, miny)
+    x10, y10 = transformer.transform(maxx, miny)
+    x11, y11 = transformer.transform(maxx, maxy)
+    x01, y01 = transformer.transform(minx, maxy)
+
+    cx = (x00 + x10 + x11 + x01) / 4.0
+    cy = (y00 + y10 + y11 + y01) / 4.0
+
+    dx0 = x10 - x00
+    dy0 = y10 - y00
+    angle_rad = math.atan2(dy0, dx0)
+    rotate_deg = - math.degrees(angle_rad)
+
+    def _rot_xy(x, y, deg, cx, cy):
+        th = math.radians(deg)
+        c = math.cos(th)
+        s = math.sin(th)
+        xr = c * (x - cx) - s * (y - cy) + cx
+        yr = s * (x - cx) + c * (y - cy) + cy
+        return xr, yr
+
+    xr00, yr00 = _rot_xy(x00, y00, rotate_deg, cx, cy)
+    xr10, yr10 = _rot_xy(x10, y10, rotate_deg, cx, cy)
+    xr11, yr11 = _rot_xy(x11, y11, rotate_deg, cx, cy)
+    xr01, yr01 = _rot_xy(x01, y01, rotate_deg, cx, cy)
+
+    x_min_rot = min(xr00, xr10, xr11, xr01)
+    x_max_rot = max(xr00, xr10, xr11, xr01)
+    y_min_rot = min(yr00, yr10, yr11, yr01)
+    y_max_rot = max(yr00, yr10, yr11, yr01)
+
+    bbox_rot = box(x_min_rot, y_min_rot, x_max_rot, y_max_rot)
+    bbox_utm = affinity.rotate(bbox_rot, -rotate_deg, origin=(cx, cy), use_radians=False)
+
+    print(f"Clipping to rotated-rectangle bbox (four-corner projected). rotate_deg={rotate_deg:.6f}, pivot=({cx:.3f}, {cy:.3f})")
     gdf_wgs84_cleaned = clean_building_geometries(gdf_wgs84)
     gdf_utm = gdf_wgs84_cleaned.to_crs(utm_crs)
     clipped_utm = gpd.clip(gdf_utm, bbox_utm)
@@ -561,18 +590,34 @@ def main():
     merged = merged.loc[mask_area].copy()
     print(f"Features after area filter: {len(merged)}")
 
-    # Corner squares, use auto detected UTM CRS based on bbox
     print("Adding four 1m by 1m corner squares inside the bbox.")
-    minx_m, miny_m, maxx_m, maxy_m = x_lo, y_lo, x_hi, y_hi
 
     d = 1.0
     half = 0.5
-    corner_centers = [
-        (minx_m + d, miny_m + d),
-        (maxx_m - d, miny_m + d),
-        (maxx_m - d, maxy_m - d),
-        (minx_m + d, maxy_m - d),
-    ]
+
+    bbox_centroid = bbox_utm.centroid
+    bbox_coords = list(bbox_utm.exterior.coords)
+    if len(bbox_coords) >= 2 and bbox_coords[0] == bbox_coords[-1]:
+        bbox_coords = bbox_coords[:-1]
+
+    if len(bbox_coords) >= 4:
+        corners = bbox_coords[:4]
+    else:
+        minx_m, miny_m, maxx_m, maxy_m = bbox_utm.bounds
+        corners = [(minx_m, miny_m), (maxx_m, miny_m), (maxx_m, maxy_m), (minx_m, maxy_m)]
+
+    corner_centers = []
+    for (x, y) in corners:
+        vx = bbox_centroid.x - x
+        vy = bbox_centroid.y - y
+        n = math.hypot(vx, vy)
+        if n == 0.0:
+            cx, cy = x, y
+        else:
+            cx = x + (vx / n) * d
+            cy = y + (vy / n) * d
+        corner_centers.append((cx, cy))
+
     corner_boxes_utm = [box(cx - half, cy - half, cx + half, cy + half) for cx, cy in corner_centers]
 
     corner_gdf_utm = gpd.GeoDataFrame(
