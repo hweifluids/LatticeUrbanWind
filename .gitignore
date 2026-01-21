@@ -3,6 +3,7 @@
 
 # FluidX3D generated folders
 /core/cfd_core/FluidX3D/temp/
+/core/temp/
 /core/cfd_core/FluidX3D/bin/**
 /core/cfd_core/FluidX3D/.vs/
 /core/cfd_core/FluidX3D/enc_temp_folder/
