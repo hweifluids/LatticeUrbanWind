@@ -123,6 +123,7 @@ def _area_mask_chunk(geoms, min_area):
 
 
 MIN_EXTRUDE_AREA = 20.0  # m^2, minimum polygon area to extrude
+MIN_HOLE_AREA = 5.0  # m^2, minimum interior ring area to keep (smaller holes will be removed)
 
 
 def _make_valid_safe(geom):
@@ -206,6 +207,66 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     dropped = before - after_fix
     print(f"Cleaning step completed. Dropped features that are non-polygonal or unrecoverable. Count dropped: {dropped}. Remaining: {after_fix}")
     return gdf2
+
+def remove_small_interior_rings_projected(
+    gdf: gpd.GeoDataFrame, min_hole_area_m2: float
+) -> Tuple[gpd.GeoDataFrame, int]:
+    """
+    Remove interior rings (holes) with area smaller than min_hole_area_m2.
+    Input GeoDataFrame must be in a projected CRS with meters as units.
+    Returns (updated_gdf, removed_ring_count).
+    """
+    removed = 0
+    new_geoms = []
+
+    for geom in gdf.geometry:
+        if geom is None or geom.is_empty:
+            new_geoms.append(geom)
+            continue
+
+        if geom.geom_type == "Polygon":
+            polys = [geom]
+        elif geom.geom_type == "MultiPolygon":
+            polys = list(geom.geoms)
+        else:
+            new_geoms.append(geom)
+            continue
+
+        new_polys = []
+        for poly in polys:
+            if poly is None or poly.is_empty:
+                continue
+
+            keep_interiors = []
+            for ring in getattr(poly, "interiors", []):
+                try:
+                    hole_area = float(Polygon(ring).area)
+                except Exception:
+                    hole_area = None
+
+                if hole_area is not None and math.isfinite(hole_area) and hole_area < min_hole_area_m2:
+                    removed += 1
+                    continue
+
+                keep_interiors.append(ring)
+
+            try:
+                new_poly = Polygon(poly.exterior, keep_interiors)
+            except Exception:
+                new_poly = poly
+
+            new_polys.append(new_poly)
+
+        if len(new_polys) == 0:
+            new_geoms.append(geom)
+        elif len(new_polys) == 1:
+            new_geoms.append(new_polys[0])
+        else:
+            new_geoms.append(MultiPolygon(new_polys))
+
+    out = gdf.copy()
+    out["geometry"] = new_geoms
+    return out, removed
 
 
 def _to_float_or_nan(x):
@@ -378,15 +439,18 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
 
     non_extruded = ~extruded_mask
 
-    if extruded_mask.any():
-        gdf_plot[extruded_mask].boundary.plot(ax=ax_map, color="black", linewidth=line_width)
-
-    if non_extruded.any():
-        gdf_plot[non_extruded].boundary.plot(
+    # Random color per polygon, alpha = 0.3
+    if len(gdf_plot) > 0:
+        rng = np.random.default_rng()
+        rgb = rng.random((len(gdf_plot), 3))
+        rgba = [(float(r), float(g), float(b), 0.3) for r, g, b in rgb]
+        gdf_plot.plot(
             ax=ax_map,
-            color=(0.0, 0.0, 1.0, 0.5),
+            color=rgba,
+            edgecolor="black",
             linewidth=line_width,
         )
+
 
     bbox_plot = gpd.GeoSeries([bbox_wgs84], crs="EPSG:4326").to_crs(gdf_plot.crs)
     bbox_plot.boundary.plot(ax=ax_map, linewidth=0.3, color="orange")
@@ -404,6 +468,77 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
             area = row.geometry.area
             ax_map.text(px, py, f"{h:.1f}", fontsize=0.1, ha="center", va="bottom", color="red", alpha=0.6)
             ax_map.text(px, py, f"{area:.1f}", fontsize=0.1, ha="center", va="top", color="green", alpha=0.6)
+    # Hole (interior ring) validation and marking
+    hole_areas = []
+    hole_count = 0
+
+    for geom in gdf_plot.geometry:
+        if geom is None or geom.is_empty:
+            continue
+
+        if geom.geom_type == "Polygon":
+            polys = [geom]
+        elif geom.geom_type == "MultiPolygon":
+            polys = list(geom.geoms)
+        else:
+            continue
+
+        for poly in polys:
+            if poly is None or poly.is_empty:
+                continue
+            interiors = list(getattr(poly, "interiors", []))
+            if len(interiors) == 0:
+                continue
+
+            for ring in interiors:
+                try:
+                    hole_poly = Polygon(ring)
+                except Exception:
+                    continue
+                if hole_poly.is_empty:
+                    continue
+
+                try:
+                    a = float(hole_poly.area)
+                except Exception:
+                    continue
+                if not math.isfinite(a):
+                    continue
+
+                hole_areas.append(a)
+                hole_count += 1
+
+                try:
+                    rp = hole_poly.representative_point()
+                    ax_map.text(
+                        rp.x,
+                        rp.y,
+                        f"H:{a:.1f}",
+                        fontsize=0.1,
+                        ha="center",
+                        va="center",
+                        color="blue",
+                        alpha=0.6,
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    xs, ys = ring.xy
+                    ax_map.plot(xs, ys, linewidth=0.05, color="blue", alpha=0.6)
+                except Exception:
+                    pass
+
+    hole_area_sum = float(sum(hole_areas)) if len(hole_areas) > 0 else 0.0
+    if hole_count > 0:
+        hole_min = float(min(hole_areas))
+        hole_max = float(max(hole_areas))
+        print(
+            "Preview step hole validation: "
+            f"holes={hole_count}, area_sum={hole_area_sum:.3f}, area_min={hole_min:.3f}, area_max={hole_max:.3f} (square meters)"
+        )
+    else:
+        print("Preview step hole validation: no interior rings detected.")
 
     ax_map.set_aspect("equal")
     if gdf_plot.empty:
@@ -418,6 +553,8 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
         f"caseName: {case_name}",
         f"lon range: [{min_lon:.6f}, {max_lon:.6f}]",
         f"lat range: [{min_lat:.6f}, {max_lat:.6f}]",
+        f"holes: {hole_count}",
+        f"hole area sum (m^2): {hole_area_sum:.1f}",
         f"shp: {shp_path.name}",
     ]
     ax_info.text(0.01, 0.99, "\n".join(info_lines), va="top", ha="left", fontsize=6)
@@ -589,6 +726,14 @@ def main():
         print("Area filter skipped because there are no geometries after union.")
     merged = merged.loc[mask_area].copy()
     print(f"Features after area filter: {len(merged)}")
+    print(f"Small interior rings removal started. Threshold: {MIN_HOLE_AREA} m^2.")
+    removed_holes = 0
+    if not merged.empty:
+        merged_utm2 = merged.to_crs(utm_crs)
+        merged_utm2, removed_holes = remove_small_interior_rings_projected(merged_utm2, MIN_HOLE_AREA)
+        merged = merged_utm2.to_crs(epsg=4326)
+    print(f"Small interior rings removed: {removed_holes}")
+    print(f"Features after hole removal: {len(merged)}")
 
     print("Adding four 1m by 1m corner squares inside the bbox.")
 

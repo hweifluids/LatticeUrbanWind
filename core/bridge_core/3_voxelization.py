@@ -19,7 +19,7 @@ import trimesh
 from trimesh import boolean
 import re
 from scipy.interpolate import griddata
-from auto_UTM import get_utm_crs_from_conf
+from auto_UTM import get_utm_crs_from_conf_raw
 
 def _make_valid(geom):
     """
@@ -751,8 +751,12 @@ def main():
     if not m_case:
         raise RuntimeError("casename not found in conf")
     case_name = m_case.group(1)
-    utm_crs = get_utm_crs_from_conf(conf_file, default_epsg="EPSG:32651")
+    try:
+        utm_crs = get_utm_crs_from_conf_raw(txt_conf, default_epsg=None)
+    except Exception as e:
+        raise RuntimeError(f"[ERROR] Failed to determine UTM CRS from conf (cut_lon_manual/cut_lat_manual): {e}")
     print(f"[INFO] UTM CRS for CFD domain: {utm_crs}")
+
 
     # Find building shapefile
     primary_shp = proj_temp / f"cutted_shp/{case_name}.shp"
@@ -779,14 +783,16 @@ def main():
     print(f"[INFO] Read {len(gdf)} features")
     print(f"[INFO] Source CRS: {gdf.crs}")
 
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+
     # Use UTM CRS determined from configuration
     gdf_work = gdf.copy()
     if not args.no_reproject:
         try:
-            if gdf_work.crs is not None:
-                gdf_work = gdf_work.to_crs(utm_crs)
-        except Exception:
-            pass
+            gdf_work = gdf_work.to_crs(utm_crs)
+        except Exception as e:
+            raise RuntimeError(f"[ERROR] Failed to reproject buildings to {utm_crs}: {e}")
 
     work_crs = gdf_work.crs
     print(f"[INFO] Working CRS for CFD domain: {work_crs}")
