@@ -16,3 +16,4 @@ trimesh
 mapbox_earcut
 triangle
 pyopencl
+rasterio
