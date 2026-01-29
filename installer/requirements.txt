@@ -17,3 +17,5 @@ mapbox_earcut
 triangle
 pyopencl
 rasterio
+blender
+manifold3d

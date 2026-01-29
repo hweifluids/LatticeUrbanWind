@@ -1,0 +1,33 @@
+casename = CaseE
+datetime = 20251222120000
+
+// Projected SI Range after rotation
+si_x_cfd = [0.000000, 2022.500153]
+si_y_cfd = [0.000000, 1996.500092]
+si_z_cfd = [0.000000, 270.000000]
+base_height = 20.0
+z_limit = 250
+
+x_exp_rat = 5
+y_exp_rat = 5
+
+// CFD control
+n_gpu = [2, 1, 1]
+mesh_control = "gpu_memory"
+gpu_memory = 40000
+cell_size = 
+validation = pass
+high_order = true
+flux_correction = false
+coriolis_term = false
+
+// Inflow directions
+angle=[0,22.5,45,67.5,90,112.5,135,157.5,180,202.5,225,247.5,270,292.5,315,337.5]
+
+
+
+
+
+
+
+

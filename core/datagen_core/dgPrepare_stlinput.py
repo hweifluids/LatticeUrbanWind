@@ -32,48 +32,55 @@ def fatal(msg: str, code: int = 1) -> None:
     print(f"[{ts()}] [FATAL] {msg}")
     sys.exit(code)
 
-
 def find_input_luwdg(argv: list) -> str:
     """
-    Find the input .luwdg file based on the rules:
+    Find the input .luwdg or .luwpf file based on the rules:
     1) If an argument is provided, use it.
-    2) Else look for conf.luwdg in current working directory.
-    3) Else look for any *.luwdg in current working directory.
+    2) Else look for conf.luwdg or conf.luwpf in current working directory (prefer conf.luwdg if both exist).
+    3) Else look for any *.luwdg or *.luwpf in current working directory.
     4) If none found, error out.
     """
     cwd = os.getcwd()
     debug(f"Current working directory: {cwd}")
+
+    allowed_ext = (".luwdg", ".luwpf")
 
     if len(argv) >= 2:
         p = argv[1]
         debug(f"Input argument provided: {p}")
         if not os.path.isfile(p):
             fatal(f"Input path does not exist or is not a file: {p}", 1)
-        if not p.lower().endswith(".luwdg"):
-            fatal(f"Input file must end with .luwdg: {p}", 1)
+        if not p.lower().endswith(allowed_ext):
+            fatal(f"Input file must end with .luwdg or .luwpf: {p}", 1)
         return os.path.abspath(p)
 
-    conf_path = os.path.join(cwd, "conf.luwdg")
-    debug("No input argument provided. Searching for conf.luwdg in current directory.")
-    if os.path.isfile(conf_path):
-        debug(f"Found conf.luwdg: {conf_path}")
-        return os.path.abspath(conf_path)
+    conf_dg = os.path.join(cwd, "conf.luwdg")
+    conf_pf = os.path.join(cwd, "conf.luwpf")
+    debug("No input argument provided. Searching for conf.luwdg or conf.luwpf in current directory.")
+    if os.path.isfile(conf_dg):
+        debug(f"Found conf.luwdg: {conf_dg}")
+        return os.path.abspath(conf_dg)
+    if os.path.isfile(conf_pf):
+        debug(f"Found conf.luwpf: {conf_pf}")
+        return os.path.abspath(conf_pf)
 
-    debug("conf.luwdg not found. Searching for any *.luwdg in current directory.")
-    candidates = sorted(glob.glob(os.path.join(cwd, "*.luwdg")))
+    debug("conf.luwdg/conf.luwpf not found. Searching for any *.luwdg or *.luwpf in current directory.")
+    candidates = sorted(
+        glob.glob(os.path.join(cwd, "*.luwdg")) +
+        glob.glob(os.path.join(cwd, "*.luwpf"))
+    )
     if candidates:
-        debug(f"Found candidate .luwdg files: {candidates}")
+        debug(f"Found candidate config files: {candidates}")
         debug(f"Using the first one (sorted): {candidates[0]}")
         return os.path.abspath(candidates[0])
 
-    fatal("No .luwdg file found in current directory, and no input argument was provided.", 1)
+    fatal("No .luwdg/.luwpf file found in current directory, and no input argument was provided.", 1)
     return ""
 
-
-def parse_luwdg(path: str) -> Tuple[str, float, str]:
+def parse_luwdg(path: str) -> Tuple[str, float, float, float, float, str]:
     """
-    Parse casename and base_height from the luwdg file.
-    Returns (casename, base_height, original_text).
+    Parse casename, base_height, x_exp_rat, y_exp_rat, z_limit from the luwdg file.
+    Returns (casename, base_height, x_exp_rat, y_exp_rat, z_limit, original_text).
     """
     debug(f"Reading luwdg file: {path}")
     with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -81,14 +88,45 @@ def parse_luwdg(path: str) -> Tuple[str, float, str]:
 
     casename = None
     base_height = None
+    x_exp_rat = None
+    y_exp_rat = None
+    z_limit = None
 
     m_case = re.search(r'^\s*casename\s*=\s*([A-Za-z0-9_.\-]+)\s*$', text, flags=re.MULTILINE)
     if m_case:
         casename = m_case.group(1).strip()
 
-    m_base = re.search(r'^\s*base_height\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$', text, flags=re.MULTILINE)
+    m_base = re.search(
+        r'^\s*base_height\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
+        text,
+        flags=re.MULTILINE
+    )
     if m_base:
         base_height = float(m_base.group(1))
+
+    m_xrat = re.search(
+        r'^\s*x_exp_rat\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
+        text,
+        flags=re.MULTILINE
+    )
+    if m_xrat:
+        x_exp_rat = float(m_xrat.group(1))
+
+    m_yrat = re.search(
+        r'^\s*y_exp_rat\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
+        text,
+        flags=re.MULTILINE
+    )
+    if m_yrat:
+        y_exp_rat = float(m_yrat.group(1))
+
+    m_zlim = re.search(
+        r'^\s*z_limit\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
+        text,
+        flags=re.MULTILINE
+    )
+    if m_zlim:
+        z_limit = float(m_zlim.group(1))
 
     if casename is None:
         fatal("casename not found in luwdg file.", 1)
@@ -97,11 +135,27 @@ def parse_luwdg(path: str) -> Tuple[str, float, str]:
     if base_height <= 0:
         fatal(f"base_height must be positive. Got: {base_height}", 1)
 
+    if x_exp_rat is None:
+        fatal("x_exp_rat not found in luwdg file.", 1)
+    if y_exp_rat is None:
+        fatal("y_exp_rat not found in luwdg file.", 1)
+    if x_exp_rat <= 0:
+        fatal(f"x_exp_rat must be positive. Got: {x_exp_rat}", 1)
+    if y_exp_rat <= 0:
+        fatal(f"y_exp_rat must be positive. Got: {y_exp_rat}", 1)
+
+    if z_limit is None:
+        fatal("z_limit not found in luwdg file.", 1)
+    if z_limit <= 0:
+        fatal(f"z_limit must be positive. Got: {z_limit}", 1)
+
     debug(f"Parsed casename: {casename}")
     debug(f"Parsed base_height (m): {base_height}")
+    debug(f"Parsed x_exp_rat: {x_exp_rat}")
+    debug(f"Parsed y_exp_rat: {y_exp_rat}")
+    debug(f"Parsed z_limit (m): {z_limit}")
 
-    return casename, base_height, text
-
+    return casename, base_height, x_exp_rat, y_exp_rat, z_limit, text
 
 def pick_stl(building_db_dir: str) -> str:
     """
@@ -147,12 +201,11 @@ def load_mesh(stl_path: str) -> trimesh.Trimesh:
 
     return mesh
 
-
-def create_base_block(bounds: np.ndarray, base_height: float) -> trimesh.Trimesh:
+def create_base_block(bounds: np.ndarray, base_height: float, x_exp_rat: float, y_exp_rat: float) -> trimesh.Trimesh:
     """
     Create a rectangular base block under the mesh:
     base thickness is base_height
-    base x and y extents are 2x the mesh x and y extents
+    base x and y extents are x_exp_rat and y_exp_rat times the mesh x and y extents
     """
     bmin = bounds[0]
     bmax = bounds[1]
@@ -164,8 +217,11 @@ def create_base_block(bounds: np.ndarray, base_height: float) -> trimesh.Trimesh
     if dx <= 0 or dy <= 0:
         fatal(f"Invalid mesh XY extents. dx={dx}, dy={dy}", 1)
 
-    base_dx = 2.0 * dx
-    base_dy = 2.0 * dy
+    if x_exp_rat <= 0 or y_exp_rat <= 0:
+        fatal(f"Invalid expansion ratios. x_exp_rat={x_exp_rat}, y_exp_rat={y_exp_rat}", 1)
+
+    base_dx = float(x_exp_rat) * dx
+    base_dy = float(y_exp_rat) * dy
     base_dz = float(base_height)
 
     cx = float((bmin[0] + bmax[0]) * 0.5)
@@ -287,39 +343,52 @@ def export_mesh(mesh: trimesh.Trimesh, out_path: str) -> None:
 def format_range(a: float, b: float) -> str:
     return f"[{a:.6f}, {b:.6f}]"
 
+def update_luwdg_ranges(
+    luwdg_path: str,
+    original_text: str,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    base_height: float,
+    z_limit: float
+) -> None:
 
-def update_luwdg_ranges(luwdg_path: str, original_text: str, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
-    """
-    Replace si_x_cfd and si_y_cfd lines with new ranges in meters.
-    If fields are missing, append them near the top (after datetime if present, else after casename).
-    """
     new_x_line = f"si_x_cfd = {format_range(x_min, x_max)}"
     new_y_line = f"si_y_cfd = {format_range(y_min, y_max)}"
+    new_z_line = f"si_z_cfd = {format_range(0.0, float(z_limit) + float(base_height))}"
 
     debug(f"Updating luwdg si_x_cfd to: {new_x_line}")
     debug(f"Updating luwdg si_y_cfd to: {new_y_line}")
+    debug(f"Updating luwdg si_z_cfd to: {new_z_line}")
 
     text = original_text
 
     rx_x = re.compile(r'^\s*si_x_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
     rx_y = re.compile(r'^\s*si_y_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
+    rx_z = re.compile(r'^\s*si_z_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
 
     has_x = bool(rx_x.search(text))
     has_y = bool(rx_y.search(text))
+    has_z = bool(rx_z.search(text))
 
     if has_x:
         text = rx_x.sub(new_x_line, text, count=1)
     if has_y:
         text = rx_y.sub(new_y_line, text, count=1)
+    if has_z:
+        text = rx_z.sub(new_z_line, text, count=1)
 
-    if not has_x or not has_y:
-        debug("One or both of si_x_cfd and si_y_cfd were not found. Inserting missing fields.")
+    if (not has_x) or (not has_y) or (not has_z):
+        debug("One or more of si_x_cfd, si_y_cfd, si_z_cfd were not found. Inserting missing fields.")
 
         insert_lines = []
         if not has_x:
             insert_lines.append(new_x_line)
         if not has_y:
             insert_lines.append(new_y_line)
+        if not has_z:
+            insert_lines.append(new_z_line)
 
         insert_block = "\n".join(insert_lines) + "\n"
 
@@ -356,7 +425,15 @@ def main(argv: list) -> int:
     debug(f"Resolved luwdg path: {luwdg_path}")
     debug(f"Project directory ($projectDir): {project_dir}")
 
-    casename, base_height, luwdg_text = parse_luwdg(luwdg_path)
+    if luwdg_path.lower().endswith(".luwdg"):
+        print("LatticeUrbanWind running in Dataset Generation Mode.")
+    elif luwdg_path.lower().endswith(".luwpf"):
+        print("LatticeUrbanWind running in Profile Research Mode.")
+    else:
+        fatal(f"Unsupported input file extension: {luwdg_path}", 1)
+
+    casename, base_height, x_exp_rat, y_exp_rat, z_limit, luwdg_text = parse_luwdg(luwdg_path)
+
 
     building_db_dir = os.path.join(project_dir, "building_db")
     if not os.path.isdir(building_db_dir):
@@ -365,7 +442,8 @@ def main(argv: list) -> int:
     stl_in = pick_stl(building_db_dir)
     mesh_raw = load_mesh(stl_in)
 
-    base = create_base_block(mesh_raw.bounds, base_height)
+    base = create_base_block(mesh_raw.bounds, base_height, x_exp_rat, y_exp_rat)
+
     mesh_union, used_boolean, union_msg = try_boolean_union(mesh_raw, base)
     debug(f"Union method: {'boolean' if used_boolean else 'concatenation'}")
     debug(f"Union message: {union_msg}")
@@ -383,7 +461,7 @@ def main(argv: list) -> int:
     y_min, y_max = float(fb[0][1]), float(fb[1][1])
 
     debug(f"Final STL XY bounds (m): x=[{x_min}, {x_max}], y=[{y_min}, {y_max}]")
-    update_luwdg_ranges(luwdg_path, luwdg_text, x_min, x_max, y_min, y_max)
+    update_luwdg_ranges(luwdg_path, luwdg_text, x_min, x_max, y_min, y_max, base_height, z_limit)
 
     debug("All done.")
     return 0
