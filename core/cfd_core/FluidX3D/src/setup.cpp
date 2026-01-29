@@ -558,6 +558,13 @@ void main_setup() {
             exit(-1);
         }
 
+        if (z_limit_si > 1.0f && z_vals.back() <= 1.5f) {
+            for (float& z : z_vals) {
+                z *= z_limit_si;
+            }
+            println("| Profile z unit  | normalized -> scaled by z_limit                           |");
+        }
+
         float max_u = 0.0f;
         for (const float v : u_vals) {
             if (v > max_u) max_u = v;
