@@ -37,6 +37,84 @@ std::string validation_status = "fail";
 bool enable_coriolis = false;       
 
 struct SamplePoint { float3 p; float3 u; };
+struct ProfileSample { float z; float u; };
+
+static std::string trim_copy(std::string s) {
+    const char* ws = " \t\r\n";
+    size_t b = s.find_first_not_of(ws);
+    size_t e = s.find_last_not_of(ws);
+    return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1);
+}
+
+// helper: read profile.dat (columns z,U in SI units, with header)
+static std::vector<ProfileSample> read_profile_dat(const string& path) {
+    std::vector<ProfileSample> out;
+    std::ifstream fin(path);
+    if (!fin.is_open()) {
+        println("ERROR: could not open profile file " + path);
+        return out;
+    }
+    std::string line;
+    ulong line_no = 0ul;
+    while (std::getline(fin, line)) {
+        line_no++;
+        size_t cmt = line.find("//"); if (cmt != std::string::npos) line.erase(cmt);
+        cmt = line.find('#'); if (cmt != std::string::npos) line.erase(cmt);
+        line = trim_copy(line);
+        if (line.empty()) continue;
+        for (char& ch : line) { if (ch == ',' || ch == ';') ch = ' '; }
+        std::stringstream ss(line);
+        float z = 0.0f, u = 0.0f;
+        if (!(ss >> z >> u)) {
+            continue; // likely header or malformed line
+        }
+        if (!std::isfinite(z) || !std::isfinite(u)) {
+            println("WARNING: invalid z/U in profile at line " + to_string(line_no));
+            continue;
+        }
+        out.push_back({ z, u });
+    }
+    return out;
+}
+
+static float interpolate_profile_cubic(const std::vector<float>& z,
+                                       const std::vector<float>& u,
+                                       const float zq) {
+    const size_t n = z.size();
+    if (n == 0u) return 0.0f;
+    if (n == 1u) return u[0];
+    if (zq <= z.front()) return u.front();
+    if (zq >= z.back()) return u.back();
+
+    auto it = std::upper_bound(z.begin(), z.end(), zq);
+    size_t i1 = (it == z.begin()) ? 0u : static_cast<size_t>(it - z.begin() - 1u);
+    size_t i2 = std::min(i1 + 1u, n - 1u);
+    const float z0 = z[i1];
+    const float z1 = z[i2];
+    const float denom = z1 - z0;
+    if (denom <= 0.0f) return u[i1];
+    const float t = (zq - z0) / denom;
+
+    auto slope_at = [&](size_t i) -> float {
+        if (n < 2u) return 0.0f;
+        if (i == 0u) {
+            const float dz = z[1] - z[0];
+            return (dz != 0.0f) ? (u[1] - u[0]) / dz : 0.0f;
+        }
+        if (i + 1u >= n) {
+            const float dz = z[n - 1u] - z[n - 2u];
+            return (dz != 0.0f) ? (u[n - 1u] - u[n - 2u]) / dz : 0.0f;
+        }
+        const float dz = z[i + 1u] - z[i - 1u];
+        return (dz != 0.0f) ? (u[i + 1u] - u[i - 1u]) / dz : 0.0f;
+    };
+
+    const float m0 = slope_at(i1);
+    const float m1 = slope_at(i2);
+    const float va = m0 * denom;
+    const float vb = m1 * denom;
+    return hermite_spline(u[i1], u[i2], va, vb, t);
+}
 
 // for Coriolis source term
 float coriolis_Omegax_lbmu = 0.0f;
@@ -112,14 +190,19 @@ void main_setup() {
     println("|-----------------------------------------------------------------------------|");
  
     bool dataset_generation = false;
+    bool profile_generation = false;
     std::vector<float> inflow_list;
     std::vector<float> angle_list;
+    std::vector<float> profile_u_si;
+    float z_limit_override = 0.0f;
+    float z_limit_si = 0.0f;
+    const float profile_dz_si = 0.1f;
 
     // ---------------------- read *.luw / *.luwdg ------------------------------
     std::string parent; // project directory that contains the configure file
     {
         // prompt for configure file path when not directly provided
-        println("| Please input configure file path (*.luw or *.luwdg):                         |");
+        println("| Please input configure file path (*.luw, *.luwdg, *.luwpf):                  |");
         std::string luw_path_input;
         std::getline(std::cin, luw_path_input);
 
@@ -150,8 +233,12 @@ void main_setup() {
                 dataset_generation = true;
                 println("| Dataset generation mode enabled (*.luwdg).                                  |");
             }
+            else if (ext == ".luwpf") {
+                profile_generation = true;
+                println("| Profile forcing mode enabled (*.luwpf).                                     |");
+            }
             else if (!ext.empty() && ext != ".luw") {
-                println("| WARNING: config suffix is not *.luw or *.luwdg; treating as *.luw.          |");
+                println("| WARNING: config suffix is not *.luw, *.luwdg, or *.luwpf; treating as *.luw.|");
             }
             else if (ext.empty()) {
                 println("| WARNING: config has no suffix; treating as *.luw.                           |");
@@ -216,7 +303,7 @@ void main_setup() {
             };
 
         if (!fin.is_open()) {
-            println("ERROR: config not found. Please provide a valid *.luw or *.luwdg and rerun.");
+            println("ERROR: config not found. Please provide a valid *.luw, *.luwdg, or *.luwpf and rerun.");
             wait();
             exit(-1);
         }
@@ -256,6 +343,7 @@ void main_setup() {
                 }
                 else if (key == "downstream_bc_yaw") downstream_bc_yaw = unquote(val);
                 else if (key == "base_height") z_si_offset = (float)atof(val.c_str());
+                else if (key == "z_limit")     z_limit_override = (float)atof(val.c_str());
                 else if (key == "memory_lbm")  memory = (uint)atoi(val.c_str());
                 else if (key == "si_x_cfd")    si_size.x = second_val(val);
                 else if (key == "si_y_cfd")    si_size.y = second_val(val);
@@ -319,7 +407,7 @@ void main_setup() {
     }
 
     // ---------------------- Validation Check -----------------------------------
-    if (!dataset_generation) {
+    if (!dataset_generation && !profile_generation) {
         std::string v_check = validation_status;
         std::transform(v_check.begin(), v_check.end(), v_check.begin(), ::tolower);
 
@@ -392,7 +480,7 @@ void main_setup() {
 
     const uint mem_per_dev_mb = vram_required_mb_per_device(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
     const uint mem_total_mb = vram_required_mb_total(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
-    if (!dataset_generation) {
+    if (!dataset_generation && !profile_generation) {
         const std::string csv_path_ref = parent + "/proj_temp/SurfData_" + datetime + ".csv";
         auto samples_ref = read_samples(csv_path_ref);
         if (samples_ref.empty()) {
@@ -414,7 +502,7 @@ void main_setup() {
         }
         si_ref_u = max_u;
     }
-    else {
+    else if (dataset_generation) {
         if (inflow_list.empty()) {
             println("| ERROR: dataset generation requires inflow list (inflow=[...]).              |");
             println("|-----------------------------------------------------------------------------|");
@@ -422,6 +510,88 @@ void main_setup() {
             exit(-1);
         }
         si_ref_u = *std::max_element(inflow_list.begin(), inflow_list.end());
+    }
+    else { // profile_generation
+        z_limit_si = si_size.z - z_si_offset;
+        if (z_limit_override > 0.0f) {
+            if (std::fabs(z_limit_override - z_limit_si) > 1e-3f) {
+                println("| WARNING: z_limit differs from si_z_cfd - base_height. Using z_limit value. |");
+            }
+            z_limit_si = z_limit_override;
+        }
+        if (z_limit_si <= 0.0f) {
+            println("| ERROR: invalid z_limit for profile mode. Check si_z_cfd/base_height.        |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+
+        const std::string profile_path = parent + "/wind_bc/profile.dat";
+        auto profile_samples = read_profile_dat(profile_path);
+        if (profile_samples.empty()) {
+            println("| ERROR: no profile samples found. Aborting...                                |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+
+        std::sort(profile_samples.begin(), profile_samples.end(),
+                  [](const ProfileSample& a, const ProfileSample& b) { return a.z < b.z; });
+
+        std::vector<float> z_vals;
+        std::vector<float> u_vals;
+        z_vals.reserve(profile_samples.size());
+        u_vals.reserve(profile_samples.size());
+        for (const auto& s : profile_samples) {
+            if (!std::isfinite(s.z) || !std::isfinite(s.u)) continue;
+            if (!z_vals.empty() && std::fabs(s.z - z_vals.back()) < 1e-6f) {
+                u_vals.back() = s.u; // keep last value for duplicate z
+                continue;
+            }
+            z_vals.push_back(s.z);
+            u_vals.push_back(s.u);
+        }
+        if (z_vals.size() < 2u) {
+            println("| ERROR: profile.dat needs at least two valid samples. Aborting...            |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+
+        float max_u = 0.0f;
+        for (const float v : u_vals) {
+            if (v > max_u) max_u = v;
+        }
+        if (max_u <= 0.0f) {
+            println("| ERROR: profile.dat has non-positive max U. Aborting...                      |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+        si_ref_u = max_u;
+
+        const uint steps = static_cast<uint>(std::ceil(z_limit_si / profile_dz_si));
+        profile_u_si.resize(steps + 1u);
+        for (uint i = 0u; i <= steps; ++i) {
+            const float zq = std::min(z_limit_si, i * profile_dz_si);
+            float u_val = interpolate_profile_cubic(z_vals, u_vals, zq);
+            if (u_val < 0.0f) u_val = 0.0f;
+            profile_u_si[i] = u_val;
+        }
+
+        float u_min_prof = profile_u_si.front();
+        float u_max_prof = profile_u_si.front();
+        for (const float v : profile_u_si) {
+            if (v < u_min_prof) u_min_prof = v;
+            if (v > u_max_prof) u_max_prof = v;
+        }
+
+        println("| Profile samples | " + alignr(57u, to_string(z_vals.size())) + " |");
+        println("| Profile z range | " + alignr(24u, to_string(fmtf(z_vals.front()))) +
+                " to " + alignl(16u, to_string(fmtf(z_vals.back()))) + " m |");
+        println("| Profile z_limit | " + alignr(57u, to_string(fmtf(z_limit_si))) + " m |");
+        println("| Profile U range | " + alignr(24u, to_string(fmtf(u_min_prof))) +
+                " to " + alignl(16u, to_string(fmtf(u_max_prof))) + " m/s |");
     }
 
     units.set_m_kg_s((float)lbm_N.y, lbm_ref_u, 1.0f, si_size.y, si_ref_u, si_rho);
@@ -483,16 +653,16 @@ void main_setup() {
         }
     };
 
-    if (!dataset_generation) {
+    if (!dataset_generation && !profile_generation) {
         println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
         println("| LBM Reference U | " + alignl(7u, to_string(fmtf(lbm_ref_u))) + alignl(50u, "(Nondimensionalized)") + " |");
     }
 
-    update_coriolis(!dataset_generation);
+    update_coriolis(!dataset_generation && !profile_generation);
  
     std::vector<SamplePoint> samples_si;
     std::vector<SamplePoint> samples;
-    if (!dataset_generation) {
+    if (!dataset_generation && !profile_generation) {
         // read CSV
         const std::string csv_path = parent + "/proj_temp/SurfData_" + datetime + ".csv";
         samples_si = read_samples(csv_path);
@@ -705,7 +875,17 @@ void main_setup() {
 #endif
     };
 
-    if (!dataset_generation) {
+    auto format_tag = [](float v) {
+        std::string s = to_string(v, 3u);
+        size_t dot = s.find('.');
+        if (dot != std::string::npos) {
+            while (!s.empty() && s.back() == '0') s.pop_back();
+            if (!s.empty() && s.back() == '.') s.pop_back();
+        }
+        return s.empty() ? std::string("0") : s;
+    };
+
+    if (!dataset_generation && !profile_generation) {
         // const uint Dx = 2u, Dy = 1u, Dz = 1u;
         LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu);
 
@@ -770,23 +950,13 @@ void main_setup() {
 
         run_lbm(lbm, "", false);
     }
-    else {
+    else if (dataset_generation) {
         if (angle_list.empty()) {
             println("| ERROR: dataset generation requires angle list (angle=[...]).                |");
             println("|-----------------------------------------------------------------------------|");
             wait();
             exit(-1);
         }
-
-        auto format_tag = [](float v) {
-            std::string s = to_string(v, 3u);
-            size_t dot = s.find('.');
-            if (dot != std::string::npos) {
-                while (!s.empty() && s.back() == '0') s.pop_back();
-                if (!s.empty() && s.back() == '.') s.pop_back();
-            }
-            return s.empty() ? std::string("0") : s;
-        };
 
         const uint total_cases = static_cast<uint>(inflow_list.size() * angle_list.size());
         uint case_index = 0u;
@@ -857,6 +1027,121 @@ void main_setup() {
                 const std::string vtk_prefix = "DG_" + format_tag(inflow_si) + "_" + format_tag(angle_deg) + "_";
                 run_lbm(lbm, vtk_prefix, true);
             }
+        }
+    }
+    else { // profile_generation
+        if (angle_list.empty()) {
+            println("| ERROR: profile forcing requires angle list (angle=[...]).                   |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+        if (profile_u_si.empty()) {
+            println("| ERROR: profile forcing requires profile_u_si to be initialized.             |");
+            println("|-----------------------------------------------------------------------------|");
+            wait();
+            exit(-1);
+        }
+
+        std::vector<float> profile_u_lbmu(profile_u_si.size(), 0.0f);
+        for (size_t i = 0; i < profile_u_si.size(); ++i) {
+            profile_u_lbmu[i] = profile_u_si[i] * u_scale;
+        }
+
+        const uint total_cases = static_cast<uint>(angle_list.size());
+        uint case_index = 0u;
+
+        auto compute_u_by_z = [&](LBM& lbm) {
+            const uint Nz = lbm.get_Nz();
+            std::vector<float> u_by_z(Nz, 0.0f);
+            const float z_base_lbmu = lbm.position(0u, 0u, 0u).z + units.x(z_si_offset);
+            const float inv_dz = 1.0f / profile_dz_si;
+            const uint last_idx = static_cast<uint>(profile_u_lbmu.size() - 1u);
+            for (uint z = 0u; z < Nz; ++z) {
+                const float pos_z = lbm.position(0u, 0u, z).z;
+                float u_mag = 0.0f;
+                if (pos_z >= z_base_lbmu) {
+                    float z_above_si = units.si_x(pos_z - z_base_lbmu);
+                    if (z_above_si < 0.0f) z_above_si = 0.0f;
+                    long idx_l = std::lround(z_above_si * inv_dz);
+                    if (idx_l < 0l) idx_l = 0l;
+                    uint idx = static_cast<uint>(idx_l);
+                    if (idx > last_idx) idx = last_idx;
+                    u_mag = profile_u_lbmu[idx];
+                }
+                u_by_z[z] = u_mag;
+            }
+            return u_by_z;
+        };
+
+        auto initialize_profile_velocity = [&](LBM& lbm, const std::vector<float>& u_by_z,
+                                                const float dir_x, const float dir_y) {
+            const ulong Ntot = lbm.get_N();
+            for (ulong n = 0ull; n < Ntot; ++n) {
+                uint x = 0u, y = 0u, z = 0u;
+                lbm.coordinates(n, x, y, z);
+                const float u_mag = u_by_z[z];
+                lbm.u.x[n] = dir_x * u_mag;
+                lbm.u.y[n] = dir_y * u_mag;
+                lbm.u.z[n] = 0.0f;
+            }
+        };
+
+        auto apply_profile_boundaries = [&](LBM& lbm, const std::vector<float>& u_by_z,
+                                             const float dir_x, const float dir_y) {
+            const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
+            const bool has_ground = (Nz > 1u);
+            const ulong Ntot = lbm.get_N();
+            for (ulong n = 0ull; n < Ntot; ++n) {
+                uint x = 0u, y = 0u, z = 0u;
+                lbm.coordinates(n, x, y, z);
+                if (has_ground && z == 0u) {
+                    lbm.flags[n] = TYPE_S;
+                    continue;
+                }
+                const bool is_boundary =
+                    (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || (has_ground && z == Nz - 1u));
+                if (is_boundary) {
+                    lbm.flags[n] = TYPE_E;
+                    const float u_mag = u_by_z[z];
+                    lbm.u.x[n] = dir_x * u_mag;
+                    lbm.u.y[n] = dir_y * u_mag;
+                    lbm.u.z[n] = 0.0f;
+                }
+            }
+        };
+
+        for (const float angle_deg : angle_list) {
+            ++case_index;
+            const uint remaining = total_cases - case_index;
+
+            const std::string case_label = to_string(case_index) + "/" + to_string(total_cases) +
+                " (remaining " + to_string(remaining) + ")";
+            println("|-----------------------------------------------------------------------------|");
+            println("| Profile case    | " + alignr(57u, case_label) + " |");
+            println("| Angle           | " + alignr(57u, format_tag(angle_deg) + " deg") + " |");
+            println("| SI Reference U  | " + alignr(57u, format_tag(si_ref_u) + " m/s") + " |");
+
+            const float deg2rad = 3.14159265358979323846f / 180.0f;
+            const float angle_rad = angle_deg * deg2rad;
+            const float dir_x = -sinf(angle_rad);
+            const float dir_y = -cosf(angle_rad);
+
+            LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu);
+
+            lbm.voxelize_mesh_on_device(mesh);
+            println("| Voxelization done.                                                          |");
+            println("|-----------------------------------------------------------------------------|");
+            println("|                         BUILD BOUNDARY CONDITIONS                           |");
+            println("|-----------------------------------------------------------------------------|");
+
+            const std::vector<float> u_by_z = compute_u_by_z(lbm);
+            initialize_profile_velocity(lbm, u_by_z, dir_x, dir_y);
+            apply_profile_boundaries(lbm, u_by_z, dir_x, dir_y);
+            println("| " + alignl(75u, "[" + now_str() + "] Boundary initialization complete (profile).") + " |");
+
+            const std::string vtk_prefix = "ANG_" + format_tag(angle_deg) + "_";
+            run_lbm(lbm, vtk_prefix, true);
         }
     }
 }

@@ -14,7 +14,7 @@ y_exp_rat = 5
 // CFD control
 n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
-gpu_memory = 40000
+gpu_memory = 4000
 cell_size = 
 validation = pass
 high_order = true
