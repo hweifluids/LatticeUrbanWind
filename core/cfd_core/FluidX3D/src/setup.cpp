@@ -33,6 +33,7 @@ std::string conf_used_path = "Integrated defaults (*.luw not found)";
 bool use_high_order = false;
 bool flux_correction = false;
 uint research_output_steps = 0u; 
+uint purge_avg_steps = 0u;
 std::string validation_status = "fail"; 
 bool enable_coriolis = false;       
 
@@ -152,11 +153,11 @@ static std::vector<SamplePoint> read_samples(const string& csv_path) {
 }
 
 // helper: return current local time in "YYYY-MM-DD hh:mm:ss" format
- static string now_str() {
-     using namespace std::chrono;
-     auto now = system_clock::now();
-     std::time_t tt = system_clock::to_time_t(now);
-     std::tm tm{};
+static string now_str() {
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    std::time_t tt = system_clock::to_time_t(now);
+    std::tm tm{};
     #if defined(_WIN32)
          if (localtime_s(&tm, &tt) != 0) {
              throw std::runtime_error("Failed to get local time.");
@@ -171,6 +172,73 @@ static std::vector<SamplePoint> read_samples(const string& csv_path) {
      ss << std::put_time(&tm, "%F %T"); // %F = YYYY-MM-DD, %T = hh:mm:ss
      return ss.str();
  }
+
+static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, const uint Nz,
+                          const float* u_avg, const float* rho_avg, const bool convert_to_si_units) {
+    if (!u_avg || !rho_avg) return;
+    float spacing = 1.0f;
+    float u_factor = 1.0f;
+    float rho_factor = 1.0f;
+    if (convert_to_si_units) {
+        spacing = units.si_x(1.0f);
+        u_factor = units.si_u(1.0f);
+        rho_factor = units.si_rho(1.0f);
+    }
+    const float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
+    const ulong points = (ulong)Nx * (ulong)Ny * (ulong)Nz;
+
+    create_folder(filename);
+    std::ofstream file(filename, std::ios::out | std::ios::binary);
+    if (!file.is_open()) {
+        println("ERROR: could not open " + filename + " for writing.");
+        return;
+    }
+
+    const size_t slash = filename.find_last_of("/\\");
+    const string base = (slash == string::npos) ? filename : filename.substr(slash + 1);
+    const string header =
+        "# vtk DataFile Version 3.0\nFluidX3D " + base + "\nBINARY\nDATASET STRUCTURED_POINTS\n"
+        "DIMENSIONS " + to_string(Nx) + " " + to_string(Ny) + " " + to_string(Nz) + "\n"
+        "ORIGIN " + to_string(origin.x) + " " + to_string(origin.y) + " " + to_string(origin.z) + "\n"
+        "SPACING " + to_string(spacing) + " " + to_string(spacing) + " " + to_string(spacing) + "\n"
+        "POINT_DATA " + to_string(points) + "\n";
+    file.write(header.c_str(), header.length());
+
+    auto write_field = [&](const string& name, const float* data, const uint components, const float factor) {
+        const string field_header =
+            "SCALARS " + name + " float " + to_string(components) + "\nLOOKUP_TABLE default\n";
+        file.write(field_header.c_str(), field_header.length());
+
+        const uint threads = std::max(1u, (uint)std::thread::hardware_concurrency());
+        const uint chunk_size_MB = 4u * threads;
+        const ulong chunk_elements = std::max(1ull, (1048576ull * (ulong)chunk_size_MB) / ((ulong)components * sizeof(float)));
+        std::vector<float> buffer(chunk_elements * (ulong)components);
+
+        const ulong chunks = points / chunk_elements;
+        const ulong remainder = points % chunk_elements;
+        for (ulong c = 0u; c < chunks + 1ull; ++c) {
+            const ulong count = (c < chunks) ? chunk_elements : remainder;
+            if (count == 0ull) break;
+            parallel_for(count, [&](ulong i) {
+                const ulong idx = c * chunk_elements + i;
+                const ulong base_i = i * (ulong)components;
+                const ulong src_i = idx * (ulong)components;
+                for (uint d = 0u; d < components; ++d) {
+                    buffer[base_i + d] = reverse_bytes(data[src_i + d] * factor);
+                }
+            });
+            file.write(reinterpret_cast<const char*>(buffer.data()), count * (ulong)components * sizeof(float));
+        }
+    };
+
+    write_field("u_avg", u_avg, 3u, u_factor);
+    write_field("rho_avg", rho_avg, 1u, rho_factor);
+
+    file.close();
+    info.allow_printing.lock();
+    print_info("File \"" + filename + "\" saved.");
+    info.allow_printing.unlock();
+}
 
 static float3 wind_velocity_lbmu(const float inflow_si, const float angle_deg, const float u_scale) {
     const float deg2rad = 3.14159265358979323846f / 180.0f;
@@ -353,6 +421,10 @@ void main_setup() {
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "purge_avg") {
+                    const int v = atoi(val.c_str());
+                    purge_avg_steps = v > 0 ? static_cast<uint>(v) : 0u;
+                }
                 else if (key == "validation") validation_status = unquote(val);
                 else if (key == "coriolis_term") {
                     std::string v = unquote(val);
@@ -458,6 +530,7 @@ void main_setup() {
     println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
     println("| GPU Decompose   | " + alignr(49u, to_string(Dx)) + ", " + alignr(2u, to_string(Dy)) + ", " + alignr(2u, to_string(Dz)) + " |");
     println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
+    println("| Purge Avg Steps | " + alignr(57u, purge_avg_steps > 0u ? to_string(purge_avg_steps) : string("off")) + " |");
 
     const float lbm_ref_u = 0.10f; // 0.1731 is Ma=0.3
     float si_ref_u = 10.0f;
@@ -769,6 +842,64 @@ void main_setup() {
         std::filesystem::create_directories(std::filesystem::path(vtk_dir).parent_path());
         std::filesystem::create_directories(snapshots_dir);
 
+        const ulong total_steps = lbm_T + (research_output_steps > 0u ? (ulong)research_output_steps : 0ull);
+        const bool do_avg = purge_avg_steps > 0u;
+        const ulong avg_window = do_avg ? std::min((ulong)purge_avg_steps, total_steps) : 0ull;
+        const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + 1ull) : max_ulong;
+        const ulong Ncells = lbm.get_N();
+
+        std::vector<float> avg_u;
+        std::vector<float> avg_rho;
+        ulong avg_count = 0ull;
+        if (avg_window > 0ull) {
+            avg_u.assign((size_t)(Ncells * 3ull), 0.0f);
+            avg_rho.assign((size_t)Ncells, 0.0f);
+        }
+
+        auto enqueue_read_u_rho = [&]() {
+#ifndef UPDATE_FIELDS
+            for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->enqueue_update_fields();
+#endif
+            for (uint d = 0u; d < lbm.get_D(); ++d) {
+                lbm.lbm_domain[d]->u.enqueue_read_from_device();
+                lbm.lbm_domain[d]->rho.enqueue_read_from_device();
+            }
+            for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->finish_queue();
+        };
+
+        auto accumulate_from_buffers = [&]() {
+            ++avg_count;
+            const float alpha = 1.0f / (float)avg_count;
+            float* u_avg = avg_u.data();
+            float* rho_avg = avg_rho.data();
+            parallel_for(Ncells, [&](ulong n) {
+                const ulong i3 = 3ull * n;
+                const float ux = lbm.u.x[n];
+                const float uy = lbm.u.y[n];
+                const float uz = lbm.u.z[n];
+                u_avg[i3]     += (ux - u_avg[i3]) * alpha;
+                u_avg[i3 + 1] += (uy - u_avg[i3 + 1]) * alpha;
+                u_avg[i3 + 2] += (uz - u_avg[i3 + 2]) * alpha;
+                const float r = lbm.rho[n];
+                rho_avg[n]    += (r - rho_avg[n]) * alpha;
+            });
+        };
+
+        auto maybe_accumulate_avg = [&]() {
+            if (avg_window == 0ull) return;
+            if (lbm.get_t() < avg_start_t) return;
+            enqueue_read_u_rho();
+            accumulate_from_buffers();
+        };
+
+        auto finalize_avg = [&]() {
+            if (avg_count == 0ull) return;
+            const std::string avg_name = vtk_prefix + datetime + "_avg";
+            const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
+            write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(), avg_u.data(), avg_rho.data(), true);
+            println("| Avg samples     | " + alignr(57u, to_string(avg_count)) + " |");
+        };
+
 #if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)
         const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
         // Camera
@@ -799,6 +930,7 @@ void main_setup() {
             }
 
             lbm.run(1u, lbm_T);
+            maybe_accumulate_avg();
         }
         if (research_output_steps > 0) {
             println("|-----------------------------------------------------------------------------|");
@@ -814,6 +946,7 @@ void main_setup() {
                 lbm.u.write_device_to_vtk(vtk_dir, true);
                 // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
                 lbm.rho.write_device_to_vtk(vtk_dir, true);
+                maybe_accumulate_avg();
             }
 
             println("| Research output phase complete. Writing transform.info...             |");
@@ -834,6 +967,7 @@ void main_setup() {
                 println("ERROR: Could not open " + info_path + " for writing.");
             }
         }
+        finalize_avg();
         print_task_finished();
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
@@ -843,6 +977,7 @@ void main_setup() {
                 lbm.write_vtk(vtk_file, true, true);
             }
             lbm.run(1u, lbm_T);
+            maybe_accumulate_avg();
         }
         if (research_output_steps > 0) {
             println("|-----------------------------------------------------------------------------|");
@@ -858,6 +993,7 @@ void main_setup() {
                 lbm.u.write_device_to_vtk(vtk_dir, true);
                 // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
                 lbm.rho.write_device_to_vtk(vtk_dir, true);
+                maybe_accumulate_avg();
             }
 
             println("| Research output phase complete. Writing transform.info...             |");
@@ -878,6 +1014,7 @@ void main_setup() {
                 println("ERROR: Could not open " + info_path + " for writing.");
             }
         }
+        finalize_avg();
         print_task_finished();
 #endif
     };
