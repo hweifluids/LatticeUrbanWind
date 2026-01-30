@@ -7,6 +7,7 @@
 #include "info.hpp"
 
 extern float coriolis_f_lbmu;
+extern float3 vtk_origin_shift; // VTK origin shift in SI units for field outputs
 
 
 uint bytes_per_cell_host(); // returns the number of Bytes per cell allocated in host memory
@@ -311,7 +312,8 @@ public:
 				if(name=="T"  ) unit_conversion_factor = (T)units.si_T  (1.0f);
 			}
 			const string filename = create_file_extension(path, ".vtk");
-			const float3 origin = spacing*float3(0.5f-0.5f*(float)Nx, 0.5f-0.5f*(float)Ny, 0.5f-0.5f*(float)Nz);
+			float3 origin = spacing*float3(0.5f-0.5f*(float)Nx, 0.5f-0.5f*(float)Ny, 0.5f-0.5f*(float)Nz);
+			if(convert_to_si_units) origin += vtk_origin_shift;
 			const string header =
 				"# vtk DataFile Version 3.0\nFluidX3D "+filename.substr(filename.rfind('/')+1)+"\nBINARY\nDATASET STRUCTURED_POINTS\n"
 				"DIMENSIONS "+to_string(Nx)+" "+to_string(Ny)+" "+to_string(Nz)+"\n"

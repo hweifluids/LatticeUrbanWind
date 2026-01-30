@@ -174,7 +174,9 @@ static string now_str() {
  }
 
 static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, const uint Nz,
-                          const float* u_avg, const float* rho_avg, const bool convert_to_si_units) {
+                          const float* u_avg, const float* rho_avg,
+                          const float* M2_u, const float* M2_v, const float* M2_w,
+                          const ulong avg_count, const bool convert_to_si_units) {
     if (!u_avg || !rho_avg) return;
     float spacing = 1.0f;
     float u_factor = 1.0f;
@@ -184,7 +186,8 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
         u_factor = units.si_u(1.0f);
         rho_factor = units.si_rho(1.0f);
     }
-    const float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
+    float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
+    if (convert_to_si_units) origin += vtk_origin_shift;
     const ulong points = (ulong)Nx * (ulong)Ny * (ulong)Nz;
 
     create_folder(filename);
@@ -233,6 +236,18 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
 
     write_field("u_avg", u_avg, 3u, u_factor);
     write_field("rho_avg", rho_avg, 1u, rho_factor);
+
+    std::vector<float> tke(points, 0.0f);
+    if (avg_count > 1ull && M2_u && M2_v && M2_w) {
+        const float inv_n = 1.0f / (float)avg_count;
+        parallel_for(points, [&](ulong n) {
+            const float var_u = M2_u[n] * inv_n;
+            const float var_v = M2_v[n] * inv_n;
+            const float var_w = M2_w[n] * inv_n;
+            tke[n] = 0.5f * (var_u + var_v + var_w);
+        });
+    }
+    write_field("tke", tke.data(), 1u, u_factor * u_factor);
 
     file.close();
     info.allow_printing.lock();
@@ -816,6 +831,12 @@ void main_setup() {
     println("| Time code: " + now_str() + "                                              |");
 
     if (!mesh) { println("ERROR: failed to load STL"); wait(); exit(-1); }
+    const float3 stl_min_si = mesh->pmin;
+    const float3 domain_min_si = float3(
+        units.si_x(0.5f - 0.5f * (float)lbm_N.x),
+        units.si_x(0.5f - 0.5f * (float)lbm_N.y),
+        units.si_x(0.5f - 0.5f * (float)lbm_N.z));
+    vtk_origin_shift = stl_min_si - domain_min_si;
     const float target_lbm_x = units.x(si_size.x); const float scale_geom = target_lbm_x / mesh->get_bounding_box_size().x; mesh->scale(scale_geom);
     mesh->translate(float3(1.0f - mesh->pmin.x, 1.0f - mesh->pmin.y, 1.0f - mesh->pmin.z));
 
@@ -850,10 +871,16 @@ void main_setup() {
 
         std::vector<float> avg_u;
         std::vector<float> avg_rho;
+        std::vector<float> M2_u;
+        std::vector<float> M2_v;
+        std::vector<float> M2_w;
         ulong avg_count = 0ull;
         if (avg_window > 0ull) {
             avg_u.assign((size_t)(Ncells * 3ull), 0.0f);
             avg_rho.assign((size_t)Ncells, 0.0f);
+            M2_u.assign((size_t)Ncells, 0.0f);
+            M2_v.assign((size_t)Ncells, 0.0f);
+            M2_w.assign((size_t)Ncells, 0.0f);
         }
 
         auto enqueue_read_u_rho = [&]() {
@@ -869,19 +896,41 @@ void main_setup() {
 
         auto accumulate_from_buffers = [&]() {
             ++avg_count;
-            const float alpha = 1.0f / (float)avg_count;
+            const float inv_n = 1.0f / (float)avg_count;
             float* u_avg = avg_u.data();
             float* rho_avg = avg_rho.data();
+            float* m2_u = M2_u.data();
+            float* m2_v = M2_v.data();
+            float* m2_w = M2_w.data();
             parallel_for(Ncells, [&](ulong n) {
                 const ulong i3 = 3ull * n;
                 const float ux = lbm.u.x[n];
                 const float uy = lbm.u.y[n];
                 const float uz = lbm.u.z[n];
-                u_avg[i3]     += (ux - u_avg[i3]) * alpha;
-                u_avg[i3 + 1] += (uy - u_avg[i3 + 1]) * alpha;
-                u_avg[i3 + 2] += (uz - u_avg[i3 + 2]) * alpha;
+                float mean_u = u_avg[i3];
+                float mean_v = u_avg[i3 + 1];
+                float mean_w = u_avg[i3 + 2];
+
+                const float delta_u = ux - mean_u;
+                mean_u += delta_u * inv_n;
+                const float delta2_u = ux - mean_u;
+                m2_u[n] += delta_u * delta2_u;
+                u_avg[i3] = mean_u;
+
+                const float delta_v = uy - mean_v;
+                mean_v += delta_v * inv_n;
+                const float delta2_v = uy - mean_v;
+                m2_v[n] += delta_v * delta2_v;
+                u_avg[i3 + 1] = mean_v;
+
+                const float delta_w = uz - mean_w;
+                mean_w += delta_w * inv_n;
+                const float delta2_w = uz - mean_w;
+                m2_w[n] += delta_w * delta2_w;
+                u_avg[i3 + 2] = mean_w;
+
                 const float r = lbm.rho[n];
-                rho_avg[n]    += (r - rho_avg[n]) * alpha;
+                rho_avg[n]    += (r - rho_avg[n]) * inv_n;
             });
         };
 
@@ -896,7 +945,10 @@ void main_setup() {
             if (avg_count == 0ull) return;
             const std::string avg_name = vtk_prefix + datetime + "_avg";
             const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
-            write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(), avg_u.data(), avg_rho.data(), true);
+            write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(),
+                          avg_u.data(), avg_rho.data(),
+                          M2_u.data(), M2_v.data(), M2_w.data(),
+                          avg_count, true);
             println("| Avg samples     | " + alignr(57u, to_string(avg_count)) + " |");
         };
 
@@ -922,7 +974,7 @@ void main_setup() {
             }
 
             // ------------------ synchronous VTK output ------------------
-            if (lbm.get_t() % vtk_dt == 0u) {
+            if (lbm.get_t() != 0u && lbm.get_t() % vtk_dt == 0u) {
                 // velocity (vector field)
                 lbm.u.write_device_to_vtk(vtk_dir, true);
                 // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
@@ -972,7 +1024,7 @@ void main_setup() {
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
         while (lbm.get_t() < lbm_T) {
-            if (lbm.get_t() % vtk_dt == 0u) {
+            if (lbm.get_t() != 0u && lbm.get_t() % vtk_dt == 0u) {
                 const string vtk_file = vtk_dir + "step_" + to_string(lbm.get_t(), 5u) + ".vtk";
                 lbm.write_vtk(vtk_file, true, true);
             }

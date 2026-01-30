@@ -8,6 +8,7 @@ extern float coriolis_Omegaz_lbmu;
 
 Units units; // for unit conversion
 float coriolis_f_lbmu = 0.0f;
+float3 vtk_origin_shift = float3(0.0f); // SI translation applied to VTK origins
 
 #if defined(D2Q9)
 const uint velocity_set = 9u;
