@@ -47,7 +47,7 @@ This runs the staged scripts in `installer/`:
 2. `1_env_var.cmd` - sets `LUW_HOME` and adds `%LUW_HOME%\bin` to PATH.
 3. `2_setup_python_venv.cmd` - creates `.venv` and installs Python dependencies.
 4. `3_compile_cfdcore.cmd` - builds FluidX3D.
-5. `4_testrun.cmd` - placeholder (currently empty).
+5. `4_testrun.cmd` - placeholder (coming soon).
 
 ### Linux
 
