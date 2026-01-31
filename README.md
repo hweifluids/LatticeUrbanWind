@@ -121,15 +121,21 @@ Example (from `project_template/conf.luw`):
 
 ```txt
 casename = example
-datetime = 20251010120000
-cut_lon_manual = [121.3, 121.7]
-cut_lat_manual = [31.1, 31.4]
-utm_crs = "EPSG:32651"
-base_height = 50
-z_limit = 500
-n_gpu = [2, 1, 1]
-mesh_control = "gpu_memory"
-gpu_memory = 20000
+cut_lon_manual=[121.3,121.7] (focus longitude range)
+cut_lat_manual=[31.1,31.4] (focus latitude range)
+datetime = 20251010120000 (should be 14 digits)
+z_limit = 500 (low-altitude focus upper range)
+base_height=50 (base layer thickness)
+midmesh_basesize=10 (Size of media mesh for bc construction)
+
+n_gpu = [2, 1, 1] (GPU counts for LBM)
+mesh_control = "gpu_memory" (select from gpu_memery and cell_size)
+gpu_memory = 20000 (in MB unit)
+cell_size = (in meter unit)
+
+high_order = true (interpolator order switch)
+flux_correction = true (flux correction enabler)
+coriolis_term = true (coriolis source term enabler)
 ```
 
 ### 4) Run the preprocessing pipeline
