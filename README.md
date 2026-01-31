@@ -270,11 +270,11 @@ This project is developed with cooperation and support from the National Meteoro
 
 ## Contact
 
-If you have questions, suggestions, or want to collaborate, feel free to reach out. I am Huanxia Wei.
+If you have questions, suggestions, or want to collaborate, feel free to reach out (Huanxia Wei).
 
 - Email: huanxia.wei@u.nus.edu
 - WeChat: TJerCZ
 
 ## License
 
-This repository is released under a custom, non-commercial, non-military, no-AI-training license. Please read `LICENSE.md` carefully before use. FluidX3D is included under its own license and terms.
+This repository is released under a custom, non-commercial, non-military, no-AI-training license. Please read `LICENSE.md` carefully before use. **FluidX3D is included under its own license and terms, which should also be followed strictly to use this platform.**
