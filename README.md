@@ -7,15 +7,17 @@ On the other hand, it also supports the fast generation of wind field dataset (a
 
 The application potentials include but not limited to: urban air mobility (UAM), buidling ventilation, pedestrian wind environment, machine learning prediction of wind fields, real-time low-altitude support of events, observation data assimilation.
 
-LUW supports three run modes with lightweight text-based configuration files and reproducible project layouts:
+LUW supports three run modes with text-based configuration files and reproducible project layouts:
 
 - **NWP-LBMLES** (standard `*.luw`)
 - **Dataset generation** (`*.luwdg`)
 - **Profile research** (`*.luwpf`)
 
-It is designed for Windows and Linux, with GPU acceleration via OpenCL.
+Just leave terrain and building dataset in the correct folder, edit the configuration to setup the case, and enjoy the wind field results in shorter than a cup of coffee time.
 
 The LBM solver of this package is constructed based on **FluidX3D** by Dr. Moritz Lehmann, which empowers the computation and provides a backend with extreme computational efficiency.
+
+It is designed for Windows and Linux with GPU acceleration.
 
 ## Highlights
 
@@ -34,7 +36,7 @@ The LBM solver of this package is constructed based on **FluidX3D** by Dr. Morit
 
 ## Installation
 
-### Windows (recommended)
+### Windows
 
 1. Open **PowerShell or CMD as Administrator**.
 2. Run the installer orchestrator:
@@ -264,7 +266,6 @@ Each run mode has a corresponding example under `examples/`. These examples are 
 - **`LUW_HOME is not set`**: ensure the environment variable is exported and `$LUW_HOME/bin` is on PATH.
 - **OpenCL not found**: install the correct GPU driver package and verify with `clinfo` (Linux) or the Windows env check.
 - **Python deps fail**: activate `.venv` and reinstall `installer/requirements.txt`.
-- **Shapefile CRS issues**: ensure your building data is in EPSG:4326 or provide correct CRS metadata.
 
 ## Acknowledgements
 
@@ -272,7 +273,7 @@ This project is developed with cooperation and support from the National Meteoro
 
 ## Contact
 
-If you have questions, suggestions, or want to collaborate, feel free to reach out (Huanxia Wei).
+If you have questions, suggestions, or want to collaborate or contribute (then as a paper co-author), feel free to reach out (Huanxia Wei).
 
 - Email: huanxia.wei@u.nus.edu
 - WeChat: TJerCZ
