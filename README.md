@@ -1,120 +1,269 @@
-## Installation:
+# LatticeUrbanWind (LUW)
 
-**1. Install GPU Drivers and OpenCL Runtime**
+LatticeUrbanWind (LUW) is a workflow toolkit for fast urban wind simulation that couples mesoscale wind fields (e.g., WRF NetCDF) with the FluidX3D lattice Boltzmann solver. It provides data inspection, boundary-condition building, geometry preparation, voxelization, and validation utilities so you can go from regional wind data and city geometry to a ready-to-run CFD case.
 
+LUW supports three run modes with lightweight text-based configuration files and reproducible project layouts:
 
-- **Windows**
-  <details><summary>GPUs</summary>
+- **NWP-LBMLES** (standard `*.luw`)
+- **Dataset generation** (`*.luwdg`)
+- **Profile research** (`*.luwpf`)
 
-  - Download and install the [AMD](https://www.amd.com/en/support/download/drivers.html)/[Intel](https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html)/[Nvidia](https://www.nvidia.com/Download/index.aspx) GPU Drivers, which contain the OpenCL Runtime.
-  - Reboot.
+It is designed for Windows and Linux, with GPU acceleration via OpenCL.
 
-  </details>
-  <details><summary>CPUs</summary>
+## Highlights
 
-  - Download and install the [Intel CPU Runtime for OpenCL](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-cpu-runtime-for-opencl-applications-with-sycl-support.html) (works for both AMD/Intel CPUs).
-  - Reboot.
+- End-to-end pipeline: NetCDF + GIS + terrain to CFD-ready domain.
+- Command-line tools for inspection, preprocessing, voxelization, and validation.
+- Three run modes: NWP-LBMLES, Dataset generation, and Profile research.
+- Built-in helpers for postprocessing and exporting results to VTK/NetCDF.
+- Compatible with multi-GPU FluidX3D runs.
 
-  </details>
-- **Linux**
-  <details><summary>AMD GPUs</summary>
+## System Requirements
 
-  - Download and install [AMD GPU Drivers](https://www.amd.com/en/support/download/linux-drivers.html), which contain the OpenCL Runtime, with:
-    ```bash
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y g++ git make ocl-icd-libopencl1 ocl-icd-opencl-dev
-    mkdir -p ~/amdgpu
-    wget -P ~/amdgpu https://repo.radeon.com/amdgpu-install/6.4.2.1/ubuntu/noble/amdgpu-install_6.4.60402-1_all.deb
-    sudo apt install -y ~/amdgpu/amdgpu-install*.deb
-    sudo amdgpu-install -y --usecase=graphics,rocm,opencl --opencl=rocr
-    sudo usermod -a -G render,video $(whoami)
-    rm -r ~/amdgpu
-    sudo shutdown -r now
-    ```
+- OS: Windows 10/11 or Linux (tested via installer scripts).
+- Python 3.x with `venv`.
+- OpenCL runtime (GPU drivers for AMD/NVIDIA/Intel).
+- Visual Studio Build Tools (Windows) or a C++ toolchain (Linux) to compile FluidX3D.
 
-  </details>
-  <details><summary>Intel GPUs</summary>
+## Installation
 
-  - Intel GPU Drivers come already installed since Linux Kernel 6.2, but they don't contain the OpenCL Runtime.
-  - The the [OpenCL Runtime](https://github.com/intel/compute-runtime/releases) has to be installed separately with:
-    ```bash
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y g++ git make ocl-icd-libopencl1 ocl-icd-opencl-dev intel-opencl-icd
-    sudo usermod -a -G render $(whoami)
-    sudo shutdown -r now
-    ```
+### Windows (recommended)
 
-  </details>
-  <details><summary>Nvidia GPUs</summary>
+1. Open **PowerShell or CMD as Administrator**.
+2. Run the installer orchestrator:
 
-  - Download and install [Nvidia GPU Drivers](https://www.nvidia.com/Download/index.aspx), which contain the OpenCL Runtime, with:
-    ```bash
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y g++ git make ocl-icd-libopencl1 ocl-icd-opencl-dev nvidia-driver-580
-    sudo shutdown -r now
-    ```
+```bat
+install_win.cmd
+```
 
-  </details>
-  <details><summary>CPUs</summary>
+This runs the staged scripts in `installer/`:
 
-  - Option 1: Download and install the [oneAPI DPC++ Compiler](https://github.com/intel/llvm/releases?q=%22oneAPI+DPC%2B%2B+Compiler+dependencies%22) and [oneTBB](https://github.com/uxlfoundation/oneTBB/releases) with:
-    ```bash
-    export OCLV="oclcpuexp-2025.20.6.0.04_224945_rel"
-    export TBBV="oneapi-tbb-2022.2.0"
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y g++ git make ocl-icd-libopencl1 ocl-icd-opencl-dev
-    sudo mkdir -p ~/cpurt /opt/intel/${OCLV} /etc/OpenCL/vendors /etc/ld.so.conf.d
-    sudo wget -P ~/cpurt https://github.com/intel/llvm/releases/download/2025-WW27/${OCLV}.tar.gz
-    sudo wget -P ~/cpurt https://github.com/uxlfoundation/oneTBB/releases/download/v2022.2.0/${TBBV}-lin.tgz
-    sudo tar -zxvf ~/cpurt/${OCLV}.tar.gz -C /opt/intel/${OCLV}
-    sudo tar -zxvf ~/cpurt/${TBBV}-lin.tgz -C /opt/intel
-    echo /opt/intel/${OCLV}/x64/libintelocl.so | sudo tee /etc/OpenCL/vendors/intel_expcpu.icd
-    echo /opt/intel/${OCLV}/x64 | sudo tee /etc/ld.so.conf.d/libintelopenclexp.conf
-    sudo ln -sf /opt/intel/${TBBV}/lib/intel64/gcc4.8/libtbb.so /opt/intel/${OCLV}/x64
-    sudo ln -sf /opt/intel/${TBBV}/lib/intel64/gcc4.8/libtbbmalloc.so /opt/intel/${OCLV}/x64
-    sudo ln -sf /opt/intel/${TBBV}/lib/intel64/gcc4.8/libtbb.so.12 /opt/intel/${OCLV}/x64
-    sudo ln -sf /opt/intel/${TBBV}/lib/intel64/gcc4.8/libtbbmalloc.so.2 /opt/intel/${OCLV}/x64
-    sudo ldconfig -f /etc/ld.so.conf.d/libintelopenclexp.conf
-    sudo rm -r ~/cpurt
-    ```
-  - Option 2: Download and install [PoCL](https://portablecl.org/) with:
-    ```bash
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y g++ git make ocl-icd-libopencl1 ocl-icd-opencl-dev pocl-opencl-icd
-    ```
-  </details>
+1. `0_detect_env.cmd` - checks Python, pip, OpenCL.
+2. `1_env_var.cmd` - sets `LUW_HOME` and adds `%LUW_HOME%\bin` to PATH.
+3. `2_setup_python_venv.cmd` - creates `.venv` and installs Python dependencies.
+4. `3_compile_cfdcore.cmd` - builds FluidX3D.
+5. `4_testrun.cmd` - placeholder (currently empty).
 
-<br>
+### Linux
 
+1. Open a terminal.
+2. Run the installer:
 
-## Usage:
+```bash
+./install_linux.sh
+```
 
-The $project\_path$ mentioned below is the parent folder of deck file (*.luw, the configuration file). You can actually place it anywhere you would like, and name the folder as you like (casename is suggested).
+This executes the numbered scripts in `installer/`:
 
-Project folder $project\_path$ includes: xxx.luw (configuration deck), building\_db (folder for building database), terrain_db (folder for terrain database, under development), wind_bc (netcdf boundary data), proj_temp (intermedia files), and RESULTS folder for output.
+1. `0_detect_env.sh` - checks Python, pip, OpenCL.
+2. `1_env_var.sh` - sets `LUW_HOME` and updates PATH in shell profiles.
+3. `2_setup_python.sh` - creates `.venv` and installs dependencies.
+4. `3_compile_cfdcore.sh` - builds FluidX3D (calls `core/cfd_core/FluidX3D/make.sh`).
 
-Commands:
+### Manual setup (if you prefer)
 
-The following commands are provided by this package. The deck file could be automatically detected, if "conf.luw" exists in current folder of console.
+- Set `LUW_HOME` to the repo root and add `$LUW_HOME/bin` to PATH.
+- Create a virtual environment and install:
 
-"luwbc <path-to-deck>" to build the boundary condition. The netcdf file (.nc) should be placed in $project\_path$/wind\_bc, with the name of "casename\_datetime.nc". If the netcdf file name is incorrect, the only .nc file in the wind_bc folder will be treated as input, which is not recommended. It is supposed to be called for each datetime code under batch mode.
+```bash
+python -m venv .venv
+python -m pip install -r installer/requirements.txt
+```
 
-"luwcut <path-to-deck>" to cut out the building data within the given lat-lon range, indicated in the deck. The input is $project\_path$/building\_db. Only one *.shp file is allowed to be in this folder, and it is insensitive to the *.shp file name.
+## Quick Start
 
-"luwvox <path-to-deck>" to voxelize the buildings (build the *.stl 3D file), preparing for CFD, based on the cutted *.shp file by a previous run of luwcut.
+### 1) Create a project folder
 
-"shpinspect <path-to-deck or path-to-shp>" inspect the metadata of input *.shp file (buildings database), or the *.shp file pointed by the deck.
+Copy the template:
 
-"cdfinspect <path-to-deck or path-to-nc>" inspect the metadata of input *.nc netcdf file, or the *.nc file pointed by the deck.
+```bash
+cp -r project_template my_case
+cd my_case
+```
 
-"luwval <path-to-deck>" run post alignment degree check and fulfill mandatory fields to deck, ensure it is suitable for cfd run.
+Or start from the example:
 
-"makeluw <path-to-deck>" globally run inspects, build the bc, voxelize the buildings, in one-click, and dump the logfile at the same time.
+```bash
+cp -r examples/example_ProfileResearch my_case
+cd my_case
+```
 
-"cleanluw <path-to-deck>" will clean the autogenerated deck parameters and deleted the temp files, preparing for the next run of makeluw.
+### 2) Prepare inputs
 
-"transluw <path-to-deck> <(optional tailname)>" will perform post-computation transformation on the raw cfd results, recover the coordinates to orginal.
+Required folders:
 
-"visluw" translate vtk file from utm to lat/lon, save to *.npz and *.nc, and generate sectional views of velocity.
+- `wind_bc/` - NetCDF wind files.
+- `building_db/` - building footprints (`.shp`) or STL geometry.
+- `terrain_db/` - DEM or terrain data (if used).
 
-(Under development) "analyseluw <path-to-vtk>" will compute vorticity and, if possible, pressure, from a vtk result file.  
+Wind file naming convention (important for time-dependent runs):
+
+```
+<casename>_yyyymmddhhmmss.nc
+```
+
+If the naming rule is not followed, the tools will fall back to the only `.nc` file found, and time-dependent batch runs will be disabled.
+
+### 3) Edit a configuration file
+
+Common configuration files:
+
+- `conf.luw`   - NWP-LBMLES (standard mode)
+- `conf.luwdg` - Dataset generation
+- `conf.luwpf` - Profile research
+
+Example (from `project_template/conf.luw`):
+
+```txt
+casename = example
+datetime = 20251010120000
+cut_lon_manual = [121.3, 121.7]
+cut_lat_manual = [31.1, 31.4]
+utm_crs = "EPSG:32651"
+base_height = 50
+z_limit = 500
+n_gpu = [2, 1, 1]
+mesh_control = "gpu_memory"
+gpu_memory = 20000
+```
+
+### 4) Run the preprocessing pipeline
+
+From inside your project folder:
+
+```bash
+makeluw conf.luw
+```
+
+`makeluw` runs these steps in order:
+
+1. `cdfinspect` - inspect NetCDF wind data
+2. `shpinspect` - inspect building shapefiles
+3. `luwbc` - build boundary conditions
+4. `luwcut` - crop/prepare building geometry
+5. `luwvox` - voxelization
+6. `luwval` - pre-run validation
+
+### 5) Run FluidX3D
+
+Windows:
+
+```powershell
+runluw.ps1 0
+```
+
+Linux:
+
+```bash
+cd core/cfd_core/FluidX3D
+./make.sh 0
+```
+
+You can pass multiple GPU indices as needed (e.g., `0 1 2`).
+
+### 6) Postprocess (optional)
+
+- Translate VTKs to a common origin:
+
+```bash
+transluw conf.luw
+```
+
+- Generate section plots and optional NetCDF:
+
+```bash
+visluw conf.luw
+```
+
+- Convert VTK outputs to NetCDF:
+
+```bash
+vtk2nc conf.luw
+```
+
+## Configuration File Types
+
+| File type | Run mode | Typical use |
+| --- | --- | --- |
+| `.luw` | NWP-LBMLES | Full end-to-end CFD run |
+| `.luwdg` | Dataset generation | Automated dataset creation |
+| `.luwpf` | Profile research | Profile research workflow |
+
+Key fields (common across modes):
+
+- `casename` - case identifier (used in filenames)
+- `datetime` - timestamp `yyyymmddhhmmss`
+- `cut_lon_manual`, `cut_lat_manual` - geographic crop window
+- `utm_crs` / `utm_epsg` - target projection
+- `base_height`, `z_limit` - vertical domain setup
+- `n_gpu`, `mesh_control`, `gpu_memory`, `cell_size` - CFD controls
+
+## CLI Tools
+
+| Command | Description |
+| --- | --- |
+| `cdfinspect` | Inspect NetCDF wind fields |
+| `shpinspect` | Inspect building shapefiles and CRS |
+| `luwbc` | Build wind boundary conditions |
+| `luwcut` | Cut/crop geometry |
+| `luwvox` | Voxelize geometry for CFD |
+| `luwval` | Pre-run validation |
+| `makeluw` | Run the full preprocessing chain |
+| `transluw` | Translate VTK outputs to origin (**legacy**, will be removed in a future release) |
+| `visluw` | Section plots + optional NetCDF export |
+| `vtk2nc` | Convert VTK to NetCDF |
+| `cleanluw` | Clean LUW text files |
+
+## Project Layout
+
+```
+LatticeUrbanWind/
+  bin/                CLI wrappers
+  core/               main pipeline + FluidX3D
+  installer/          installation scripts + requirements.txt
+  examples/           working examples
+  project_template/   starter project layout
+  run/                local datasets and experiments (optional)
+```
+
+Inside a project folder:
+
+```
+my_case/
+  building_db/        shapefiles or STL
+  terrain_db/         DEM/terrain data
+  wind_bc/            NetCDF wind files
+  proj_temp/          intermediate files
+  RESULTS/            outputs and VTKs
+  conf.luw            case configuration
+```
+
+## Examples
+
+Each run mode has a corresponding example under `examples/`. These examples are intended as complete, working references:
+
+- **NWP-LBMLES** example (standard `*.luw`)
+- **Dataset generation** example (`*.luwdg`)
+- **Profile research** example (`*.luwpf`)
+
+## Troubleshooting
+
+- **`LUW_HOME is not set`**: ensure the environment variable is exported and `$LUW_HOME/bin` is on PATH.
+- **OpenCL not found**: install the correct GPU driver package and verify with `clinfo` (Linux) or the Windows env check.
+- **Python deps fail**: activate `.venv` and reinstall `installer/requirements.txt`.
+- **Shapefile CRS issues**: ensure your building data is in EPSG:4326 or provide correct CRS metadata.
+
+## Acknowledgements
+
+This project is developed with cooperation and support from the National Meteorological Center of China Meteorological Administration.
+
+## Contact
+
+If you have questions, suggestions, or want to collaborate, feel free to reach out. I am Huanxia Wei.
+
+- Email: huanxia.wei@u.nus.edu
+- WeChat: TJerCZ
+
+## License
+
+This repository is released under a custom, non-commercial, non-military, no-AI-training license. Please read `LICENSE.md` carefully before use. FluidX3D is included under its own license and terms.

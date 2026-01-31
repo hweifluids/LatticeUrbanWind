@@ -1,0 +1,30 @@
+casename = DLUTcase
+datetime = 20251222120000
+
+// Projected SI Range after rotation
+si_x_cfd = [0.000000, 1001.988037]
+si_y_cfd = [0.000000, 1000.000000]
+si_z_cfd = [0.000000, 300.000000]
+base_height = 20.0
+
+// CFD control
+n_gpu = [2, 1, 1]
+mesh_control = "gpu_memory"
+gpu_memory = 40000
+cell_size = 
+validation = pass
+high_order = true
+flux_correction = false
+coriolis_term = false
+
+// Dataset generation
+inflow=[5]
+angle=[270]
+
+
+
+
+
+
+
+
