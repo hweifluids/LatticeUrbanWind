@@ -22,7 +22,7 @@ flux_correction = false
 coriolis_term = false
 
 // Inflow directions
-angle=[0,22.5,45,67.5,90,112.5,135,157.5,180,202.5,225,247.5,270,292.5,315,337.5]
+angle=[0,90,180,270]
 
 
 

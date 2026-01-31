@@ -4187,7 +4187,27 @@ inline void create_folder(const string& path) { // create folder if it not alrea
 #endif // UTILITIES_NO_CPP17
 }
 inline string create_file_extension(const string& filename, const string& extension) {
-	return filename.substr(0, filename.rfind('.'))+(extension.at(0)!='.'?".":"")+extension; // remove existing file extension if existing and replace it with new one
+	const size_t slash = filename.find_last_of("/\\");
+	const size_t dot = filename.find_last_of('.');
+	string base = filename;
+	if(dot!=string::npos && (slash==string::npos || dot>slash)) {
+		const string suffix = filename.substr(dot+1);
+		bool suffix_matches_ext = false;
+		if(!suffix.empty()) {
+			const string ext = (extension.size()>0u && extension[0]=='.') ? extension.substr(1) : extension;
+			suffix_matches_ext = (suffix==ext);
+		}
+		bool suffix_is_simple = !suffix.empty() && suffix.length()<=5u;
+		if(suffix_is_simple) {
+			for(char c : suffix) {
+				const bool is_alnum = (c>='0'&&c<='9') || (c>='A'&&c<='Z') || (c>='a'&&c<='z');
+				if(!is_alnum) { suffix_is_simple = false; break; }
+			}
+		}
+		if(suffix_matches_ext || suffix_is_simple) base = filename.substr(0, dot);
+	}
+	if(extension.empty()) return base;
+	return base+(extension.at(0)!='.'?".":"")+extension; // replace or append extension
 }
 inline string read_file(const string& filename) {
 	std::ifstream file(filename, std::ios::in);
