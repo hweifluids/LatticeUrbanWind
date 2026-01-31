@@ -17,7 +17,7 @@ Just leave terrain and building dataset in the correct folder, edit the configur
 
 The LBM solver of this package is constructed based on **FluidX3D** by Dr. Moritz Lehmann, which empowers the computation and provides a backend with extreme computational efficiency.
 
-It is designed for Windows and Linux with GPU acceleration.
+It is designed for both Windows and Linux with GPU acceleration.
 
 ## Highlights
 
