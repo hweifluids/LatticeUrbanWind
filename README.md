@@ -212,7 +212,7 @@ Key fields (common across modes):
 | `transluw` | Translate VTK outputs to origin (**legacy**, will be removed in a future release) |
 | `visluw` | Section plots + optional NetCDF export |
 | `vtk2nc` | Convert VTK to NetCDF |
-| `cleanluw` | Clean LUW text files |
+| `cleanluw` | Clean the temporary and result files of a LUW case |
 
 ## Project Layout
 
