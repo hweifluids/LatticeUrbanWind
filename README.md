@@ -1,6 +1,6 @@
 # LatticeUrbanWind (LUW)
 
-**Meter-level, KM-scale, Minute-computation, Billion-grid Winds - Supporting next-gen low-altitude applications**
+**Meter-level, hundred-KM-scale, Minute-computation, Billion-grid Winds - Supporting next-gen low-altitude applications**
 
 LatticeUrbanWind (LUW) is a validated workflow toolkit for fast urban wind simulation that couples mesoscale wind fields (e.g., WRF NetCDF, or data from national center) with the FluidX3D lattice Boltzmann solver, i.e., it is a NWP-LBM-LES platform. It provides data inspection, boundary-condition building, geometry preparation, voxelization, and validation utilities so you can go from regional wind data and city geometry to a ready-to-run CFD case.
 On the other hand, it also supports the fast generation of wind field dataset (also considering terrain and buildings) as well as profile-based inflow simulations for research purposes, i.e., pre-defined batch run.
