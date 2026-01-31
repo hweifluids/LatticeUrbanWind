@@ -10,6 +10,8 @@ LUW supports three run modes with lightweight text-based configuration files and
 
 It is designed for Windows and Linux, with GPU acceleration via OpenCL.
 
+The LBM solver of this package is constructed based on **FluidX3D** by Dr. Moritz Lehmann, which empowers the computation and provides a backend with extreme computational efficiency.
+
 ## Highlights
 
 - End-to-end pipeline: NetCDF + GIS + terrain to CFD-ready domain.
