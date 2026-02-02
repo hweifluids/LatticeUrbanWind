@@ -54,6 +54,42 @@ def get_lonlat(conf_path: Union[str, Path] | None = None) -> Tuple[Tuple[float, 
 
 __all__ = ["get_lonlat"]
 
+def _format_lonlat_bounds(bounds: Tuple[float, float, float, float]) -> str:
+    lon_min, lon_max, lat_min, lat_max = bounds
+    return f"lon[{lon_min:.6f}, {lon_max:.6f}] lat[{lat_min:.6f}, {lat_max:.6f}]"
+
+
+def _bbox_contains(target_bounds: Tuple[float, float, float, float],
+                   input_bounds: Tuple[float, float, float, float]) -> bool:
+    t_lon_min, t_lon_max, t_lat_min, t_lat_max = target_bounds
+    i_lon_min, i_lon_max, i_lat_min, i_lat_max = input_bounds
+    return (i_lon_min <= t_lon_min) and (i_lon_max >= t_lon_max) and (i_lat_min <= t_lat_min) and (i_lat_max >= t_lat_max)
+
+
+def _confirm_bbox_coverage(kind: str,
+                           target_bounds: Tuple[float, float, float, float],
+                           input_bounds: Tuple[float, float, float, float]) -> None:
+    if _bbox_contains(target_bounds, input_bounds):
+        return
+
+    print(f"[WARN] {kind} bounds do not fully cover the target area.")
+    print(f"[WARN] Target lon/lat bounds: {_format_lonlat_bounds(target_bounds)}")
+    print(f"[WARN] Input  lon/lat bounds: {_format_lonlat_bounds(input_bounds)}")
+
+    while True:
+        try:
+            ans = input("Continue anyway? (Y/N): ").strip().lower()
+        except EOFError:
+            print("[ERROR] No user input available. Exiting.")
+            sys.exit(1)
+        if ans in ("y", "yes"):
+            print("[WARN] User chose to continue despite bounds mismatch.")
+            return
+        if ans in ("n", "no"):
+            print("[INFO] User canceled. Exiting.")
+            sys.exit(1)
+        print("Please input Y or N.")
+
 def select_height_column(gdf: gpd.GeoDataFrame):
     """Return the name of a height-like column if found, else None."""
     cols = [c for c in gdf.columns if isinstance(c, str)]
@@ -641,6 +677,15 @@ def main():
     else:
         gdf_wgs84 = gdf
         print("Data already in EPSG 4326. No reprojection needed.")
+
+    # Validate coverage before clipping
+    try:
+        ib_minx, ib_miny, ib_maxx, ib_maxy = gdf_wgs84.total_bounds
+        input_bounds = (float(ib_minx), float(ib_maxx), float(ib_miny), float(ib_maxy))
+        target_bounds = (lon_lo, lon_hi, lat_lo, lat_hi)
+        _confirm_bbox_coverage("Building SHP", target_bounds, input_bounds)
+    except Exception as e:
+        print(f"[WARN] Failed to validate building SHP bounds: {e}")
 
     minx, maxx = min(cut_lon), max(cut_lon)
     miny, maxy = min(cut_lat), max(cut_lat)

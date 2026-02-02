@@ -8,10 +8,12 @@
 /core/cfd_core/FluidX3D/.vs/
 /core/cfd_core/FluidX3D/enc_temp_folder/
 /core/cfd_core/FluidX3D-3.5/
+/core/bridge_core/__pycache__
 # Files anywhere
 *.vcxproj.user
 *.log
 *.vtk
+*.tif
 
 # Ignore all files under /example, including files in subfolders
 /example/**
@@ -24,3 +26,5 @@
 # Do not ignore .luw files under /example at any depth
 !/example/*.luw
 !/example/**/*.luw
+
+

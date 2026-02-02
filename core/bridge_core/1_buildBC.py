@@ -11,6 +11,7 @@ import geopandas as gpd
 from auto_UTM import get_utm_crs_from_conf_raw
 from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shapely_transform
+from dem_tif_to_shp import ensure_dem_shp_from_tif
 import shutil
 import os
 import sys
@@ -348,9 +349,67 @@ def _log_error(msg: str) -> None:
     print(f"[ERROR] {msg}")
 
 
-def _load_dem_data(project_home: Path, work_crs: str, elevation_field: str = "elevation") -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+def _parse_target_lonlat_from_conf(conf_raw: str | None) -> Optional[Tuple[float, float, float, float]]:
+    if not conf_raw:
+        return None
+    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
+    if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
+        return None
+
+    lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
+    lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
+    lon_min, lon_max = sorted((lon_min_c, lon_max_c))
+    lat_min, lat_max = sorted((lat_min_c, lat_max_c))
+    return lon_min, lon_max, lat_min, lat_max
+
+
+def _format_lonlat_bounds(bounds: Tuple[float, float, float, float]) -> str:
+    lon_min, lon_max, lat_min, lat_max = bounds
+    return f"lon[{lon_min:.6f}, {lon_max:.6f}] lat[{lat_min:.6f}, {lat_max:.6f}]"
+
+
+def _bbox_contains(target_bounds: Tuple[float, float, float, float],
+                   input_bounds: Tuple[float, float, float, float]) -> bool:
+    t_lon_min, t_lon_max, t_lat_min, t_lat_max = target_bounds
+    i_lon_min, i_lon_max, i_lat_min, i_lat_max = input_bounds
+    return (i_lon_min <= t_lon_min) and (i_lon_max >= t_lon_max) and (i_lat_min <= t_lat_min) and (i_lat_max >= t_lat_max)
+
+
+def _confirm_bbox_coverage(kind: str,
+                           target_bounds: Tuple[float, float, float, float],
+                           input_bounds: Tuple[float, float, float, float]) -> None:
+    if _bbox_contains(target_bounds, input_bounds):
+        return
+
+    _log_warn(f"{kind} bounds do not fully cover the target area.")
+    _log_warn(f"Target lon/lat bounds: {_format_lonlat_bounds(target_bounds)}")
+    _log_warn(f"Input  lon/lat bounds: {_format_lonlat_bounds(input_bounds)}")
+
+    while True:
+        try:
+            ans = input("Continue anyway? (Y/N): ").strip().lower()
+        except EOFError:
+            _log_error("No user input available. Exiting.")
+            sys.exit(1)
+        if ans in ("y", "yes"):
+            _log_warn("User chose to continue despite bounds mismatch.")
+            return
+        if ans in ("n", "no"):
+            _log_info("User canceled. Exiting.")
+            sys.exit(1)
+        _log_warn("Please input Y or N.")
+
+
+def _load_dem_data(
+    project_home: Path,
+    work_crs: str,
+    elevation_field: str = "elevation",
+    conf_raw: str | None = None,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Load DEM data from shapefile in DEM folder.
+    Load DEM data from shapefile in terrain_db.
+    If no shapefile exists, try to generate one from GeoTIFF.
     Returns (points_xy, elevations) in work_crs or (None, None) if not found.
     Elevations are adjusted so minimum = 0.
 
@@ -360,14 +419,17 @@ def _load_dem_data(project_home: Path, work_crs: str, elevation_field: str = "el
         elevation_field: Name of elevation field in shapefile
     """
     dem_folder = project_home / "terrain_db"
-    if not dem_folder.exists():
-        _log_warn("Terrain terrain_db folder not found, proceeding without terrain data")
-        return None, None
+    shp_files = list(dem_folder.glob("*.shp")) if dem_folder.exists() else []
 
-    shp_files = list(dem_folder.glob("*.shp"))
     if not shp_files:
-        _log_warn("No shapefile found in terrain_db folder, proceeding without terrain data")
-        return None, None
+        _log_warn("No DEM shapefile found in terrain_db. Trying GeoTIFF fallback...")
+        if conf_raw:
+            created = ensure_dem_shp_from_tif(conf_raw, project_home)
+            if created and created.exists():
+                shp_files = list(dem_folder.glob("*.shp"))
+        if not shp_files:
+            _log_warn("No DEM shapefile available, proceeding without terrain data")
+            return None, None
 
     dem_shp = shp_files[0]
     _log_info(f"Loading DEM from: {dem_shp}")
@@ -382,6 +444,23 @@ def _load_dem_data(project_home: Path, work_crs: str, elevation_field: str = "el
             return shapely_transform(lambda x, y, z=None: (x, y), geom)
 
         dem_gdf['geometry'] = dem_gdf['geometry'].apply(force_2d)
+
+        # Validate DEM coverage against target bounds (lon/lat) if available
+        target_bounds = _parse_target_lonlat_from_conf(conf_raw)
+        if target_bounds:
+            try:
+                if dem_gdf.crs is None:
+                    _log_warn("DEM shapefile has no CRS; assume EPSG:4326 for coverage check.")
+                    dem_wgs84 = dem_gdf
+                else:
+                    dem_wgs84 = dem_gdf
+                    if dem_gdf.crs.to_epsg() != 4326:
+                        dem_wgs84 = dem_gdf.to_crs(epsg=4326)
+                ib_minx, ib_miny, ib_maxx, ib_maxy = dem_wgs84.total_bounds
+                input_bounds = (float(ib_minx), float(ib_maxx), float(ib_miny), float(ib_maxy))
+                _confirm_bbox_coverage("DEM SHP", target_bounds, input_bounds)
+            except Exception as e:
+                _log_warn(f"Failed to validate DEM SHP bounds: {e}")
 
         # Reproject to working CRS if needed
         if dem_gdf.crs != work_crs:
@@ -975,7 +1054,7 @@ def buildBC_dev(
 
         # Load DEM data (will be reprojected to UTM)
         project_home = conf_file.parent
-        dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs)
+        dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs, conf_raw=conf.get("__raw__"))
 
         # Get UTM CRS first
         utm_crs = _get_fixed_utm_crs(conf.get("__raw__"))
@@ -986,6 +1065,22 @@ def buildBC_dev(
         ds = _ensure_dim_index_coords(ds)
         if "lon" in ds.dims and "lat" in ds.dims:
             ds = ds.chunk({"lon": 64, "lat": 64})
+
+        # Validate wind data coverage before cropping
+        target_bounds = _parse_target_lonlat_from_conf(conf.get("__raw__"))
+        if target_bounds:
+            try:
+                lon_geo = ds["lon_geo"].values
+                lat_geo = ds["lat_geo"].values
+                input_bounds = (
+                    float(np.nanmin(lon_geo)),
+                    float(np.nanmax(lon_geo)),
+                    float(np.nanmin(lat_geo)),
+                    float(np.nanmax(lat_geo)),
+                )
+                _confirm_bbox_coverage("Wind NC", target_bounds, input_bounds)
+            except Exception as e:
+                _log_warn(f"Failed to validate wind NC bounds: {e}")
 
         # UTM-based crop (same coordinate system as DEM)
         ds = _crop_wind_by_utm_bounds(ds, conf.get("__raw__"), utm_crs)
@@ -1862,4 +1957,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     buildBC_dev(args.conf_file, elevation_scale=args.elevation_scale)
-

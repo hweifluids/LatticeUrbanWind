@@ -2,9 +2,9 @@ casename = example
 cut_lon_manual=[121.3,121.7]
 cut_lat_manual=[31.1,31.4]
 datetime = 20251010120000
-z 1imit= 500
+z_1imit= 500
 base_height=50
-midmesh basesize=10
+midmesh_basesize=10
 
 
 

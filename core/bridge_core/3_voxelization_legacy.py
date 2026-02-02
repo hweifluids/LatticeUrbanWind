@@ -15,6 +15,7 @@ from trimesh import boolean
 import re
 from scipy.interpolate import griddata
 from auto_UTM import get_utm_crs_from_conf
+from dem_tif_to_shp import ensure_dem_shp_from_tif
 
 def _make_valid(geom):
     """
@@ -754,7 +755,12 @@ def main():
         if dem_path and dem_path.exists():
             dem_points, dem_elevations = load_dem_data(dem_path, work_crs)
         else:
-            print("[INFO] No DEM data available, will create flat terrain")
+            print("[INFO] No DEM shapefile found. Trying GeoTIFF fallback...")
+            created = ensure_dem_shp_from_tif(txt_conf, project_home)
+            if created and created.exists():
+                dem_points, dem_elevations = load_dem_data(created, work_crs)
+            else:
+                print("[INFO] No DEM data available, will create flat terrain")
 
     # Auto-detect height field
     if args.height_field == "auto":
@@ -1027,5 +1033,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
