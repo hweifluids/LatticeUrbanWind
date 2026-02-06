@@ -7,15 +7,17 @@ import threading
 import datetime
 import traceback
 import os
+import locale
+import codecs
 
-print("│───────────────────────────────────────────────────────────────────│")
-print("│  Project:   WRFcpLBM - toolbox for WRF-FluidX3D coupling          │")
-print("│  Module:    MAKELUW - THE MAKING OF LUW                           │")
-print("│  Author:    Huanxia Wei                                           │")
-print("│  Email:     huanxia.wei@u.nus.edu                                 │")
-print("│  Version:   <20251031A-GPU>                                       │")
-print("│  License:   Customized License.                                   │")
-print("│───────────────────────────────────────────────────────────────────│")
+print("|-------------------------------------------------------------------|")
+print("|  Project:   WRFcpLBM - toolbox for WRF-FluidX3D coupling          |")
+print("|  Module:    MAKELUW - THE MAKING OF LUW                           |")
+print("|  Author:    Huanxia Wei                                           |")
+print("|  Email:     huanxia.wei@u.nus.edu                                 |")
+print("|  Version:   <20251031A-GPU>                                       |")
+print("|  License:   Customized License.                                   |")
+print("|-------------------------------------------------------------------|")
 
 
 # ──── LOGGER ─────────────────────────────────────────────────
@@ -148,13 +150,46 @@ if len(sys.argv) != 2:
 deck_path = pathlib.Path(sys.argv[1]).resolve()
 
 # === 2) transfer STDIO =========================================================
-def _forward_output(proc, log):
+def _forward_output(proc, terminal, log):
     """
-    transfer STDOUT
+    Forward child STDOUT/STDERR to the user's terminal and to the log file.
+
+    Notes:
+    - Child processes write prompts without trailing newlines (e.g. input("...: ")).
+      We must forward partial lines immediately; do not rely on line-buffering.
+    - Avoid routing through Logger/print(), which buffers until newline.
     """
-    for ch in iter(lambda: proc.stdout.read(1), ''):   
-        print(ch, end='', flush=True)
-        log.write(ch)
+    if proc.stdout is None:
+        return
+
+    # IMPORTANT:
+    # Do NOT use TextIOWrapper.read(N) here; on pipes it may block until N chars are read,
+    # which makes console output appear "stuck" for a long time. Use os.read() to stream
+    # whatever bytes are currently available.
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+
+    fd = proc.stdout.fileno()
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        text = decoder.decode(data, final=False)
+        if text:
+            terminal.write(text)
+            terminal.flush()
+            log.write(text)
+            log.flush()
+
+    # Flush any remaining decoder state (in case the stream ends mid-codepoint)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        terminal.write(tail)
+        terminal.flush()
+        log.write(tail)
         log.flush()
 
 def run_script(script: pathlib.Path, log):
@@ -165,17 +200,47 @@ def run_script(script: pathlib.Path, log):
     # -u means unbuffered
     args = [sys.executable, "-u", str(script), str(deck_path)]
 
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,               # universal_newlines=True（Py3.7+）
-        bufsize=0                # raw buffering
-        # stdin=None
-    )
+    # If this launcher is executed in a pipeline / redirected context, sys.stdin may not be
+    # connected to the interactive console, causing input() in child scripts to hit EOFError.
+    # In that case, try to explicitly bind child stdin to the console device.
+    child_stdin = None
+    child_stdin_needs_close = False
+    try:
+        stdin_src = sys.__stdin__ if sys.__stdin__ is not None else sys.stdin
+        if stdin_src is not None:
+            try:
+                if stdin_src.isatty():
+                    # Explicitly pass stdin to avoid Windows handle inheritance edge-cases when
+                    # stdout is redirected to a pipe.
+                    child_stdin = stdin_src
+                else:
+                    # Prefer real console input even if we are running in a pipeline.
+                    if os.name == "nt":
+                        child_stdin = open("CONIN$", "r", encoding=sys.getdefaultencoding(), errors="replace")
+                    else:
+                        child_stdin = open("/dev/tty", "r", encoding=sys.getdefaultencoding(), errors="replace")
+                    child_stdin_needs_close = True
+            except Exception:
+                child_stdin = None  # fallback: inherit whatever stdin we have
+
+        proc = subprocess.Popen(
+            args,
+            stdin=child_stdin,         # may be None to inherit
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,                # stream bytes; decode in _forward_output()
+            bufsize=0,                 # unbuffered pipe reader
+        )
+    finally:
+        if child_stdin_needs_close and child_stdin is not None:
+            try:
+                child_stdin.close()
+            except Exception:
+                pass
 
     # main threading
-    t = threading.Thread(target=_forward_output, args=(proc, log), daemon=True)
+    terminal = getattr(sys.stdout, "terminal", sys.__stdout__)
+    t = threading.Thread(target=_forward_output, args=(proc, terminal, log), daemon=True)
     t.start()
     proc.wait()      # allow interaction
     t.join()

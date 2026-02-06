@@ -16,6 +16,7 @@ import shutil
 import os
 import sys
 import re
+import time
 
 # limit threads for numpy/scipy to avoid over-subscription
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -376,29 +377,138 @@ def _bbox_contains(target_bounds: Tuple[float, float, float, float],
     return (i_lon_min <= t_lon_min) and (i_lon_max >= t_lon_max) and (i_lat_min <= t_lat_min) and (i_lat_max >= t_lat_max)
 
 
+def _bbox_max_miss_percent(target_bounds: Tuple[float, float, float, float],
+                           input_bounds: Tuple[float, float, float, float]) -> float:
+    """
+    Return the max under-coverage percentage of input_bounds relative to target_bounds.
+    This is intended to tolerate tiny floating/rounding mismatches.
+    """
+    t_lon_min, t_lon_max, t_lat_min, t_lat_max = target_bounds
+    i_lon_min, i_lon_max, i_lat_min, i_lat_max = input_bounds
+
+    lon_span = abs(t_lon_max - t_lon_min)
+    lat_span = abs(t_lat_max - t_lat_min)
+    if lon_span <= 0.0 or lat_span <= 0.0:
+        return 100.0
+
+    miss_lon_min = max(0.0, i_lon_min - t_lon_min)
+    miss_lon_max = max(0.0, t_lon_max - i_lon_max)
+    miss_lat_min = max(0.0, i_lat_min - t_lat_min)
+    miss_lat_max = max(0.0, t_lat_max - i_lat_max)
+
+    lon_pct = (max(miss_lon_min, miss_lon_max) / lon_span) * 100.0
+    lat_pct = (max(miss_lat_min, miss_lat_max) / lat_span) * 100.0
+    return max(lon_pct, lat_pct)
+
+
+def _timed_input_line(prompt: str, timeout_s: float) -> Optional[str]:
+    """
+    Read a line from stdin with timeout.
+    Returns the line (without trailing newline) or None if timeout/EOF happens.
+
+    On Windows, uses msvcrt to avoid blocking forever on console input.
+    On non-Windows, falls back to select() where available.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    try:
+        import msvcrt  # type: ignore
+    except Exception:
+        msvcrt = None  # type: ignore
+
+    if msvcrt is not None:
+        buf: list[str] = []
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(buf)
+
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+
+                if ch == "\b":
+                    if buf:
+                        buf.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                    continue
+
+                if ch in ("\x00", "\xe0"):
+                    try:
+                        msvcrt.getwch()
+                    except Exception:
+                        pass
+                    continue
+
+                buf.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+            time.sleep(0.05)
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return None
+
+    try:
+        import select
+
+        ready, _, _ = select.select([sys.stdin], [], [], float(timeout_s))
+        if not ready:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return None
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        return line.rstrip("\r\n")
+    except Exception:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return None
+
+
 def _confirm_bbox_coverage(kind: str,
                            target_bounds: Tuple[float, float, float, float],
                            input_bounds: Tuple[float, float, float, float]) -> None:
     if _bbox_contains(target_bounds, input_bounds):
         return
 
+    max_miss_pct = _bbox_max_miss_percent(target_bounds, input_bounds)
+    if max_miss_pct < 0.1:
+        _log_warn(f"{kind} bounds are slightly smaller than target (max miss {max_miss_pct:.4f}% < 0.1%). Continue without interruption.")
+        return
+
     _log_warn(f"{kind} bounds do not fully cover the target area.")
     _log_warn(f"Target lon/lat bounds: {_format_lonlat_bounds(target_bounds)}")
     _log_warn(f"Input  lon/lat bounds: {_format_lonlat_bounds(input_bounds)}")
 
-    while True:
-        try:
-            ans = input("Continue anyway? (Y/N): ").strip().lower()
-        except EOFError:
-            _log_error("No user input available. Exiting.")
-            sys.exit(1)
-        if ans in ("y", "yes"):
-            _log_warn("User chose to continue despite bounds mismatch.")
-            return
-        if ans in ("n", "no"):
-            _log_info("User canceled. Exiting.")
-            sys.exit(1)
-        _log_warn("Please input Y or N.")
+    timeout_s = 5.0
+    ans_raw = _timed_input_line(
+        f"Continue anyway? (Y/N) [auto-continue in {int(timeout_s)}s]: ",
+        timeout_s=timeout_s,
+    )
+    if ans_raw is None:
+        _log_warn(f"No input received (timeout {int(timeout_s)}s). Continuing by default.")
+        return
+
+    ans = ans_raw.strip().lower()
+    if ans in ("n", "no"):
+        _log_info("User canceled. Exiting.")
+        sys.exit(1)
+
+    if ans in ("y", "yes", ""):
+        _log_warn("Continuing despite bounds mismatch.")
+        return
+
+    _log_warn(f"Invalid input '{ans_raw}'. Continuing by default.")
+    return
 
 
 def _load_dem_data(
@@ -1135,6 +1245,13 @@ def buildBC_dev(
             ds = ds.persist()
             _log_info("Finished lon/lat/vertical interpolation")
 
+            # IMPORTANT: ds.interp() may change the vertical coordinate values/length
+            # (e.g., height 4 -> 10). Refresh (vert, lev) to stay consistent with
+            # the interpolated dataset; otherwise the later vertical remap may fall
+            # back to index-based z levels and collapse z_top.
+            ds, vert, lev = _detect_vertical_dim_and_levels(ds)
+            _log_info(f"Refreshed vertical levels after interpolation: {vert} ({int(np.asarray(lev).size)} levels)")
+
         # extract variables (support WRF names and WRF staggered grids)
         u_name = _resolve_wind_var_name(ds, var_u, ("u", "U"), "u")
         v_name = _resolve_wind_var_name(ds, var_v, ("v", "V"), "v")
@@ -1631,6 +1748,16 @@ def buildBC_dev(
             _log_info(f"Applying terrain-following coordinates with fixed top at {z_max_output:.2f}m")
             _log_info(f"DEM elevation difference range: {dem_grid.min():.2f}m to {dem_grid.max():.2f}m")
             _log_info(f"Bottom elevation range: {base_height + dem_grid.min():.2f}m to {base_height + dem_grid.max():.2f}m")
+
+            dem_max_scaled = float(np.nanmax(dem_grid)) * float(elevation_scale)
+            if math.isfinite(dem_max_scaled):
+                ground_z_max = float(base_height) + dem_max_scaled
+                if z_max_output <= ground_z_max + 1e-6:
+                    _log_warn(
+                        "Top boundary is not above terrain everywhere: "
+                        f"z_top={z_max_output:.2f}m <= ground_max={ground_z_max:.2f}m. "
+                        "Boundary CSV may contain very few points; check vertical levels in the input NC."
+                    )
         else:
             _log_info(f"No DEM data, applying flat base offset: Z = Z_grid + {base_height}m")
 

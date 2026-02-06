@@ -56,9 +56,12 @@ def compare_xy(stl: dict, csv: dict) -> tuple[bool, dict]:
     for axis in ("x", "y"):
         smin, smax, sspan = stl[axis]
         cmin, cmax, cspan = csv[axis]
-        err_min = abs(smin - cmin) / (abs(smin) if smin != 0 else 1.0)
-        err_max = abs(smax - cmax) / (abs(smax) if smax != 0 else 1.0)
-        err_span = abs(sspan - cspan) / (abs(sspan) if sspan != 0 else 1.0)
+        # Use span-based normalization; min can be 0 for local-domain coordinates,
+        # where abs(smin) would make the relative error meaningless.
+        denom = abs(sspan) if sspan != 0 else (max(abs(smin), abs(smax), 1.0))
+        err_min = abs(smin - cmin) / denom
+        err_max = abs(smax - cmax) / denom
+        err_span = abs(sspan - cspan) / denom
         res[axis] = {"min": err_min, "max": err_max, "span": err_span}
         max_err = max(max_err, err_min, err_max, err_span)
     return max_err < TOL, res
@@ -334,7 +337,7 @@ def main() -> None:
     else:
         border = "=" * 60
         print(border)
-        print("WARNING: XY range mismatch exceeds 0.01%!")
+        print("WARNING: XY range mismatch exceeds 0.1%!")
         for ax, e in errs.items():
             print(f"  Axis {ax}: min={e['min']*100:.6f}%, max={e['max']*100:.6f}%, span={e['span']*100:.6f}%")
         print(border)

@@ -22,6 +22,24 @@ from scipy.interpolate import griddata
 from auto_UTM import get_utm_crs_from_conf_raw
 from dem_tif_to_shp import ensure_dem_shp_from_tif
 
+def _parse_base_height_from_conf_raw(conf_raw: str) -> float | None:
+    """
+    Parse base_height from conf raw text if present.
+    Mirrors core/bridge_core/1_buildBC.py behavior.
+    """
+    if not conf_raw:
+        return None
+    m = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
+    if not m:
+        return None
+    try:
+        v = float(m.group(1))
+    except Exception:
+        return None
+    if (not math.isfinite(v)) or (v < 0.0):
+        return None
+    return v
+
 def _make_valid(geom):
     """
     Make geometry valid using shapely's make_valid or buffer(0) as fallback.
@@ -123,6 +141,16 @@ def convert_pkl_dem_to_points(dem_data):
     # Flatten to point cloud
     points_xy = np.column_stack([X_abs.ravel(), Y_abs.ravel()])
     elevations = dem_grid.ravel()
+
+    # Robustness: some legacy pkls may store absolute elevations instead of diffs.
+    # Normalize to datum (min=0) to match load_dem_data() behavior.
+    try:
+        elev_min = float(np.nanmin(elevations))
+    except Exception:
+        elev_min = None
+    if elev_min is not None and math.isfinite(elev_min) and abs(elev_min) > 1e-6:
+        elevations = elevations - elev_min
+        print(f"[INFO] Adjusted PKL DEM to datum (lowest point = 0). Datum offset applied: {elev_min:.2f}m")
 
     print(f"[INFO] Converted DEM grid to {len(elevations)} points in absolute UTM coordinates")
 
@@ -277,6 +305,17 @@ def create_elevation_lookup_grid(base_poly, dem_points, dem_elevations, grid_res
     # Ensure minimum is at least 0 (in case smoothing created negative values)
     if Z.min() < 0:
         Z = np.maximum(Z, 0.0)
+
+    # Normalize to local datum (minimum within the CFD domain grid = 0).
+    # This matches core/bridge_core/1_buildBC.py behavior and avoids a constant offset
+    # when DEM points include an expanded area outside the CFD bounds or when smoothing
+    # lifts the minimum above 0.
+    z_min_grid = float(Z.min())
+    if abs(z_min_grid) > 1e-9:
+        Z = Z - z_min_grid
+        # Numerical safety
+        if Z.min() < 0:
+            Z = np.maximum(Z, 0.0)
 
     # Apply elevation scale
     if elevation_scale != 1.0:
@@ -435,6 +474,17 @@ def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_res
     if Z.min() < 0:
         print(f"[WARN] Smoothing created negative values (min={Z.min():.2f}m), clipping to 0")
         Z = np.maximum(Z, 0.0)
+
+    # Normalize to local datum (minimum within the CFD domain grid = 0).
+    # This matches core/bridge_core/1_buildBC.py behavior and avoids a constant offset
+    # when DEM points include an expanded bbox outside the CFD bounds or when smoothing
+    # lifts the minimum above 0.
+    z_min_grid = float(Z.min())
+    if abs(z_min_grid) > 1e-9:
+        print(f"[INFO] Normalizing terrain to local datum (grid min -> 0). Offset removed: {z_min_grid:.3f}m")
+        Z = Z - z_min_grid
+        if Z.min() < 0:
+            Z = np.maximum(Z, 0.0)
 
     # Apply elevation scale (for visualization/testing)
     if elevation_scale != 1.0:
@@ -695,6 +745,13 @@ def main():
         help="path to DEM shapefile. If not provided, will look for DEM folder in project home"
     )
     parser.add_argument(
+        "--dem-source",
+        type=str,
+        choices=("auto", "shp", "pkl"),
+        default="auto",
+        help="DEM source selection. auto=prefer shapefile/GeoTIFF then fallback to PKL. Default: auto"
+    )
+    parser.add_argument(
         "--terrain-resolution",
         type=float,
         default=50.0,
@@ -733,8 +790,8 @@ def main():
     parser.add_argument(
         "--base-height",
         type=float,
-        default=50.0,
-        help="Base layer height in meters (terrain sits on top of this). Default: 50.0"
+        default=None,
+        help="Base layer height in meters (terrain sits on top of this). If not set, will read base_height from conf (fallback 50.0)."
     )
 
     args = parser.parse_args()
@@ -752,6 +809,15 @@ def main():
     if not m_case:
         raise RuntimeError("casename not found in conf")
     case_name = m_case.group(1)
+
+    # If --base-height is not provided, read from conf (same behavior as 1_buildBC.py)
+    if args.base_height is None:
+        conf_base_height = _parse_base_height_from_conf_raw(txt_conf)
+        args.base_height = conf_base_height if conf_base_height is not None else 50.0
+    if (not math.isfinite(float(args.base_height))) or (float(args.base_height) < 0.0):
+        args.base_height = 50.0
+    print(f"[INFO] Base height: {args.base_height} m")
+
     try:
         utm_crs = get_utm_crs_from_conf_raw(txt_conf, default_epsg=None)
     except Exception as e:
@@ -799,27 +865,19 @@ def main():
     print(f"[INFO] Working CRS for CFD domain: {work_crs}")
 
 
-    # Try to load DEM data from pkl first (generated by 1_buildBC_with_dem.py)
+    # DEM loading strategy (prefer SHP/GeoTIFF by default; PKL is typically coarser and may cause blocky terrain)
     proj_temp = project_home / "proj_temp"
     dem_pkl_path = proj_temp / "dem_grid.pkl"
-    dem_data_pkl = load_dem_from_pkl(dem_pkl_path)
 
     dem_points, dem_elevations = None, None
+    dem_data_pkl = None
     use_pkl_dem = False
 
-    if dem_data_pkl is not None:
-        # Use DEM data from pkl
-        print("[INFO] Using DEM data from pkl file (generated by 1_buildBC_with_dem.py)")
-        use_pkl_dem = True
-        # Convert grid to point cloud for compatibility with existing functions
-        dem_points, dem_elevations = convert_pkl_dem_to_points(dem_data_pkl)
-    else:
-        # Fallback: Load DEM data from shapefile
-        print("[INFO] No pkl file found, trying to load DEM from shapefile")
+    def _try_load_dem_shp() -> tuple[np.ndarray | None, np.ndarray | None]:
         if args.dem_path:
             dem_path = Path(args.dem_path)
+            print(f"[INFO] Using user-provided DEM shapefile: {dem_path}")
         else:
-            # Look for DEM folder in project home (prefer terrain_db, then DEM)
             dem_path = None
             for folder_name in ("terrain_db", "DEM"):
                 dem_folder = project_home / folder_name
@@ -831,19 +889,45 @@ def main():
                         break
                     else:
                         print(f"[WARN] No DEM shapefile found in {folder_name} folder")
-            if dem_path is None:
-                print("[WARN] No DEM shapefile found under terrain_db or DEM")
-
-
         if dem_path and dem_path.exists():
-            dem_points, dem_elevations = load_dem_data(dem_path, work_crs)
-        else:
-            print("[INFO] No DEM shapefile found. Trying GeoTIFF fallback...")
-            created = ensure_dem_shp_from_tif(txt_conf, project_home)
-            if created and created.exists():
-                dem_points, dem_elevations = load_dem_data(created, work_crs)
-            else:
-                print("[INFO] No DEM data available, will create flat terrain")
+            return load_dem_data(dem_path, work_crs)
+        print("[INFO] No DEM shapefile found. Trying GeoTIFF fallback...")
+        created = ensure_dem_shp_from_tif(txt_conf, project_home)
+        if created and created.exists():
+            return load_dem_data(created, work_crs)
+        return None, None
+
+    def _try_load_dem_pkl() -> tuple[np.ndarray | None, np.ndarray | None, dict | None]:
+        pkl_data = load_dem_from_pkl(dem_pkl_path)
+        if pkl_data is None:
+            return None, None, None
+        pts, elevs = convert_pkl_dem_to_points(pkl_data)
+        return pts, elevs, pkl_data
+
+    if args.dem_source in ("auto", "shp"):
+        print("[INFO] Loading DEM from shapefile/GeoTIFF ...")
+        dem_points, dem_elevations = _try_load_dem_shp()
+
+    if dem_points is None and args.dem_source in ("auto", "pkl", "shp"):
+        if args.dem_source == "shp":
+            print("[WARN] DEM shapefile/GeoTIFF not available. Falling back to PKL if present.")
+        print("[INFO] Loading DEM from PKL ...")
+        dem_points, dem_elevations, dem_data_pkl = _try_load_dem_pkl()
+        use_pkl_dem = dem_data_pkl is not None and dem_points is not None and dem_elevations is not None
+        if use_pkl_dem:
+            print("[INFO] Using DEM data from pkl file (dem_grid.pkl)")
+            try:
+                pkl_base_height = _safe_float(dem_data_pkl.get("base_height"))
+            except Exception:
+                pkl_base_height = None
+            if pkl_base_height is not None and abs(float(pkl_base_height) - float(args.base_height)) > 1e-6:
+                print(
+                    f"[WARN] PKL base_height={float(pkl_base_height):.3f}m differs from current base_height={float(args.base_height):.3f}m. "
+                    f"STL will use base_height={float(args.base_height):.3f}m."
+                )
+
+    if dem_points is None:
+        print("[INFO] No DEM data available, will create flat terrain")
 
     # Auto-detect height field
     if args.height_field == "auto":

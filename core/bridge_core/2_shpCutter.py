@@ -17,10 +17,11 @@ from pyproj import Transformer
 import sys
 import numpy as np
 from auto_UTM import get_utm_epsg_from_lonlat, get_utm_crs_from_bounds
+import time
 
 # ----------------------- Helpers -----------------------
 
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 import re
 
 def get_lonlat(conf_path: Union[str, Path] | None = None) -> Tuple[Tuple[float, float], Tuple[float, float]]:
@@ -66,29 +67,138 @@ def _bbox_contains(target_bounds: Tuple[float, float, float, float],
     return (i_lon_min <= t_lon_min) and (i_lon_max >= t_lon_max) and (i_lat_min <= t_lat_min) and (i_lat_max >= t_lat_max)
 
 
+def _bbox_max_miss_percent(target_bounds: Tuple[float, float, float, float],
+                           input_bounds: Tuple[float, float, float, float]) -> float:
+    """
+    Return the max under-coverage percentage of input_bounds relative to target_bounds.
+    This is intended to tolerate tiny floating/rounding mismatches.
+    """
+    t_lon_min, t_lon_max, t_lat_min, t_lat_max = target_bounds
+    i_lon_min, i_lon_max, i_lat_min, i_lat_max = input_bounds
+
+    lon_span = abs(t_lon_max - t_lon_min)
+    lat_span = abs(t_lat_max - t_lat_min)
+    if lon_span <= 0.0 or lat_span <= 0.0:
+        return 100.0
+
+    miss_lon_min = max(0.0, i_lon_min - t_lon_min)
+    miss_lon_max = max(0.0, t_lon_max - i_lon_max)
+    miss_lat_min = max(0.0, i_lat_min - t_lat_min)
+    miss_lat_max = max(0.0, t_lat_max - i_lat_max)
+
+    lon_pct = (max(miss_lon_min, miss_lon_max) / lon_span) * 100.0
+    lat_pct = (max(miss_lat_min, miss_lat_max) / lat_span) * 100.0
+    return max(lon_pct, lat_pct)
+
+
+def _timed_input_line(prompt: str, timeout_s: float) -> Optional[str]:
+    """
+    Read a line from stdin with timeout.
+    Returns the line (without trailing newline) or None if timeout/EOF happens.
+
+    On Windows, uses msvcrt to avoid blocking forever on console input.
+    On non-Windows, falls back to select() where available.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    try:
+        import msvcrt  # type: ignore
+    except Exception:
+        msvcrt = None  # type: ignore
+
+    if msvcrt is not None:
+        buf: list[str] = []
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(buf)
+
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+
+                if ch == "\b":
+                    if buf:
+                        buf.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                    continue
+
+                if ch in ("\x00", "\xe0"):
+                    try:
+                        msvcrt.getwch()
+                    except Exception:
+                        pass
+                    continue
+
+                buf.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+            time.sleep(0.05)
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return None
+
+    try:
+        import select
+
+        ready, _, _ = select.select([sys.stdin], [], [], float(timeout_s))
+        if not ready:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return None
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        return line.rstrip("\r\n")
+    except Exception:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return None
+
+
 def _confirm_bbox_coverage(kind: str,
                            target_bounds: Tuple[float, float, float, float],
                            input_bounds: Tuple[float, float, float, float]) -> None:
     if _bbox_contains(target_bounds, input_bounds):
         return
 
+    max_miss_pct = _bbox_max_miss_percent(target_bounds, input_bounds)
+    if max_miss_pct < 0.1:
+        print(f"[WARN] {kind} bounds are slightly smaller than target (max miss {max_miss_pct:.4f}% < 0.1%). Continue without interruption.")
+        return
+
     print(f"[WARN] {kind} bounds do not fully cover the target area.")
     print(f"[WARN] Target lon/lat bounds: {_format_lonlat_bounds(target_bounds)}")
     print(f"[WARN] Input  lon/lat bounds: {_format_lonlat_bounds(input_bounds)}")
 
-    while True:
-        try:
-            ans = input("Continue anyway? (Y/N): ").strip().lower()
-        except EOFError:
-            print("[ERROR] No user input available. Exiting.")
-            sys.exit(1)
-        if ans in ("y", "yes"):
-            print("[WARN] User chose to continue despite bounds mismatch.")
-            return
-        if ans in ("n", "no"):
-            print("[INFO] User canceled. Exiting.")
-            sys.exit(1)
-        print("Please input Y or N.")
+    timeout_s = 5.0
+    ans_raw = _timed_input_line(
+        f"Continue anyway? (Y/N) [auto-continue in {int(timeout_s)}s]: ",
+        timeout_s=timeout_s,
+    )
+    if ans_raw is None:
+        print(f"[WARN] No input received (timeout {int(timeout_s)}s). Continuing by default.")
+        return
+
+    ans = ans_raw.strip().lower()
+    if ans in ("n", "no"):
+        print("[INFO] User canceled. Exiting.")
+        sys.exit(1)
+
+    if ans in ("y", "yes", ""):
+        print("[WARN] Continuing despite bounds mismatch.")
+        return
+
+    print(f"[WARN] Invalid input '{ans_raw}'. Continuing by default.")
+    return
 
 def select_height_column(gdf: gpd.GeoDataFrame):
     """Return the name of a height-like column if found, else None."""
