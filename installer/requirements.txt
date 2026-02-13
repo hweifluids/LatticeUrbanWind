@@ -19,3 +19,5 @@ pyopencl
 rasterio
 blender
 manifold3d
+tqdm
+pyogrio
