@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <thread>
+#include <vector>
 
 enum class FaceKind { ZTop, XMin, XMax, YMin, YMax, None };
 
@@ -12,6 +14,16 @@ static inline FaceKind pick_face(uint x, uint y, uint z, uint Nx, uint Ny, uint 
     if (y == 0u)      return FaceKind::YMin;
     if (y == Ny - 1u) return FaceKind::YMax;
     return FaceKind::None;
+}
+
+struct BoundaryCell {
+    unsigned long long n = 0ull;
+    FaceKind face = FaceKind::None;
+};
+
+static inline uint detect_flux_threads() {
+    const unsigned hw = std::thread::hardware_concurrency();
+    return (hw == 0u) ? 1u : static_cast<uint>(hw);
 }
 
 void apply_flux_correction(LBM& lbm,
@@ -35,21 +47,35 @@ void apply_flux_correction(LBM& lbm,
     };
 
     const bool fill_downstream = static_cast<bool>(inlet_eval);
+    const uint threads = (Ntot < 4096ull) ? 1u : detect_flux_threads();
 
-    for (unsigned long long n = 0ull; n < Ntot; ++n) {
-        uint x=0u, y=0u, z=0u;
+    std::vector<std::vector<BoundaryCell>> boundary_per_thread(threads);
+    for (uint t = 0u; t < threads; ++t) boundary_per_thread[t].reserve(1024u);
+
+    parallel_for((ulong)Ntot, threads, [&](ulong n, uint t) {
+        uint x = 0u, y = 0u, z = 0u;
         lbm.coordinates(n, x, y, z);
-        if (z == 0u) continue;
-        const bool on_outer = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u);
-        if (!on_outer) continue;
+        if (z == 0u) return;
+
+        const FaceKind fk = pick_face(x, y, z, Nx, Ny, Nz);
+        if (fk == FaceKind::None) return;
 
         lbm.flags[n] = TYPE_E;
+        boundary_per_thread[t].push_back(BoundaryCell{ (unsigned long long)n, fk });
 
         if (fill_downstream && is_downstream(x, y, z)) {
             const float3 pos = lbm.position(x, y, z);
-            const float3 u   = inlet_eval(pos);
+            const float3 u = inlet_eval(pos);
             lbm.u.x[n] = u.x; lbm.u.y[n] = u.y; lbm.u.z[n] = u.z;
         }
+    });
+
+    size_t boundary_count = 0u;
+    for (uint t = 0u; t < threads; ++t) boundary_count += boundary_per_thread[t].size();
+    std::vector<BoundaryCell> boundary_cells;
+    boundary_cells.reserve(boundary_count);
+    for (uint t = 0u; t < threads; ++t) {
+        boundary_cells.insert(boundary_cells.end(), boundary_per_thread[t].begin(), boundary_per_thread[t].end());
     }
 
     double S_in = 0.0;
@@ -57,12 +83,9 @@ void apply_flux_correction(LBM& lbm,
     double net = 0.0;
     unsigned long long B = 0ull;
 
-    for (unsigned long long n = 0ull; n < Ntot; ++n) {
-        uint x=0u, y=0u, z=0u;
-        lbm.coordinates(n, x, y, z);
-        if (z == 0u) continue;
-        const FaceKind fk = pick_face(x, y, z, Nx, Ny, Nz);
-        if (fk == FaceKind::None) continue;
+    for (const BoundaryCell& bc : boundary_cells) {
+        const unsigned long long n = bc.n;
+        const FaceKind fk = bc.face;
         ++B;
 
         float vn = 0.0f;
@@ -92,12 +115,9 @@ void apply_flux_correction(LBM& lbm,
     double sumYMin = 0.0;  unsigned long long cntYMin = 0ull;
     double sumYMax = 0.0;  unsigned long long cntYMax = 0ull;
 
-    for (unsigned long long n = 0ull; n < Ntot; ++n) {
-        uint x=0u, y=0u, z=0u;
-        lbm.coordinates(n, x, y, z);
-        if (z == 0u) continue;
-        const FaceKind fk = pick_face(x, y, z, Nx, Ny, Nz);
-        if (fk == FaceKind::None) continue;
+    for (const BoundaryCell& bc : boundary_cells) {
+        const unsigned long long n = bc.n;
+        const FaceKind fk = bc.face;
 
         const float ox = lbm.u.x[n], oy = lbm.u.y[n], oz = lbm.u.z[n];
 
@@ -137,12 +157,9 @@ void apply_flux_correction(LBM& lbm,
     }
 
     double net_after_val = 0.0;
-    for (unsigned long long n = 0ull; n < Ntot; ++n) {
-        uint x=0u, y=0u, z=0u;
-        lbm.coordinates(n, x, y, z);
-        if (z == 0u) continue;
-        const FaceKind fk = pick_face(x, y, z, Nx, Ny, Nz);
-        if (fk == FaceKind::None) continue;
+    for (const BoundaryCell& bc : boundary_cells) {
+        const unsigned long long n = bc.n;
+        const FaceKind fk = bc.face;
         float vn = 0.0f;
         switch (fk) {
             case FaceKind::ZTop: vn =  lbm.u.z[n]; break;

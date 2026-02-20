@@ -233,17 +233,19 @@ static string now_str() {
  }
 
 static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, const uint Nz,
-                          const float* u_avg, const float* rho_avg,
+                          const float* u_avg, const float* rho_avg, const float* T_avg,
                           const float* M2_u, const float* M2_v, const float* M2_w,
                           const ulong avg_count, const bool convert_to_si_units) {
     if (!u_avg || !rho_avg) return;
     float spacing = 1.0f;
     float u_factor = 1.0f;
     float rho_factor = 1.0f;
+    float T_factor = 1.0f;
     if (convert_to_si_units) {
         spacing = units.si_x(1.0f);
         u_factor = units.si_u(1.0f);
         rho_factor = units.si_rho(1.0f);
+        T_factor = units.si_T(1.0f);
     }
     float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
     if (convert_to_si_units) origin += vtk_origin_shift;
@@ -295,6 +297,9 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
 
     write_field("u_avg", u_avg, 3u, u_factor);
     write_field("rho_avg", rho_avg, 1u, rho_factor);
+    if (T_avg) {
+        write_field("T_avg", T_avg, 1u, T_factor);
+    }
 
     std::vector<float> tke(points, 0.0f);
     if (avg_count > 1ull && M2_u && M2_v && M2_w) {
@@ -980,9 +985,15 @@ void main_setup() {
         const ulong avg_window = do_avg ? std::min((ulong)purge_avg_steps, total_steps) : 0ull;
         const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + 1ull) : max_ulong;
         const ulong Ncells = lbm.get_N();
+#ifdef TEMPERATURE
+        const bool include_temperature_avg = use_temperature_bc;
+#else
+        const bool include_temperature_avg = false;
+#endif
 
         std::vector<float> avg_u;
         std::vector<float> avg_rho;
+        std::vector<float> avg_T;
         std::vector<float> M2_u;
         std::vector<float> M2_v;
         std::vector<float> M2_w;
@@ -990,6 +1001,9 @@ void main_setup() {
         if (avg_window > 0ull) {
             avg_u.assign((size_t)(Ncells * 3ull), 0.0f);
             avg_rho.assign((size_t)Ncells, 0.0f);
+            if (include_temperature_avg) {
+                avg_T.assign((size_t)Ncells, 0.0f);
+            }
             M2_u.assign((size_t)Ncells, 0.0f);
             M2_v.assign((size_t)Ncells, 0.0f);
             M2_w.assign((size_t)Ncells, 0.0f);
@@ -1002,6 +1016,11 @@ void main_setup() {
             for (uint d = 0u; d < lbm.get_D(); ++d) {
                 lbm.lbm_domain[d]->u.enqueue_read_from_device();
                 lbm.lbm_domain[d]->rho.enqueue_read_from_device();
+#ifdef TEMPERATURE
+                if (include_temperature_avg) {
+                    lbm.lbm_domain[d]->T.enqueue_read_from_device();
+                }
+#endif
             }
             for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->finish_queue();
         };
@@ -1014,6 +1033,9 @@ void main_setup() {
             float* m2_u = M2_u.data();
             float* m2_v = M2_v.data();
             float* m2_w = M2_w.data();
+#ifdef TEMPERATURE
+            float* t_avg = include_temperature_avg ? avg_T.data() : nullptr;
+#endif
             parallel_for(Ncells, [&](ulong n) {
                 const ulong i3 = 3ull * n;
                 const float ux = lbm.u.x[n];
@@ -1043,6 +1065,12 @@ void main_setup() {
 
                 const float r = lbm.rho[n];
                 rho_avg[n]    += (r - rho_avg[n]) * inv_n;
+#ifdef TEMPERATURE
+                if (t_avg) {
+                    const float T = lbm.T[n];
+                    t_avg[n] += (T - t_avg[n]) * inv_n;
+                }
+#endif
             });
         };
 
@@ -1057,8 +1085,13 @@ void main_setup() {
             if (avg_count == 0ull) return;
             const std::string avg_name = vtk_prefix + datetime + "_avg";
             const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
+#ifdef TEMPERATURE
+            const float* T_avg_ptr = include_temperature_avg ? avg_T.data() : nullptr;
+#else
+            const float* T_avg_ptr = nullptr;
+#endif
             write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(),
-                          avg_u.data(), avg_rho.data(),
+                          avg_u.data(), avg_rho.data(), T_avg_ptr,
                           M2_u.data(), M2_v.data(), M2_w.data(),
                           avg_count, true);
             println("| Avg samples     | " + alignr(57u, to_string(avg_count)) + " |");
