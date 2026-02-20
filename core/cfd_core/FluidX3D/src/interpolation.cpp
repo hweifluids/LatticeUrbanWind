@@ -8,6 +8,30 @@
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+static inline unsigned detect_available_worker_threads() {
+#if defined(_WIN32)
+    using GetActiveProcessorCountFn = DWORD(WINAPI*)(WORD);
+    HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+    if (kernel32 != nullptr) {
+        auto get_active_processor_count =
+            reinterpret_cast<GetActiveProcessorCountFn>(GetProcAddress(kernel32, "GetActiveProcessorCount"));
+        if (get_active_processor_count != nullptr) {
+            constexpr WORD all_processor_groups = 0xFFFFu;
+            const DWORD win_hw = get_active_processor_count(all_processor_groups);
+            if (win_hw > 0u) return static_cast<unsigned>(win_hw);
+        }
+    }
+#endif
+    const unsigned hw0 = std::thread::hardware_concurrency();
+    return hw0 == 0u ? 4u : hw0;
+}
 
 static inline std::string now_str_local() {
     using namespace std::chrono;
@@ -47,8 +71,7 @@ void apply_inlet_outlet(LBM& lbm,
     unsigned long min_work_per_thread,
     bool show_progress) {
     const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
-    const unsigned hw0 = std::thread::hardware_concurrency();
-    const unsigned hw = hw0 == 0u ? 4u : hw0;
+    const unsigned hw = detect_available_worker_threads();
 
     unsigned num_threads = hw;
     #ifdef _MSC_VER
