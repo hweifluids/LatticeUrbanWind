@@ -58,21 +58,24 @@ def print_dataset_info(ds: xr.Dataset) -> None:
     # The __repr__ of an xarray Dataset already shows dimensions, coordinates and variables
     print(ds)
 
-    # Coordinate ranges for common longitude and latitude names
-    coord_candidates = ["lon", "longitude", "lat", "latitude"]
-    printed_any = False
-    for coord_name in coord_candidates:
-        if coord_name in ds.variables:
-            try:
-                data = ds[coord_name].values
-                data_min = float(data.min())
-                data_max = float(data.max())
-                print(f"\n*** {coord_name} range: min = {data_min}, max = {data_max}")
-                printed_any = True
-            except Exception as e:
-                print(f"\n*** Failed to compute range for '{coord_name}': {e}")
-    if not printed_any:
-        print("\nNo standard lon/lat coordinate variable was found in the dataset.")
+    print("\n===== Variable Ranges (All Variables) =====")
+    for var_name in ds.variables:
+        da = ds[var_name]
+        try:
+            if da.size == 0:
+                print(f"{var_name}: empty variable")
+                continue
+            data_min = da.min(skipna=True).item()
+            data_max = da.max(skipna=True).item()
+            quantiles = da.quantile([0.05, 0.95], skipna=True).values
+            q05 = quantiles[0].item() if hasattr(quantiles[0], "item") else quantiles[0]
+            q95 = quantiles[1].item() if hasattr(quantiles[1], "item") else quantiles[1]
+            print(
+                f"{var_name}: min = {data_min}, q05 = {q05}, "
+                f"q95 = {q95}, max = {data_max}"
+            )
+        except Exception as e:
+            print(f"{var_name}: failed to compute min/max/quantiles ({e})")
 
     print("\n===== Variable Details =====")
     for var in ds.data_vars:

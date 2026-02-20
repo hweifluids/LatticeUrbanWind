@@ -116,6 +116,40 @@ def _resolve_wind_var_name(ds: xr.Dataset, preferred: str, fallbacks: Tuple[str,
             return name
     raise KeyError(f"Wind variable {preferred} not found, and fallbacks also missing for {kind}")
 
+
+def _resolve_temperature_var_name(ds: xr.Dataset) -> Tuple[Optional[str], bool]:
+    """
+    Resolve temperature variable from raw NC variable names.
+    Returns:
+      (var_name, is_celsius)
+      - is_celsius=False: variable is already Kelvin
+      - is_celsius=True:  variable is Celsius and should be converted to Kelvin
+    """
+    kelvin_candidates = ("TK", "tk", "T", "t", "Temp", "temp", "Temperature", "temperature")
+    celsius_candidates = ("TC", "tc")
+
+    # Prefer data variables to avoid accidentally selecting coordinates.
+    t_kelvin = next((name for name in kelvin_candidates if name in ds.data_vars), None)
+    t_celsius = next((name for name in celsius_candidates if name in ds.data_vars), None)
+    if t_kelvin is None:
+        t_kelvin = _pick_first_existing_var(ds, kelvin_candidates)
+    if t_celsius is None:
+        t_celsius = _pick_first_existing_var(ds, celsius_candidates)
+
+    if t_celsius is not None:
+        if t_kelvin is not None:
+            _log_warn(
+                f"Both Kelvin and Celsius temperature fields found ({t_kelvin}, {t_celsius}); "
+                f"use {t_celsius} (Celsius) with conversion to Kelvin"
+            )
+        return t_celsius, True
+
+    if t_kelvin is not None:
+        return t_kelvin, False
+
+    return None, False
+
+
 def _destagger_wrf(da: xr.DataArray) -> xr.DataArray:
     """
     Destagger common WRF staggered dimensions by averaging adjacent grid points.
@@ -740,14 +774,18 @@ def _interpolate_dem_to_grid(dem_points: np.ndarray, dem_elevations: np.ndarray,
     return Z_diff
 
 
-def _forward_fill_whole_layer(u: np.ndarray, v: np.ndarray) -> None:
+def _forward_fill_whole_layer(primary: np.ndarray, *companions: np.ndarray) -> None:
     """
     Forward-fill entire vertical layers to eliminate NaNs.
+    NaN-layer detection is based on primary array. The same layer copy
+    operation is applied to all companions.
     """
-    nz = u.shape[0]
+    nz = primary.shape[0]
+    arrays = (primary,) + companions
+
     first_valid = None
     for k in range(nz):
-        if not np.isnan(u[k]).all():
+        if not np.isnan(primary[k]).all():
             first_valid = k
             break
 
@@ -755,13 +793,13 @@ def _forward_fill_whole_layer(u: np.ndarray, v: np.ndarray) -> None:
         raise ValueError("All vertical layers are NaN, invalid data")
 
     for k in range(first_valid):
-        u[k] = u[first_valid]
-        v[k] = v[first_valid]
+        for arr in arrays:
+            arr[k] = arr[first_valid]
 
     for k in range(first_valid + 1, nz):
-        if np.isnan(u[k]).all():
-            u[k] = u[k - 1]
-            v[k] = v[k - 1]
+        if np.isnan(primary[k]).all():
+            for arr in arrays:
+                arr[k] = arr[k - 1]
 
 def _fill_nan_3d_nearest(arr: np.ndarray, x2d: np.ndarray, y2d: np.ndarray) -> np.ndarray:
     """
@@ -1170,6 +1208,14 @@ def buildBC_dev(
         utm_crs = _get_fixed_utm_crs(conf.get("__raw__"))
 
         ds = xr.open_dataset(nc_path_resolved, chunks="auto")
+        temp_name, temp_is_celsius = _resolve_temperature_var_name(ds)
+        if temp_name is None:
+            _log_info("No temperature field found in input NC; CSV will keep columns X,Y,Z,u,v,w")
+        elif temp_is_celsius:
+            _log_info(f"Detected temperature field {temp_name} (Celsius); will convert to Kelvin for CSV")
+        else:
+            _log_info(f"Detected temperature field {temp_name} (Kelvin)")
+
         ds = _detect_and_rename_wrf_dims(ds)
         ds = _ensure_lonlat_geo_coords(ds)
         ds = _ensure_dim_index_coords(ds)
@@ -1255,6 +1301,9 @@ def buildBC_dev(
         # extract variables (support WRF names and WRF staggered grids)
         u_name = _resolve_wind_var_name(ds, var_u, ("u", "U"), "u")
         v_name = _resolve_wind_var_name(ds, var_v, ("v", "V"), "v")
+        if (temp_name is not None) and (temp_name not in ds.variables):
+            _log_warn(f"Temperature field {temp_name} is unavailable after preprocessing; skip temperature export")
+            temp_name = None
 
         w_name = None
         if "w" in ds.variables:
@@ -1273,6 +1322,11 @@ def buildBC_dev(
         else:
             da_w = _destagger_wrf(_isel_first_time_if_present(ds[w_name]))
 
+        if temp_name is None:
+            da_t = None
+        else:
+            da_t = _destagger_wrf(_isel_first_time_if_present(ds[temp_name]))
+
         if ("lat" in da_u.dims) and ("lon" in da_u.dims):
             if ("lat" in da_v.dims) and ("lon" in da_v.dims):
                 if (da_v.sizes["lat"] != da_u.sizes["lat"]) or (da_v.sizes["lon"] != da_u.sizes["lon"]):
@@ -1280,6 +1334,9 @@ def buildBC_dev(
             if (da_w is not None) and ("lat" in da_w.dims) and ("lon" in da_w.dims):
                 if (da_w.sizes["lat"] != da_u.sizes["lat"]) or (da_w.sizes["lon"] != da_u.sizes["lon"]):
                     da_w = da_w.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
+            if (da_t is not None) and ("lat" in da_t.dims) and ("lon" in da_t.dims):
+                if (da_t.sizes["lat"] != da_u.sizes["lat"]) or (da_t.sizes["lon"] != da_u.sizes["lon"]):
+                    da_t = da_t.interp(lat=da_u["lat"], lon=da_u["lon"], method="linear")
 
         u = da_u.transpose(vert, "lat", "lon").astype(np.float32).values
         v = da_v.transpose(vert, "lat", "lon").astype(np.float32).values
@@ -1287,6 +1344,26 @@ def buildBC_dev(
             w = np.zeros_like(u)
         else:
             w = da_w.transpose(vert, "lat", "lon").astype(np.float32).values
+
+        temp_k = None
+        if da_t is not None:
+            extra_t_dims = [d for d in da_t.dims if d not in (vert, "lat", "lon")]
+            if extra_t_dims:
+                _log_warn(
+                    f"Temperature field {temp_name} has extra dims {extra_t_dims}; "
+                    "use the first index on those dims"
+                )
+                da_t = da_t.isel({d: 0 for d in extra_t_dims})
+
+            if (vert not in da_t.dims) or ("lat" not in da_t.dims) or ("lon" not in da_t.dims):
+                _log_warn(
+                    f"Temperature field {temp_name} dims {tuple(da_t.dims)} are incompatible with "
+                    f"required ({vert}, lat, lon); skip temperature export"
+                )
+            else:
+                temp_k = da_t.transpose(vert, "lat", "lon").astype(np.float32).values
+                if temp_is_celsius:
+                    temp_k = (temp_k + np.float32(273.15)).astype(np.float32)
 
         # lev is resolved earlier by _detect_vertical_dim_and_levels(ds)
         lev = np.asarray(lev, dtype=np.float32)
@@ -1322,6 +1399,9 @@ def buildBC_dev(
         if np.isnan(u).any() or np.isnan(v).any():
             _log_warn("NaNs found. Apply vertical forward fill")
             _forward_fill_whole_layer(u, v)
+        if (temp_k is not None) and np.isnan(temp_k).any():
+            _log_warn("NaNs found in temperature field. Apply vertical forward fill")
+            _forward_fill_whole_layer(temp_k)
 
         # projection and rotation, use UTM CRS for CFD domain
         lon_min, lon_max = float(lon.min()), float(lon.max())
@@ -1395,11 +1475,14 @@ def buildBC_dev(
         y_src = y_rot - y_origin
 
         if (x_src.shape == u[0].shape) and (y_src.shape == u[0].shape):
-            if np.isnan(u).any() or np.isnan(v).any() or np.isnan(w).any():
-                _log_warn("NaNs found in wind components, fill horizontally by nearest neighbor in projected space")
+            has_nan_temp = (temp_k is not None) and np.isnan(temp_k).any()
+            if np.isnan(u).any() or np.isnan(v).any() or np.isnan(w).any() or has_nan_temp:
+                _log_warn("NaNs found in wind/temperature fields, fill horizontally by nearest neighbor in projected space")
                 u = _fill_nan_3d_nearest(u, x_src, y_src)
                 v = _fill_nan_3d_nearest(v, x_src, y_src)
                 w = _fill_nan_3d_nearest(w, x_src, y_src)
+                if temp_k is not None:
+                    temp_k = _fill_nan_3d_nearest(temp_k, x_src, y_src)
         else:
             _log_warn("Skip NaN horizontal fill because projected grid shape mismatch")
 
@@ -1489,6 +1572,15 @@ def buildBC_dev(
             verbose=False
         )
         w = w_m
+
+        if temp_k is not None:
+            temp_m, _, _, _ = _interp_to_uniform_meter_grid(
+                temp_k, temp_k, x_src, y_src,
+                nx=nx, ny=ny,
+                x_min=0.0, x_max=x_range_target, y_min=0.0, y_max=y_range_target,
+                verbose=False
+            )
+            temp_k = temp_m
 
         dz = 0.0
 
@@ -1580,6 +1672,8 @@ def buildBC_dev(
             u_m = u_m[::-1].copy()
             v_m = v_m[::-1].copy()
             w   = w[::-1].copy()
+            if temp_k is not None:
+                temp_k = temp_k[::-1].copy()
 
         # Build strictly increasing z source (AGL, do NOT prepend z=0 here)
         z_src_raw = lev_m.copy().astype(np.float32)
@@ -1610,10 +1704,16 @@ def buildBC_dev(
         f_u_z = interp1d(z_src_raw, u_m, axis=0, bounds_error=False, fill_value=(u_m[0], u_m[-1]))
         f_v_z = interp1d(z_src_raw, v_m, axis=0, bounds_error=False, fill_value=(v_m[0], v_m[-1]))
         f_w_z = interp1d(z_src_raw, w,   axis=0, bounds_error=False, fill_value=(w[0],   w[-1]))
+        if temp_k is not None:
+            f_t_z = interp1d(
+                z_src_raw, temp_k, axis=0, bounds_error=False, fill_value=(temp_k[0], temp_k[-1])
+            )
 
         u_m = f_u_z(z_new).astype(np.float32)
         v_m = f_v_z(z_new).astype(np.float32)
         w   = f_w_z(z_new).astype(np.float32)
+        if temp_k is not None:
+            temp_k = f_t_z(z_new).astype(np.float32)
 
         nz = int(nz_new)
         dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
@@ -1809,13 +1909,25 @@ def buildBC_dev(
         bc_sum = np.zeros(3, dtype=float)
         bc_cnt = 0
         csv_path = vti_path.parent / "SurfData_Latest.csv"
+        write_temp = temp_k is not None
 
         # Log elevation scale if not 1.0
         if elevation_scale != 1.0:
             _log_info(f"Applying elevation scale {elevation_scale}x to CSV output")
+        if write_temp:
+            _log_info("Append temperature column T (Kelvin) to boundary CSV")
+
+        def _write_csv_row(fp, x, y, z, uval, vval, wval, tval: Optional[float] = None):
+            if write_temp:
+                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval},{float(tval)}\n")
+            else:
+                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval}\n")
 
         with open(csv_path, "w", encoding="utf-8") as f:
-            f.write("X,Y,Z,u,v,w\n")
+            if write_temp:
+                f.write("X,Y,Z,u,v,w,T\n")
+            else:
+                f.write("X,Y,Z,u,v,w\n")
             # bottom face (k=0)
             # for j in range(ny):
             #     y = j * dy
@@ -1862,11 +1974,17 @@ def buildBC_dev(
                     u_col = u_m[:, j, i]
                     v_col = v_m[:, j, i]
                     w_col = w[:, j, i]
+                    if write_temp:
+                        t_col = temp_k[:, j, i]
 
                     if z_in_original <= z_original[0]:
                         uval, vval, wval = u_col[0], v_col[0], w_col[0]
+                        if write_temp:
+                            tval = t_col[0]
                     elif z_in_original >= z_original[-1]:
                         uval, vval, wval = u_col[-1], v_col[-1], w_col[-1]
+                        if write_temp:
+                            tval = t_col[-1]
                     else:
                         k_upper = np.searchsorted(z_original, z_in_original)
                         k_lower = k_upper - 1
@@ -1879,8 +1997,12 @@ def buildBC_dev(
 
                         if d_lower < 1e-6:
                             uval, vval, wval = u_col[k_lower], v_col[k_lower], w_col[k_lower]
+                            if write_temp:
+                                tval = t_col[k_lower]
                         elif d_upper < 1e-6:
                             uval, vval, wval = u_col[k_upper], v_col[k_upper], w_col[k_upper]
+                            if write_temp:
+                                tval = t_col[k_upper]
                         else:
                             w_lower = 1.0 / d_lower
                             w_upper = 1.0 / d_upper
@@ -1889,8 +2011,13 @@ def buildBC_dev(
                             uval = (w_lower * u_col[k_lower] + w_upper * u_col[k_upper]) / w_sum
                             vval = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
                             wval = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
+                            if write_temp:
+                                tval = (w_lower * t_col[k_lower] + w_upper * t_col[k_upper]) / w_sum
 
-                    f.write(f"{x:.3f},{y:.3f},{z_top_here:.3f},{uval},{vval},0.0\n")
+                    _write_csv_row(
+                        f, x, y, z_top_here, uval, vval, 0.0,
+                        float(tval) if write_temp else None
+                    )
                     bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
 
@@ -1921,7 +2048,10 @@ def buildBC_dev(
                     uval = float(u_m[k0, j, i])
                     vval = float(v_m[k0, j, i])
                     wval = 0.0
-                    f.write(f"{x:.3f},{y:.3f},{ground_z:.3f},{uval},{vval},{wval}\n")
+                    _write_csv_row(
+                        f, x, y, ground_z, uval, vval, wval,
+                        float(temp_k[k0, j, i]) if write_temp else None
+                    )
                     bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
 
@@ -1945,7 +2075,10 @@ def buildBC_dev(
                         uval = float(u_m[k_agl, j, i])
                         vval = float(v_m[k_agl, j, i])
                         wval = 0.0
-                        f.write(f"{x:.3f},{y:.3f},{z_out:.3f},{uval},{vval},{wval}\n")
+                        _write_csv_row(
+                            f, x, y, z_out, uval, vval, wval,
+                            float(temp_k[k_agl, j, i]) if write_temp else None
+                        )
                         bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
 
@@ -1977,7 +2110,10 @@ def buildBC_dev(
                     uval = float(u_m[k0, j, i])
                     vval = float(v_m[k0, j, i])
                     wval = 0.0
-                    f.write(f"{x:.3f},{y:.3f},{ground_z:.3f},{uval},{vval},{wval}\n")
+                    _write_csv_row(
+                        f, x, y, ground_z, uval, vval, wval,
+                        float(temp_k[k0, j, i]) if write_temp else None
+                    )
                     bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
 
@@ -2001,7 +2137,10 @@ def buildBC_dev(
                         uval = float(u_m[k_agl, j, i])
                         vval = float(v_m[k_agl, j, i])
                         wval = 0.0
-                        f.write(f"{x:.3f},{y:.3f},{z_out:.3f},{uval},{vval},{wval}\n")
+                        _write_csv_row(
+                            f, x, y, z_out, uval, vval, wval,
+                            float(temp_k[k_agl, j, i]) if write_temp else None
+                        )
                         bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
 
