@@ -11,7 +11,7 @@ import geopandas as gpd
 from auto_UTM import get_utm_crs_from_conf_raw
 from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shapely_transform
-from dem_tif_to_shp import ensure_dem_shp_from_tif
+from terrainreader import ensure_dem_shp_from_tif
 import shutil
 import os
 import sys
