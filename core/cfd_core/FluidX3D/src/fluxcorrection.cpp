@@ -1,7 +1,6 @@
 #include "fluxcorrection.hpp"
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <thread>
 #include <vector>
 
@@ -60,7 +59,9 @@ void apply_flux_correction(LBM& lbm,
         const FaceKind fk = pick_face(x, y, z, Nx, Ny, Nz);
         if (fk == FaceKind::None) return;
 
-        lbm.flags[n] = TYPE_E;
+        const uchar flagsn = lbm.flags[n];
+        if ((flagsn & TYPE_S) != 0u) return; // keep solids untouched (including terrain-clipped side cells)
+        lbm.flags[n] = (uchar)(flagsn | TYPE_E); // preserve TYPE_T and any existing auxiliary bits
         boundary_per_thread[t].push_back(BoundaryCell{ (unsigned long long)n, fk });
 
         if (fill_downstream && is_downstream(x, y, z)) {
@@ -176,23 +177,18 @@ void apply_flux_correction(LBM& lbm,
     if (net_after)     *net_after     = net_after_val;
 
     if (show_report) {
-        std::fprintf(stdout,
-            "| [flux correction] S_in=%.3e, S_out=%.3e, net_before=%.3e    |\n", S_in, S_out, net);
-        std::fprintf(stdout,
-            "|       avg|du|=%.3e m/s, Corrected cell: %llu, net_after=%.3e   |\n", 
-            delta, (unsigned long long)B_used, net_after_val);
-
         const double avgZTop = (cntZTop ? (sumZTop / double(cntZTop)) : 0.0);
         const double avgXMin = (cntXMin ? (sumXMin / double(cntXMin)) : 0.0);
         const double avgXMax = (cntXMax ? (sumXMax / double(cntXMax)) : 0.0);
         const double avgYMin = (cntYMin ? (sumYMin / double(cntYMin)) : 0.0);
         const double avgYMax = (cntYMax ? (sumYMax / double(cntYMax)) : 0.0);
 
-        std::fprintf(stdout,
-            "|             Per-faced avg|du|: XMin=%.3e, XMax=%.3e m/s           |\n",
-            avgXMin, avgXMax);
-        std::fprintf(stdout,
-            "|          (cont.) ZTop=%.3e, YMin=%.3e, YMax=%.3e m/s          |\n",
-            avgZTop, avgYMin, avgYMax);
+        println("| Flux correction | S_in=" + to_string(S_in, 3u) + ", S_out=" + to_string(S_out, 3u) +
+                ", net_before=" + to_string(net, 3u) + " |");
+        println("| Flux correction | avg_dU=" + to_string(delta, 3u) + " m/s, corrected=" +
+                to_string((ulong)B_used) + ", net_after=" + to_string(net_after_val, 3u) + " |");
+        println("| Flux correction | per-face dU: Xn=" + to_string(avgXMin, 3u) +
+                ", Xp=" + to_string(avgXMax, 3u) + ", Yn=" + to_string(avgYMin, 3u) +
+                ", Yp=" + to_string(avgYMax, 3u) + ", Zp=" + to_string(avgZTop, 3u) + " m/s |");
     }
 }

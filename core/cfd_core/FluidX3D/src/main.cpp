@@ -19,8 +19,8 @@ void draw_scale(const int field_mode, const int color) {
 			title = "density rho / "+string(units.si_u(1.0f)==1.0f ? "1" : "[kg/m^3]");
 			break;
 		case 2: // coloring by temperature
-			scale_min = units.si_T(1.0f)-units.si_T(GRAPHICS_T_DELTA);
-			scale_max = units.si_T(1.0f)+units.si_T(GRAPHICS_T_DELTA);
+			scale_min = units.si_T(1.0f)-units.si_dT(GRAPHICS_T_DELTA);
+			scale_max = units.si_T(1.0f)+units.si_dT(GRAPHICS_T_DELTA);
 			title = "temperature T / "+string(units.si_u(1.0f)==1.0f ? "1" : "[K]");
 			break;
 	}
@@ -144,7 +144,6 @@ void main_graphics() {
 #endif // GRAPHICS
 
 void main_physics() {
-	info.print_logo();
 	main_setup(); // execute setup
 	running = false;
 	exit(0); // make sure that the program stops

@@ -4,7 +4,7 @@
 
 class Units { // contains the 4 base units [m], [kg], [s], [K] for unit conversions and vtk output
 private:
-	float unit_m=1.0f, unit_kg=1.0f, unit_s=1.0f, unit_K=1.0f; // 1 lattice unit times [m]/[kg]/[s]/[K] is [meter]/[kilogram]/[second]/[Kelvin]
+	float unit_m=1.0f, unit_kg=1.0f, unit_s=1.0f, unit_K=1.0f, unit_K_offset=0.0f; // T_SI = T*unit_K + unit_K_offset
 public:
 	void set_m_kg_s(const float x, const float u, const float rho/*=1.0f*/, const float si_x, const float si_u, const float si_rho) { // length x, velocity u, density rho in both simulation and SI units
 		unit_m = si_x/x; // length si_x = x*[m]
@@ -23,6 +23,7 @@ public:
 		unit_kg = si_rho/rho*cb(unit_m); // density si_rho = rho*[kg/m^3]
 		unit_s = u/si_u*unit_m; // velocity si_u = u*[m/s]
 		unit_K = si_T/T; // length si_T = T*[K]
+		unit_K_offset = 0.0f;
 		print_info("Unit Conversion: 1 cell = "+to_string(1000.0f*this->si_x(1.0f), 3u)+" mm, 1 s = "+to_string(this->t(1.0f))+" time steps");
 	}
 	void set_m_kg_s_K(const float m, const float kg, const float s, const float K) { // do unit conversion manually
@@ -30,8 +31,14 @@ public:
 		this->unit_kg = kg;
 		this->unit_s = s;
 		this->unit_K = K;
+		this->unit_K_offset = 0.0f;
 		print_info("Unit Conversion: 1 cell = "+to_string(1000.0f*this->si_x(1.0f), 3u)+" mm, 1 s = "+to_string(this->t(1.0f))+" time steps");
 	}
+	void set_temperature_reference(const float T_ref, const float si_T_ref) { // keep current temperature scale unit_K and set offset so that T_ref corresponds to si_T_ref
+		unit_K_offset = si_T_ref-T_ref*unit_K;
+	}
+	float temperature_scale() const { return unit_K; } // SI Kelvin represented by 1.0 lattice-temperature unit
+	float temperature_offset() const { return unit_K_offset; } // SI Kelvin at T=0
 
 	// the following methods convert SI units into simulation units (have to be called after set_m_kg_s(...);)
 	float x(const float si_x) const { return si_x/unit_m; } // length si_x = x*[m]
@@ -50,7 +57,8 @@ public:
 	float F(const float si_F) const { return si_F*sq(unit_s)/(unit_kg*unit_m); } // force si_F = F*[kg*m/s^2]
 	float M(const float si_M) const { return si_M*sq(unit_s)/(unit_kg*sq(unit_m)); } // torque si_M = M*[kg*m^2/s^2]
 	float sigma(const float si_sigma) const { return si_sigma*sq(unit_s)/unit_kg; } // surface tension si_sigma = sigma*[kg/s^2]
-	float T(const float si_T) { return si_T/unit_K; } // temperature si_T = T*[K]
+	float T(const float si_T) { return (si_T-unit_K_offset)/unit_K; } // temperature with affine mapping T = (si_T-offset)/unit_K
+	float dT(const float si_dT) const { return si_dT/unit_K; } // temperature difference mapping (offset-free)
 	float alpha(const float si_alpha) { return si_alpha*unit_s/sq(unit_m); } // thermal diffusion coefficient si_alpha = alpha*[m^2/s]
 	float beta(const float si_beta) { return si_beta*unit_K; } // (volumetric) thermal expansion coefficient si_beta = beta*[1/K]
 
@@ -71,7 +79,8 @@ public:
 	float si_F(const float F) const { return F*unit_kg*unit_m/sq(unit_s); } // force si_F = F*[kg*m/s^2]
 	float si_M(const float M) const { return M*unit_kg*sq(unit_m)/sq(unit_s); } // torque si_M = M*[kg*m^2/s^2]
 	float si_sigma(const float sigma) const { return sigma*unit_kg/sq(unit_s); } // surface tension si_sigma = sigma*[kg/s^2]
-	float si_T(const float T) { return T*unit_K; } // temperature si_T = T*[K]
+	float si_T(const float T) { return T*unit_K+unit_K_offset; } // temperature with affine mapping si_T = T*unit_K+offset
+	float si_dT(const float dT) const { return dT*unit_K; } // temperature difference mapping (offset-free)
 	float si_alpha(const float alpha) { return alpha*sq(unit_m)/unit_s; } // thermal diffusion coefficient si_alpha = alpha*[m^2/s]
 	float si_beta(const float beta) { return beta/unit_K; } // (volumetric) thermal expansion coefficient si_beta = beta*[1/K]
 

@@ -10,6 +10,8 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include <mutex>
+#include <cctype>
 #include <iostream>
 #include <filesystem>
 #include <cmath>
@@ -48,9 +50,487 @@ bool enable_coriolis = false;
 constexpr float k_temperature_ref_kelvin = 293.15f; // 20 C -> T_lbm = 1.0
 constexpr float k_temperature_min_kelvin = 223.15f; // -50 C
 constexpr float k_temperature_max_kelvin = 343.15f; // 70 C
+constexpr int k_patch_bottom = 0;
+constexpr int k_patch_top = 1;
+constexpr int k_patch_south = 2;
+constexpr int k_patch_north = 3;
+constexpr int k_patch_west = 4;
+constexpr int k_patch_east = 5;
 
-struct SamplePoint { float3 p; float3 u; float T = k_temperature_ref_kelvin; };
+struct SamplePoint {
+    float3 p;
+    float3 u;
+    float T = k_temperature_ref_kelvin;
+    int patch = -1; // -1 means unspecified/legacy CSV
+};
 struct ProfileSample { float z; float u; };
+
+class GroundTemperaturePlane2D {
+public:
+    void build_from_patch0_samples(const std::vector<SamplePoint>& samples, const float default_T) {
+        x_raw_.clear();
+        y_raw_.clear();
+        t_raw_.clear();
+        x_coords_.clear();
+        y_coords_.clear();
+        t_grid_.clear();
+        structured_ready_ = false;
+        default_T_ = default_T;
+
+        for (const auto& s : samples) {
+            if (s.patch != 0) continue;
+            x_raw_.push_back(s.p.x);
+            y_raw_.push_back(s.p.y);
+            t_raw_.push_back(s.T);
+        }
+
+        if (t_raw_.empty()) return;
+
+        double t_sum = 0.0;
+        for (const float t : t_raw_) t_sum += (double)t;
+        default_T_ = (float)(t_sum / (double)t_raw_.size());
+
+        float xmin = x_raw_[0], xmax = x_raw_[0];
+        float ymin = y_raw_[0], ymax = y_raw_[0];
+        for (size_t i = 1u; i < x_raw_.size(); ++i) {
+            xmin = fminf(xmin, x_raw_[i]);
+            xmax = fmaxf(xmax, x_raw_[i]);
+            ymin = fminf(ymin, y_raw_[i]);
+            ymax = fmaxf(ymax, y_raw_[i]);
+        }
+
+        const float tol_x = std::max(1e-6f, 1e-6f * fmaxf(1.0f, xmax - xmin));
+        const float tol_y = std::max(1e-6f, 1e-6f * fmaxf(1.0f, ymax - ymin));
+        x_coords_ = unique_sorted_with_tol_(x_raw_, tol_x);
+        y_coords_ = unique_sorted_with_tol_(y_raw_, tol_y);
+
+        const size_t nx = x_coords_.size();
+        const size_t ny = y_coords_.size();
+        if (nx == 0u || ny == 0u) return;
+
+        std::vector<double> t_sum_grid(nx * ny, 0.0);
+        std::vector<uint> t_cnt_grid(nx * ny, 0u);
+
+        for (size_t i = 0u; i < t_raw_.size(); ++i) {
+            const size_t ix = nearest_index_(x_coords_, x_raw_[i]);
+            const size_t iy = nearest_index_(y_coords_, y_raw_[i]);
+            const size_t id = iy * nx + ix;
+            t_sum_grid[id] += (double)t_raw_[i];
+            t_cnt_grid[id] += 1u;
+        }
+
+        t_grid_.assign(nx * ny, default_T_);
+        for (size_t id = 0u; id < t_grid_.size(); ++id) {
+            if (t_cnt_grid[id] > 0u) {
+                t_grid_[id] = (float)(t_sum_grid[id] / (double)t_cnt_grid[id]);
+            }
+        }
+
+        structured_ready_ = (nx >= 2u && ny >= 2u);
+    }
+
+    bool has_samples() const { return !t_raw_.empty(); }
+    bool structured_ready() const { return structured_ready_; }
+    size_t raw_count() const { return t_raw_.size(); }
+    size_t nx() const { return x_coords_.size(); }
+    size_t ny() const { return y_coords_.size(); }
+
+    float eval_xy(const float xq, const float yq) const {
+        if (!has_samples()) return default_T_;
+        if (!structured_ready_) return eval_nearest_raw_(xq, yq);
+
+        const size_t nxv = x_coords_.size();
+        const size_t nyv = y_coords_.size();
+        if (nxv < 2u || nyv < 2u) return eval_nearest_raw_(xq, yq);
+
+        const float x0 = x_coords_.front();
+        const float x1 = x_coords_.back();
+        const float y0 = y_coords_.front();
+        const float y1 = y_coords_.back();
+        const float x = fminf(fmaxf(xq, x0), x1);
+        const float y = fminf(fmaxf(yq, y0), y1);
+
+        const size_t ix1 = upper_index_(x_coords_, x);
+        const size_t iy1 = upper_index_(y_coords_, y);
+        const size_t ix0 = (ix1 == 0u) ? 0u : (ix1 - 1u);
+        const size_t iy0 = (iy1 == 0u) ? 0u : (iy1 - 1u);
+        const size_t ixa = (ix0 >= nxv - 1u) ? (nxv - 2u) : ix0;
+        const size_t iya = (iy0 >= nyv - 1u) ? (nyv - 2u) : iy0;
+        const size_t ixb = ixa + 1u;
+        const size_t iyb = iya + 1u;
+
+        const float xa = x_coords_[ixa];
+        const float xb = x_coords_[ixb];
+        const float ya = y_coords_[iya];
+        const float yb = y_coords_[iyb];
+        const float tx = (fabsf(xb - xa) > 1e-12f) ? ((x - xa) / (xb - xa)) : 0.0f;
+        const float ty = (fabsf(yb - ya) > 1e-12f) ? ((y - ya) / (yb - ya)) : 0.0f;
+
+        const float t00 = t_grid_[iya * nxv + ixa];
+        const float t10 = t_grid_[iya * nxv + ixb];
+        const float t01 = t_grid_[iyb * nxv + ixa];
+        const float t11 = t_grid_[iyb * nxv + ixb];
+
+        const float t0 = t00 + tx * (t10 - t00);
+        const float t1 = t01 + tx * (t11 - t01);
+        return t0 + ty * (t1 - t0);
+    }
+
+private:
+    static std::vector<float> unique_sorted_with_tol_(std::vector<float> vals, const float tol) {
+        if (vals.empty()) return vals;
+        std::sort(vals.begin(), vals.end());
+        std::vector<float> out;
+        out.reserve(vals.size());
+        float last = vals[0];
+        out.push_back(last);
+        for (size_t i = 1u; i < vals.size(); ++i) {
+            const float v = vals[i];
+            if (fabsf(v - last) > tol) {
+                out.push_back(v);
+                last = v;
+            }
+            else {
+                // Keep representative coordinate centered inside tolerance cluster.
+                out.back() = 0.5f * (out.back() + v);
+                last = out.back();
+            }
+        }
+        return out;
+    }
+
+    static size_t nearest_index_(const std::vector<float>& arr, const float v) {
+        if (arr.empty()) return 0u;
+        auto it = std::lower_bound(arr.begin(), arr.end(), v);
+        if (it == arr.begin()) return 0u;
+        if (it == arr.end()) return arr.size() - 1u;
+        const size_t i1 = (size_t)(it - arr.begin());
+        const size_t i0 = i1 - 1u;
+        const float d0 = fabsf(v - arr[i0]);
+        const float d1 = fabsf(v - arr[i1]);
+        return (d1 < d0) ? i1 : i0;
+    }
+
+    static size_t upper_index_(const std::vector<float>& arr, const float v) {
+        auto it = std::upper_bound(arr.begin(), arr.end(), v);
+        if (it == arr.end()) return arr.size() - 1u;
+        return (size_t)(it - arr.begin());
+    }
+
+    float eval_nearest_raw_(const float xq, const float yq) const {
+        if (t_raw_.empty()) return default_T_;
+        float best_d2 = FLT_MAX;
+        float best_t = default_T_;
+        for (size_t i = 0u; i < t_raw_.size(); ++i) {
+            const float dx = xq - x_raw_[i];
+            const float dy = yq - y_raw_[i];
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best_t = t_raw_[i];
+            }
+        }
+        return best_t;
+    }
+
+private:
+    std::vector<float> x_raw_;
+    std::vector<float> y_raw_;
+    std::vector<float> t_raw_;
+    std::vector<float> x_coords_;
+    std::vector<float> y_coords_;
+    std::vector<float> t_grid_;
+    bool structured_ready_ = false;
+    float default_T_ = 1.0f;
+};
+
+static const char* patch_name(const int patch) {
+    switch (patch) {
+    case k_patch_bottom: return "bottom";
+    case k_patch_top:    return "top";
+    case k_patch_south:  return "south";
+    case k_patch_north:  return "north";
+    case k_patch_west:   return "west";
+    case k_patch_east:   return "east";
+    default:             return "unknown";
+    }
+}
+
+static int downstream_to_patch(const std::string& downstream_bc_local) {
+    if (downstream_bc_local == "+y") return k_patch_north;
+    if (downstream_bc_local == "-y") return k_patch_south;
+    if (downstream_bc_local == "+x") return k_patch_east;
+    if (downstream_bc_local == "-x") return k_patch_west;
+    return -1;
+}
+
+static int boundary_cell_to_patch(const uint x, const uint y, const uint z, const uint Nx, const uint Ny, const uint Nz) {
+    if (z == Nz - 1u) return k_patch_top;
+    if (x == 0u) return k_patch_west;
+    if (x == Nx - 1u) return k_patch_east;
+    if (y == 0u) return k_patch_south;
+    if (y == Ny - 1u) return k_patch_north;
+    return -1;
+}
+
+static bool patch_surface_coordinates(const int patch, const float3& p, float& a, float& b) {
+    switch (patch) {
+    case k_patch_bottom:
+    case k_patch_top:
+        a = p.x;
+        b = p.y;
+        return true;
+    case k_patch_south:
+    case k_patch_north:
+        a = p.x;
+        b = p.z;
+        return true;
+    case k_patch_west:
+    case k_patch_east:
+        a = p.y;
+        b = p.z;
+        return true;
+    default:
+        break;
+    }
+    a = 0.0f;
+    b = 0.0f;
+    return false;
+}
+
+class PatchSurfaceField2D {
+public:
+    struct SurfaceSample {
+        float a;
+        float b;
+        float3 v;
+    };
+
+    template <typename ValueFn>
+    void build_from_patch(const std::vector<SamplePoint>& samples,
+                          const int patch,
+                          ValueFn value_fn,
+                          const float3& default_value) {
+        clear_(default_value);
+        std::vector<SurfaceSample> raw;
+        raw.reserve(samples.size());
+        for (const auto& s : samples) {
+            if (s.patch != patch) continue;
+            float a = 0.0f;
+            float b = 0.0f;
+            if (!patch_surface_coordinates(patch, s.p, a, b)) continue;
+            raw.push_back(SurfaceSample{ a, b, value_fn(s) });
+        }
+        if (raw.empty()) return;
+        raw_count_ = raw.size();
+
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        float amin = raw[0].a, amax = raw[0].a;
+        float bmin = raw[0].b, bmax = raw[0].b;
+        for (const auto& rs : raw) {
+            sx += (double)rs.v.x;
+            sy += (double)rs.v.y;
+            sz += (double)rs.v.z;
+            amin = fminf(amin, rs.a);
+            amax = fmaxf(amax, rs.a);
+            bmin = fminf(bmin, rs.b);
+            bmax = fmaxf(bmax, rs.b);
+        }
+        const double inv_n = 1.0 / (double)raw.size();
+        default_value_ = float3((float)(sx * inv_n), (float)(sy * inv_n), (float)(sz * inv_n));
+
+        const float tol_a = fmaxf(1e-6f, 1e-6f * fmaxf(1.0f, amax - amin));
+        const float tol_b = fmaxf(1e-6f, 1e-6f * fmaxf(1.0f, bmax - bmin));
+
+        std::sort(raw.begin(), raw.end(), [](const SurfaceSample& lhs, const SurfaceSample& rhs) {
+            if (lhs.a < rhs.a) return true;
+            if (lhs.a > rhs.a) return false;
+            return lhs.b < rhs.b;
+        });
+
+        std::vector<std::vector<SurfaceSample>> grouped_cols;
+        std::vector<double> col_a_sum;
+        std::vector<uint> col_a_cnt;
+        grouped_cols.reserve(raw.size());
+        col_a_sum.reserve(raw.size());
+        col_a_cnt.reserve(raw.size());
+        for (const auto& rs : raw) {
+            if (grouped_cols.empty()) {
+                grouped_cols.push_back(std::vector<SurfaceSample>{ rs });
+                col_a_sum.push_back((double)rs.a);
+                col_a_cnt.push_back(1u);
+                continue;
+            }
+            const size_t cid = grouped_cols.size() - 1u;
+            const float a_rep = (float)(col_a_sum[cid] / (double)col_a_cnt[cid]);
+            if (fabsf(rs.a - a_rep) <= tol_a) {
+                grouped_cols[cid].push_back(rs);
+                col_a_sum[cid] += (double)rs.a;
+                col_a_cnt[cid] += 1u;
+            }
+            else {
+                grouped_cols.push_back(std::vector<SurfaceSample>{ rs });
+                col_a_sum.push_back((double)rs.a);
+                col_a_cnt.push_back(1u);
+            }
+        }
+
+        a_coords_.resize(grouped_cols.size());
+        b_cols_.resize(grouped_cols.size());
+        v_cols_.resize(grouped_cols.size());
+
+        for (size_t c = 0u; c < grouped_cols.size(); ++c) {
+            a_coords_[c] = (float)(col_a_sum[c] / (double)col_a_cnt[c]);
+            auto& col = grouped_cols[c];
+            std::sort(col.begin(), col.end(), [](const SurfaceSample& lhs, const SurfaceSample& rhs) {
+                return lhs.b < rhs.b;
+            });
+
+            std::vector<float>& bvec = b_cols_[c];
+            std::vector<float3>& vvec = v_cols_[c];
+            bvec.reserve(col.size());
+            vvec.reserve(col.size());
+            std::vector<double> vsx;
+            std::vector<double> vsy;
+            std::vector<double> vsz;
+            std::vector<uint> vcnt;
+            vsx.reserve(col.size());
+            vsy.reserve(col.size());
+            vsz.reserve(col.size());
+            vcnt.reserve(col.size());
+            for (const auto& rs : col) {
+                if (bvec.empty() || fabsf(rs.b - bvec.back()) > tol_b) {
+                    bvec.push_back(rs.b);
+                    vvec.push_back(rs.v);
+                    vsx.push_back((double)rs.v.x);
+                    vsy.push_back((double)rs.v.y);
+                    vsz.push_back((double)rs.v.z);
+                    vcnt.push_back(1u);
+                }
+                else {
+                    const size_t i = bvec.size() - 1u;
+                    bvec[i] = 0.5f * (bvec[i] + rs.b);
+                    vsx[i] += (double)rs.v.x;
+                    vsy[i] += (double)rs.v.y;
+                    vsz[i] += (double)rs.v.z;
+                    vcnt[i] += 1u;
+                    const double inv = 1.0 / (double)vcnt[i];
+                    vvec[i] = float3((float)(vsx[i] * inv), (float)(vsy[i] * inv), (float)(vsz[i] * inv));
+                }
+            }
+        }
+    }
+
+    bool has_samples() const { return raw_count_ > 0u; }
+    size_t raw_count() const { return raw_count_; }
+    size_t column_count() const { return a_coords_.size(); }
+
+    float3 eval(const float a, const float b) const {
+        if (a_coords_.empty()) return default_value_;
+        if (a_coords_.size() == 1u) return eval_column_(0u, b);
+
+        size_t i0 = 0u;
+        size_t i1 = 0u;
+        if (a <= a_coords_.front()) {
+            i0 = i1 = 0u;
+        }
+        else if (a >= a_coords_.back()) {
+            i0 = i1 = a_coords_.size() - 1u;
+        }
+        else {
+            auto it = std::upper_bound(a_coords_.begin(), a_coords_.end(), a);
+            i1 = (size_t)(it - a_coords_.begin());
+            i0 = i1 - 1u;
+        }
+
+        const float3 v0 = eval_column_(i0, b);
+        if (i0 == i1) return v0;
+        const float3 v1 = eval_column_(i1, b);
+        const float a0 = a_coords_[i0];
+        const float a1 = a_coords_[i1];
+        const float t = (fabsf(a1 - a0) > 1e-12f) ? ((a - a0) / (a1 - a0)) : 0.0f;
+        return float3(
+            v0.x + t * (v1.x - v0.x),
+            v0.y + t * (v1.y - v0.y),
+            v0.z + t * (v1.z - v0.z));
+    }
+
+    bool below_sample_support(const float a, const float b, const float eps = 1e-4f) const {
+        if (a_coords_.empty()) return false;
+        if (a_coords_.size() == 1u) {
+            if (b_cols_[0].empty()) return false;
+            return b < (b_cols_[0].front() - eps);
+        }
+
+        size_t i0 = 0u;
+        size_t i1 = 0u;
+        if (a <= a_coords_.front()) {
+            i0 = i1 = 0u;
+        }
+        else if (a >= a_coords_.back()) {
+            i0 = i1 = a_coords_.size() - 1u;
+        }
+        else {
+            auto it = std::upper_bound(a_coords_.begin(), a_coords_.end(), a);
+            i1 = (size_t)(it - a_coords_.begin());
+            i0 = i1 - 1u;
+        }
+
+        if (b_cols_[i0].empty()) return false;
+        const float bmin0 = b_cols_[i0].front();
+        float bmin = bmin0;
+        if (i1 != i0) {
+            if (b_cols_[i1].empty()) return false;
+            const float bmin1 = b_cols_[i1].front();
+            const float a0 = a_coords_[i0];
+            const float a1 = a_coords_[i1];
+            const float t = (fabsf(a1 - a0) > 1e-12f) ? ((a - a0) / (a1 - a0)) : 0.0f;
+            bmin = bmin0 + t * (bmin1 - bmin0);
+        }
+        return b < (bmin - eps);
+    }
+
+private:
+    void clear_(const float3& default_value) {
+        raw_count_ = 0u;
+        default_value_ = default_value;
+        a_coords_.clear();
+        b_cols_.clear();
+        v_cols_.clear();
+    }
+
+    float3 eval_column_(const size_t col_id, const float b) const {
+        if (col_id >= b_cols_.size() || col_id >= v_cols_.size()) return default_value_;
+        const std::vector<float>& bvec = b_cols_[col_id];
+        const std::vector<float3>& vvec = v_cols_[col_id];
+        if (bvec.empty() || vvec.empty()) return default_value_;
+        if (bvec.size() == 1u) return vvec[0];
+
+        if (b <= bvec.front()) return vvec.front();
+        if (b >= bvec.back()) return vvec.back();
+
+        auto it = std::upper_bound(bvec.begin(), bvec.end(), b);
+        size_t i1 = (size_t)(it - bvec.begin());
+        size_t i0 = i1 - 1u;
+        if (i1 >= bvec.size()) i1 = bvec.size() - 1u;
+        const float b0 = bvec[i0];
+        const float b1 = bvec[i1];
+        const float t = (fabsf(b1 - b0) > 1e-12f) ? ((b - b0) / (b1 - b0)) : 0.0f;
+        const float3& v0 = vvec[i0];
+        const float3& v1 = vvec[i1];
+        return float3(
+            v0.x + t * (v1.x - v0.x),
+            v0.y + t * (v1.y - v0.y),
+            v0.z + t * (v1.z - v0.z));
+    }
+
+private:
+    size_t raw_count_ = 0u;
+    float3 default_value_ = float3(0.0f);
+    std::vector<float> a_coords_;
+    std::vector<std::vector<float>> b_cols_;
+    std::vector<std::vector<float3>> v_cols_;
+};
 
 static unsigned detect_available_worker_threads_setup() {
 #if defined(_WIN32)
@@ -157,16 +637,20 @@ float cut_lat_min_deg = 0.0f;
 float cut_lat_max_deg = 0.0f;
 
 
-// helper: read SurfData.csv (columns X,Y,Z,u,v,w[,T] in SI units, with header)
+// helper: read SurfData.csv (columns X,Y,Z,u,v,w[,T][,patch] in SI units, with header)
 static std::vector<SamplePoint> read_samples(const string& csv_path,
                                              bool* has_temperature_column = nullptr,
                                              ulong* rows_with_temperature = nullptr,
                                              float* temperature_min_si = nullptr,
-                                             float* temperature_max_si = nullptr) {
+                                             float* temperature_max_si = nullptr,
+                                             bool* has_patch_column = nullptr,
+                                             ulong* rows_with_patch = nullptr) {
     if (has_temperature_column) *has_temperature_column = false;
     if (rows_with_temperature) *rows_with_temperature = 0ul;
     if (temperature_min_si) *temperature_min_si = k_temperature_ref_kelvin;
     if (temperature_max_si) *temperature_max_si = k_temperature_ref_kelvin;
+    if (has_patch_column) *has_patch_column = false;
+    if (rows_with_patch) *rows_with_patch = 0ul;
 
     std::vector<SamplePoint> out;
     std::ifstream fin(csv_path);
@@ -174,40 +658,154 @@ static std::vector<SamplePoint> read_samples(const string& csv_path,
         println("ERROR: could not open CSV " + csv_path);
         return out;
     }
-    string line; std::getline(fin, line); // skip header
+    auto split_csv = [](const string& s) -> std::vector<string> {
+        std::vector<string> out_cols;
+        std::stringstream ss(s);
+        string tok;
+        while (std::getline(ss, tok, ',')) out_cols.push_back(trim_copy(tok));
+        return out_cols;
+    };
+
+    auto to_lower_copy = [](string s) -> string {
+        for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+        return s;
+    };
+
+    auto find_col = [&](const std::vector<string>& cols, const string& key) -> int {
+        const string key_lc = to_lower_copy(key);
+        for (size_t i = 0u; i < cols.size(); ++i) {
+            if (to_lower_copy(cols[i]) == key_lc) return (int)i;
+        }
+        return -1;
+    };
+
+    string header_line;
+    if (!std::getline(fin, header_line)) {
+        println("WARNING: empty CSV " + csv_path);
+        return out;
+    }
+
+    const std::vector<string> header_cols = split_csv(header_line);
+    const int idx_x = find_col(header_cols, "x");
+    const int idx_y = find_col(header_cols, "y");
+    const int idx_z = find_col(header_cols, "z");
+    const int idx_u = find_col(header_cols, "u");
+    const int idx_v = find_col(header_cols, "v");
+    const int idx_w = find_col(header_cols, "w");
+    const int idx_t = find_col(header_cols, "t");
+    const int idx_patch = find_col(header_cols, "patch");
+    const bool use_named_columns =
+        (idx_x >= 0) && (idx_y >= 0) && (idx_z >= 0) &&
+        (idx_u >= 0) && (idx_v >= 0) && (idx_w >= 0);
+    bool has_patch = (idx_patch >= 0);
+
+    string line;
     ulong line_no = 1ul;
     bool has_temperature = false;
     ulong temp_rows = 0ul;
+    ulong patch_rows = 0ul;
     float tmin = +FLT_MAX;
     float tmax = -FLT_MAX;
     while (std::getline(fin, line)) {
         line_no++;
-        std::stringstream ss(line);
-        string token; float vals[7] = { 0.0f }; int i = 0;
-        while (std::getline(ss, token, ',')) {
-            if (i < 7) vals[i] = (float)atof(trim_copy(token).c_str());
-            i++;
-        }
-        if (i != 6 && i != 7) {
-            println("WARNING: malformed line " + to_string(line_no) + " in CSV (expect 6 or 7 columns)");
+        const std::vector<string> cols = split_csv(line);
+        if (cols.empty()) continue;
+
+        SamplePoint sp;
+
+        if (use_named_columns) {
+            const int required_max_idx = std::max(
+                std::max(std::max(idx_x, idx_y), std::max(idx_z, idx_u)),
+                std::max(idx_v, idx_w)
+            );
+            if ((int)cols.size() <= required_max_idx) {
+                println("WARNING: malformed line " + to_string(line_no) + " in CSV (missing required columns)");
+                continue;
+            }
+
+            sp.p = float3(
+                (float)atof(cols[idx_x].c_str()),
+                (float)atof(cols[idx_y].c_str()),
+                (float)atof(cols[idx_z].c_str())
+            );
+            sp.u = float3(
+                (float)atof(cols[idx_u].c_str()),
+                (float)atof(cols[idx_v].c_str()),
+                (float)atof(cols[idx_w].c_str())
+            );
+
+            if ((idx_t >= 0) && ((int)cols.size() > idx_t)) {
+                sp.T = (float)atof(cols[idx_t].c_str());
+                has_temperature = true;
+                temp_rows++;
+                tmin = fmin(tmin, sp.T);
+                tmax = fmax(tmax, sp.T);
+            }
+            if ((idx_patch >= 0) && ((int)cols.size() > idx_patch)) {
+                sp.patch = (int)std::lround((double)atof(cols[idx_patch].c_str()));
+                has_patch = true;
+                patch_rows++;
+            }
+
+            out.push_back(sp);
             continue;
         }
-        SamplePoint sp;
+
+        // Fallback for legacy CSV with positional columns.
+        std::stringstream ss(line);
+        string token;
+        float vals[8] = { 0.0f };
+        int n_cols = 0;
+        while (std::getline(ss, token, ',')) {
+            if (n_cols < 8) vals[n_cols] = (float)atof(trim_copy(token).c_str());
+            n_cols++;
+        }
+        if (n_cols < 6 || n_cols > 8) {
+            println("WARNING: malformed line " + to_string(line_no) + " in CSV (expect 6~8 columns)");
+            continue;
+        }
+
         sp.p = float3(vals[0], vals[1], vals[2]);
         sp.u = float3(vals[3], vals[4], vals[5]);
-        if (i == 7) {
+
+        bool row_has_temperature = false;
+        if (n_cols >= 8) {
+            // X,Y,Z,u,v,w,T,patch
             sp.T = vals[6];
+            row_has_temperature = true;
+            sp.patch = (int)std::lround((double)vals[7]);
+            has_patch = true;
+            patch_rows++;
+        } else if (n_cols == 7) {
+            // Ambiguous: X,Y,Z,u,v,w,T or X,Y,Z,u,v,w,patch
+            const float c7 = vals[6];
+            const bool looks_like_patch = (c7 >= -0.5f) && (c7 <= 5.5f) && (fabsf(c7 - roundf(c7)) <= 1e-4f);
+            if (!looks_like_patch) {
+                sp.T = c7;
+                row_has_temperature = true;
+            }
+            else {
+                sp.patch = (int)std::lround((double)c7);
+                has_patch = true;
+                patch_rows++;
+            }
+        }
+
+        if (row_has_temperature) {
             has_temperature = true;
             temp_rows++;
             tmin = fmin(tmin, sp.T);
             tmax = fmax(tmax, sp.T);
         }
+
         out.push_back(sp);
     }
     if (has_temperature_column) *has_temperature_column = has_temperature;
     if (rows_with_temperature) *rows_with_temperature = temp_rows;
     if (temperature_min_si) *temperature_min_si = has_temperature ? tmin : k_temperature_ref_kelvin;
     if (temperature_max_si) *temperature_max_si = has_temperature ? tmax : k_temperature_ref_kelvin;
+    if (has_patch_column) *has_patch_column = has_patch;
+    if (rows_with_patch) *rows_with_patch = patch_rows;
     return out;
 }
 
@@ -228,24 +826,55 @@ static string now_str() {
     #endif
 
      std::stringstream ss;
-     ss << std::put_time(&tm, "%F %T"); // %F = YYYY-MM-DD, %T = hh:mm:ss
+     ss << std::put_time(&tm, "%Y%m%d %T"); // YYYYMMDD hh:mm:ss
      return ss.str();
  }
+static string now_stamp_str() {
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    std::time_t tt = system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    if (localtime_s(&tm, &tt) != 0) {
+        throw std::runtime_error("Failed to get local time.");
+    }
+#else
+    if (localtime_r(&tt, &tm) == nullptr) {
+        throw std::runtime_error("Failed to get local time.");
+    }
+#endif
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y%m%d%H%M%S");
+    return ss.str();
+}
+static string init_console_log_file(const string& project_dir) {
+    if (project_dir.empty()) return "";
+    std::filesystem::path log_dir = std::filesystem::path(project_dir) / "proj_temp";
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    if (ec) return "";
+    const std::string log_name = now_stamp_str() + "_lbm.log";
+    const std::filesystem::path log_path = log_dir / log_name;
+    return set_console_log_file(log_path.string()) ? log_path.string() : "";
+}
 
 static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, const uint Nz,
                           const float* u_avg, const float* rho_avg, const float* T_avg,
                           const float* M2_u, const float* M2_v, const float* M2_w,
-                          const ulong avg_count, const bool convert_to_si_units) {
+                          const ulong avg_count, const bool convert_to_si_units,
+                          const bool print_saved_message=true) {
     if (!u_avg || !rho_avg) return;
     float spacing = 1.0f;
     float u_factor = 1.0f;
     float rho_factor = 1.0f;
     float T_factor = 1.0f;
+    float T_offset = 0.0f;
     if (convert_to_si_units) {
         spacing = units.si_x(1.0f);
         u_factor = units.si_u(1.0f);
         rho_factor = units.si_rho(1.0f);
-        T_factor = units.si_T(1.0f);
+        T_factor = units.si_dT(1.0f);
+        T_offset = units.si_T(0.0f);
     }
     float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
     if (convert_to_si_units) origin += vtk_origin_shift;
@@ -268,7 +897,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
         "POINT_DATA " + to_string(points) + "\n";
     file.write(header.c_str(), header.length());
 
-    auto write_field = [&](const string& name, const float* data, const uint components, const float factor) {
+    auto write_field = [&](const string& name, const float* data, const uint components, const float factor, const float offset = 0.0f) {
         const string field_header =
             "SCALARS " + name + " float " + to_string(components) + "\nLOOKUP_TABLE default\n";
         file.write(field_header.c_str(), field_header.length());
@@ -288,7 +917,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
                 const ulong base_i = i * (ulong)components;
                 const ulong src_i = idx * (ulong)components;
                 for (uint d = 0u; d < components; ++d) {
-                    buffer[base_i + d] = reverse_bytes(data[src_i + d] * factor);
+                    buffer[base_i + d] = reverse_bytes(data[src_i + d] * factor + offset);
                 }
             });
             file.write(reinterpret_cast<const char*>(buffer.data()), count * (ulong)components * sizeof(float));
@@ -298,7 +927,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     write_field("u_avg", u_avg, 3u, u_factor);
     write_field("rho_avg", rho_avg, 1u, rho_factor);
     if (T_avg) {
-        write_field("T_avg", T_avg, 1u, T_factor);
+        write_field("T_avg", T_avg, 1u, T_factor, T_offset);
     }
 
     std::vector<float> tke(points, 0.0f);
@@ -314,9 +943,11 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     write_field("tke", tke.data(), 1u, u_factor * u_factor);
 
     file.close();
-    info.allow_printing.lock();
-    print_info("File \"" + filename + "\" saved.");
-    info.allow_printing.unlock();
+    if (print_saved_message) {
+        info.allow_printing.lock();
+        print_info("File \"" + filename + "\" saved.");
+        info.allow_printing.unlock();
+    }
 }
 
 static float3 wind_velocity_lbmu(const float inflow_si, const float angle_deg, const float u_scale) {
@@ -326,15 +957,31 @@ static float3 wind_velocity_lbmu(const float inflow_si, const float angle_deg, c
     return float3(-sinf(angle_rad) * speed_lbmu, -cosf(angle_rad) * speed_lbmu, 0.0f);
 }
 
+static string hr_plain() {
+    return "|"+string((uint)CONSOLE_WIDTH-2u, '-')+"|";
+}
+static void print_section_title(const string& title) {
+    println(hr_plain());
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, title)+"|");
+    println(hr_plain());
+}
+static void print_kv_row(const string& key, const string& value) {
+    println("| "+key+" | "+value+" |");
+}
+static std::string read_line_console() {
+    std::string out;
+    std::cout.flush();
+    std::getline(std::cin, out);
+    return out;
+}
+
 void main_setup() {
-  //println("|-----------------------------------------------------------------------------|");
-    println("|                                                                             |");
-    println("|      LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation      |");
-    println("|                                                                             |");
-    println("|                                        Developed by Huanxia Wei's Team      |");
-    println("|                                        Version - v3.5-251119                |");
-    println("|                                                                             |");
-    println("|-----------------------------------------------------------------------------|");
+    println(hr_plain());
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-251119")+"|");
+    println(hr_plain());
+    info.print_logo();
  
     bool dataset_generation = false;
     bool profile_generation = false;
@@ -350,19 +997,28 @@ void main_setup() {
     // ---------------------- read *.luw / *.luwdg ------------------------------
     std::string parent; // project directory that contains the configure file
     {
-        // prompt for configure file path when not directly provided
-        println("| Please input configure file path (*.luw, *.luwdg, *.luwpf):                  |");
         std::string luw_path_input;
-        std::getline(std::cin, luw_path_input);
-
-        // trim
         auto trim = [](std::string s) {
-            const char* ws = " \t";
+            const char* ws = " \t\r\n";
             size_t b = s.find_first_not_of(ws);
             size_t e = s.find_last_not_of(ws);
             return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1);
             };
-        luw_path_input = trim(luw_path_input);
+
+        // Command-line mode: use the first argument as configure file path.
+        if (!main_arguments.empty()) {
+            luw_path_input = trim(main_arguments[0]);
+            if (main_arguments.size() > 1u) {
+                println("| WARNING: extra CLI args ignored (device ID args are no longer supported).    |");
+            }
+        }
+
+        // Interactive fallback when no path is provided via CLI.
+        if (luw_path_input.empty()) {
+            println("| Please input configure file path (*.luw, *.luwdg, *.luwpf):                  |");
+            luw_path_input = read_line_console();
+            luw_path_input = trim(luw_path_input);
+        }
         
         if (!luw_path_input.empty()) {
             char q = luw_path_input.front();
@@ -566,6 +1222,14 @@ void main_setup() {
         }
     }
 
+    const std::string lbm_log_path = init_console_log_file(parent);
+    if (!lbm_log_path.empty()) {
+        println("| Console log     | " + lbm_log_path + " |");
+    }
+    else {
+        println("| WARNING: failed to create proj_temp log file.                               |");
+    }
+
     // ---------------------- Validation Check -----------------------------------
     if (!dataset_generation && !profile_generation) {
         std::string v_check = validation_status;
@@ -605,10 +1269,8 @@ void main_setup() {
         return os.str();
     };
 
-    println("|                                                                             |");
-    println("|-----------------------------------------------------------------------------|");
-    println("|                            PARAMETER INFORMATION                            |");
-    println("|-----------------------------------------------------------------------------|");
+    println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
+    print_section_title("PARAMETER INFORMATION");
  // println("| Grid Domains    | " + alignr(57u,to_string()) + " |");
     println("| Configure deck  | " + alignr(57u, to_string(conf_used_path)) + " |");
     println("| Casename / Time | " + alignr(40u, to_string(caseName)) + alignr(17u, to_string(datetime)) + " |");
@@ -635,24 +1297,42 @@ void main_setup() {
     #endif
     const uint3 lbm_N = uint3(Nx_cells, Ny_cells, Nz_cells);
 
-    println("|-----------------------------------------------------------------------------|");
-    println("|                          DOMAIN AND TRANFORMATION                           |");
-    println("|-----------------------------------------------------------------------------|");
-    println("| Grid Resolution | " + alignr(45u, to_string(lbm_N.x)) + "," + alignr(5u, to_string(lbm_N.y)) + "," + alignr(5u, to_string(lbm_N.z)) + " |");
+    print_section_title("DOMAIN AND TRANSFORMATION");
+    const ulong n_cells_total = (ulong)lbm_N.x*(ulong)lbm_N.y*(ulong)lbm_N.z;
+    println("| Grid Resolution | " + alignr(45u, to_string(lbm_N.x)) + "," + alignr(5u, to_string(lbm_N.y)) + "," + alignr(5u, to_string(lbm_N.z)) + " (nCell = " + to_string(n_cells_total) + ") |");
 
     const uint mem_per_dev_mb = vram_required_mb_per_device(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
     const uint mem_total_mb = vram_required_mb_total(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
+    std::vector<SamplePoint> samples_si;
+    bool csv_has_temperature = false;
+    ulong csv_rows_with_temperature = 0ul;
+    float csv_temp_min_si = k_temperature_ref_kelvin;
+    float csv_temp_max_si = k_temperature_ref_kelvin;
+    bool csv_has_patch = false;
+    ulong csv_rows_with_patch = 0ul;
+    float temperature_ref_kelvin = k_temperature_ref_kelvin;
+    float temperature_scale_kelvin = k_temperature_ref_kelvin;
+    bool temperature_ref_adaptive = false;
+    bool temperature_scale_adaptive = false;
     if (!dataset_generation && !profile_generation) {
         const std::string csv_path_ref = parent + "/proj_temp/SurfData_" + datetime + ".csv";
-        auto samples_ref = read_samples(csv_path_ref);
-        if (samples_ref.empty()) {
+        samples_si = read_samples(
+            csv_path_ref,
+            &csv_has_temperature,
+            &csv_rows_with_temperature,
+            &csv_temp_min_si,
+            &csv_temp_max_si,
+            &csv_has_patch,
+            &csv_rows_with_patch
+        );
+        if (samples_si.empty()) {
             println("| ERROR: no inlet samples when computing si_ref_u. Aborting...                |");
             println("|-----------------------------------------------------------------------------|");
             wait();
             exit(-1);
         }
         float max_u = 0.0f;
-        for (const auto& s : samples_ref) {
+        for (const auto& s : samples_si) {
             const float speed = std::sqrt(
                 s.u.x * s.u.x +
                 s.u.y * s.u.y +
@@ -660,6 +1340,27 @@ void main_setup() {
             );
             if (speed > max_u) {
                 max_u = speed;
+            }
+        }
+        if (csv_has_temperature && csv_rows_with_temperature > 0ul) {
+            float tmin = csv_temp_min_si;
+            float tmax = csv_temp_max_si;
+            if (tmin > tmax) std::swap(tmin, tmax);
+            if (std::isfinite(tmin) && std::isfinite(tmax) && tmax > 0.0f) {
+                const float tref = 0.5f * (tmin + tmax);
+                if (std::isfinite(tref) && tref > 0.0f) {
+                    temperature_ref_kelvin = tref;
+                    temperature_ref_adaptive = true;
+                }
+                const float thalf = 0.5f * (tmax - tmin);
+                if (std::isfinite(thalf) && thalf > 1.0e-6f) {
+                    temperature_scale_kelvin = thalf;
+                    temperature_scale_adaptive = true;
+                }
+                else {
+                    temperature_scale_kelvin = 1.0f; // keep affine map well-conditioned even for nearly uniform input temperature
+                    temperature_scale_adaptive = true;
+                }
             }
         }
         si_ref_u = max_u;
@@ -763,14 +1464,15 @@ void main_setup() {
                 " to " + alignl(16u, to_string(fmtf(u_max_prof))) + " m/s |");
     }
 
-    units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, k_temperature_ref_kelvin);
+    units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
+    units.set_temperature_reference(1.0f, temperature_ref_kelvin); // T_lbm=1.0 always maps to adaptive T_ref
 
     float u_scale = lbm_ref_u / si_ref_u;
     float z_off = units.x(z_si_offset);
 
     float lbm_nu = units.nu(si_nu);
     const float si_alpha_air = 2.10E-5f; // thermal diffusivity of air [m^2/s]
-    const float si_beta_air = 1.0f / k_temperature_ref_kelvin; // volumetric thermal expansion [1/K]
+    const float si_beta_air = 1.0f / temperature_ref_kelvin; // volumetric thermal expansion [1/K]
     float lbm_alpha = units.alpha(si_alpha_air);
     float lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
     auto update_coriolis = [&](const bool show_info) {
@@ -799,11 +1501,8 @@ void main_setup() {
             coriolis_Omegaz_lbmu = Omegaz_si * dt_si;
 
             if (show_info) {
-                println("| Coriolis enabled. Center lon,lat = " + to_string(center_lon_deg, 6u) + "," + to_string(center_lat_deg, 6u) + "               |");
-                println("| Coriolis Omega(lbmu)    = ("
-                    + to_string(coriolis_Omegax_lbmu, 8u) + ","
-                    + to_string(coriolis_Omegay_lbmu, 8u) + ","
-                    + to_string(coriolis_Omegaz_lbmu, 8u) + ") per step                        |");
+                print_kv_row("Coriolis", "enabled. center(lon,lat)=(" + to_string(center_lon_deg, 6u) + ", " + to_string(center_lat_deg, 6u) + ") deg");
+                print_kv_row("", "Omega(lbmu)=(" + to_string(coriolis_Omegax_lbmu, 8u) + ", " + to_string(coriolis_Omegay_lbmu, 8u) + ", " + to_string(coriolis_Omegaz_lbmu, 8u) + ") per step");
             }
 
             const float omega_si = 7.292e-5f;           // Earth rotation [1/s]
@@ -813,46 +1512,49 @@ void main_setup() {
             }
             coriolis_f_lbmu = f_si * dt_si;
             if (show_info) {
-                std::ostringstream os;
-                os << "| Coriolis (f): center(lon,lat)=(" << center_lon_deg << ", " << center_lat_deg << ") deg.";
-                println(os.str());
-                std::ostringstream os2;
-                os2 << "| Coriolis (f): f_SI=" << f_si << " 1/s, f_LBM=" << coriolis_f_lbmu << ".";
-                println(os2.str());
+                print_kv_row("", "f_SI=" + to_string(f_si, 8u) + " 1/s, f_LBM=" + to_string(coriolis_f_lbmu, 8u));
             }
         }
         else if (show_info) {
-            println("| Coriolis term disabled by 'coriolis_term' setting in .luw.                  |");
+            print_kv_row("Coriolis", "disabled by 'coriolis_term' setting in .luw");
         }
     };
 
     if (!dataset_generation && !profile_generation) {
         println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
         println("| LBM Reference U | " + alignl(7u, to_string(fmtf(lbm_ref_u))) + alignl(50u, "(Nondimensionalized)") + " |");
-        println("| Temp Reference  | " + alignr(57u, "293.15 K -> T_lbm=1.0") + " |");
-        println("| Temp Valid SI   | " + alignr(57u, "-50 C ... 70 C  (223.15 K ... 343.15 K)") + " |");
+        if (temperature_ref_adaptive) {
+            println("| Temp Reference  | " + alignr(57u, to_string(fmtf(temperature_ref_kelvin)) + " K (auto center of input Tmin/Tmax)") + " |");
+        }
+        else {
+            println("| Temp Reference  | " + alignr(57u, to_string(fmtf(temperature_ref_kelvin)) + " K (default)") + " |");
+        }
+        if (temperature_scale_adaptive) {
+            println("| Temp Scale      | " + alignr(57u, to_string(fmtf(temperature_scale_kelvin)) + " K per 1.0 T_lbm (auto from input range)") + " |");
+        }
+        else {
+            println("| Temp Scale      | " + alignr(57u, to_string(fmtf(temperature_scale_kelvin)) + " K per 1.0 T_lbm (default)") + " |");
+        }
         println("| Thermal alpha   | " + alignr(57u, to_string(lbm_alpha, 8u)) + " |");
+        println("| Thermal tau_T   | " + alignr(57u, to_string(2.0f * lbm_alpha + 0.5f, 8u)) + " |");
         println("| Thermal beta    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_beta, 8u) : string("0 (disabled by buoyancy=false)")) + " |");
+        if (lbm_alpha < 1.0e-6f) {
+            println("| WARNING         | thermal alpha is very small in LBM units; temperature diffusion may be stiff. |");
+        }
     }
 
     update_coriolis(!dataset_generation && !profile_generation);
  
-    std::vector<SamplePoint> samples_si;
     std::vector<SamplePoint> samples;
-    bool csv_has_temperature = false;
-    ulong csv_rows_with_temperature = 0ul;
-    float csv_temp_min_si = k_temperature_ref_kelvin;
-    float csv_temp_max_si = k_temperature_ref_kelvin;
     bool use_temperature_bc = false;
+    float T_bc_min_lbm = 1.0f;
+    float T_bc_max_lbm = 1.0f;
     if (!dataset_generation && !profile_generation) {
-        // read CSV
-        const std::string csv_path = parent + "/proj_temp/SurfData_" + datetime + ".csv";
-        samples_si = read_samples(csv_path, &csv_has_temperature, &csv_rows_with_temperature, &csv_temp_min_si, &csv_temp_max_si);
         if (samples_si.empty()) { println("ERROR: no inlet samples. Aborting."); wait(); exit(-1); }
         use_temperature_bc = buoyancy_enabled && csv_has_temperature;
 
         if (csv_has_temperature) {
-            println("| CSV T column    | detected (" + to_string(csv_rows_with_temperature) + " rows)                               |");
+            println("| T column        | detected (" + to_string(csv_rows_with_temperature) + " rows)                               |");
             println("| CSV T range SI  | " + alignr(24u, to_string(fmtf(csv_temp_min_si))) +
                     " to " + alignl(16u, to_string(fmtf(csv_temp_max_si))) + " K |");
             if (!buoyancy_enabled) {
@@ -863,7 +1565,7 @@ void main_setup() {
             }
         }
         else {
-            println("| CSV T column    | not found, keep legacy velocity-only boundary behavior           |");
+            println("| T column        | not found, keep legacy velocity-only boundary behavior           |");
         }
 
         // convert samples to LBM units
@@ -873,8 +1575,9 @@ void main_setup() {
             SamplePoint sp;
             sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z));
             sp.u = s.u * u_scale;
+            sp.patch = s.patch;
             if (use_temperature_bc) {
-                sp.T = units.T(s.T); // Kelvin -> nondimensional temperature (T_ref=293.15K => T_lbm=1.0)
+                sp.T = units.T(s.T); // Kelvin -> nondimensional temperature (adaptive affine scaling from Tmin/Tmax)
                 if (s.T < k_temperature_min_kelvin || s.T > k_temperature_max_kelvin) out_of_temp_range++;
             }
             else {
@@ -885,14 +1588,17 @@ void main_setup() {
         if (use_temperature_bc && out_of_temp_range > 0ul) {
             println("| WARNING: " + to_string(out_of_temp_range) + " temperature samples are outside [-50C, 70C].                |");
         }
+        if (use_temperature_bc) {
+            T_bc_min_lbm = units.T(csv_temp_min_si);
+            T_bc_max_lbm = units.T(csv_temp_max_si);
+            if (T_bc_min_lbm > T_bc_max_lbm) std::swap(T_bc_min_lbm, T_bc_max_lbm);
+        }
     }
 
 
 	// ------------------------------- MESH LOADING -------------------------------
-    println("|-----------------------------------------------------------------------------|");
-    println("|                        LOADING GEOMETRY AND VOXELIZE                        |");
-    println("|-----------------------------------------------------------------------------|");
-    println("| Loading buildings as geometry, meshing...                                   |");
+    print_section_title("LOADING GEOMETRY AND VOXELIZE");
+    print_kv_row("Geometry", "Loading buildings as geometry, meshing...");
 
     std::string stl_path;
     {
@@ -942,7 +1648,7 @@ void main_setup() {
     Mesh* mesh = read_stl(stl_path);
 
 
-    println("| Time code: " + now_str() + "                                              |");
+    print_kv_row("Time code", "[" + now_str() + "]");
 
     if (!mesh) { println("ERROR: failed to load STL"); wait(); exit(-1); }
     const float3 stl_min_si = mesh->pmin;
@@ -954,21 +1660,19 @@ void main_setup() {
     const float target_lbm_x = units.x(si_size.x); const float scale_geom = target_lbm_x / mesh->get_bounding_box_size().x; mesh->scale(scale_geom);
     mesh->translate(float3(1.0f - mesh->pmin.x, 1.0f - mesh->pmin.y, 1.0f - mesh->pmin.z));
 
-    println("| Geometry scaled by " + to_string(scale_geom, 4u) + ", ready for voxelization.                           |");
+    print_kv_row("Geometry", "scaled by " + to_string(scale_geom, 4u) + ", ready for voxelization");
 
     auto run_lbm = [&](LBM& lbm, const std::string& vtk_prefix, const bool extra_spacing) {
-        println("|-----------------------------------------------------------------------------|");
-        println("|                           LBM SOLVER INFORMATION                            |");
+        print_section_title("LBM SOLVER INFORMATION");
 
         lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
         const ulong lbm_T = 20001ull;
         const uint  vtk_dt = 20000u;        // export VTK
-
         auto print_task_finished = [&]() {
-            println("| Task finished   | " + alignr(57u, now_str()) + " |");
+            print_kv_row("Task finished", "[" + now_str() + "]");
             if (extra_spacing) {
-                println("|                                                                             |");
+                println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
             }
         };
 
@@ -977,8 +1681,26 @@ void main_setup() {
         std::filesystem::create_directories(std::filesystem::path(vtk_dir).parent_path());
         std::filesystem::create_directories(snapshots_dir);
         if (use_temperature_bc) {
-            println("| VTK export      | include temperature T field in Kelvin                      |");
+            print_kv_row("Export mode", "include temperature T field in Kelvin");
         }
+        std::vector<string> vtk_saved_files;
+        vtk_saved_files.reserve(16u);
+
+        auto push_vtk_saved_file = [&](const string& filename) {
+            vtk_saved_files.push_back(filename);
+        };
+
+        auto flush_vtk_saved_files = [&]() {
+            if (vtk_saved_files.empty()) return;
+            std::lock_guard<std::mutex> lock(info.allow_printing);
+            print("\r");
+            bool first = true;
+            for (const string& filename : vtk_saved_files) {
+                print_kv_row(first ? "VTK file" : "", filename + " saved");
+                first = false;
+            }
+            vtk_saved_files.clear();
+        };
 
         const ulong total_steps = lbm_T + (research_output_steps > 0u ? (ulong)research_output_steps : 0ull);
         const bool do_avg = purge_avg_steps > 0u;
@@ -1082,7 +1804,10 @@ void main_setup() {
         };
 
         auto finalize_avg = [&]() {
-            if (avg_count == 0ull) return;
+            if (avg_count == 0ull) {
+                flush_vtk_saved_files();
+                return;
+            }
             const std::string avg_name = vtk_prefix + datetime + "_avg";
             const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
 #ifdef TEMPERATURE
@@ -1093,8 +1818,10 @@ void main_setup() {
             write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(),
                           avg_u.data(), avg_rho.data(), T_avg_ptr,
                           M2_u.data(), M2_v.data(), M2_w.data(),
-                          avg_count, true);
-            println("| Avg samples     | " + alignr(57u, to_string(avg_count)) + " |");
+                          avg_count, true, false);
+            push_vtk_saved_file(avg_file);
+            flush_vtk_saved_files();
+            print_kv_row("Avg samples", to_string(avg_count));
         };
 
 #if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)
@@ -1120,14 +1847,18 @@ void main_setup() {
 
             // ------------------ synchronous VTK output ------------------
             if (lbm.get_t() != 0u && lbm.get_t() % vtk_dt == 0u) {
+                const ulong vtk_t = lbm.get_t();
                 // velocity (vector field)
-                lbm.u.write_device_to_vtk(vtk_dir, true);
+                push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
+                lbm.u.write_device_to_vtk(vtk_dir, true, false);
                 // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
-                lbm.rho.write_device_to_vtk(vtk_dir, true);
+                push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
+                lbm.rho.write_device_to_vtk(vtk_dir, true, false);
 #ifdef TEMPERATURE
                 if (use_temperature_bc) {
                     // temperature in SI units (Kelvin)
-                    lbm.T.write_device_to_vtk(vtk_dir, true);
+                    push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
+                    lbm.T.write_device_to_vtk(vtk_dir, true, false);
                 }
 #endif
             }
@@ -1146,13 +1877,17 @@ void main_setup() {
 
             while (lbm.get_t() < lbm_T_research) {
                 lbm.run(1u, lbm_T_research);
-                lbm.u.write_device_to_vtk(vtk_dir, true);
+                const ulong vtk_t = lbm.get_t();
+                push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
+                lbm.u.write_device_to_vtk(vtk_dir, true, false);
                 // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
-                lbm.rho.write_device_to_vtk(vtk_dir, true);
+                push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
+                lbm.rho.write_device_to_vtk(vtk_dir, true, false);
 #ifdef TEMPERATURE
                 if (use_temperature_bc) {
                     // temperature in SI units (Kelvin)
-                    lbm.T.write_device_to_vtk(vtk_dir, true);
+                    push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
+                    lbm.T.write_device_to_vtk(vtk_dir, true, false);
                 }
 #endif
                 maybe_accumulate_avg();
@@ -1251,7 +1986,9 @@ void main_setup() {
 
     if (!dataset_generation && !profile_generation) {
         // const uint Dx = 2u, Dy = 1u, Dz = 1u;
+        print_section_title("DEVICE INFORMATION");
         LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
+        lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 
         // LBM lbm(lbm_N, lbm_nu);   // single GPU mode
 
@@ -1265,9 +2002,7 @@ void main_setup() {
 
         lbm.voxelize_mesh_on_device(mesh);
         println("| Voxelization done.                                                          |");
-        println("|-----------------------------------------------------------------------------|");
-        println("|                         BUILD BOUNDARY CONDITIONS                           |");
-        println("|-----------------------------------------------------------------------------|");
+        print_section_title("BUILD BOUNDARY CONDITIONS");
         println("| CDF data loaded | " + alignl(57u, to_string(samples_si.size())) + " |");
 
         std::vector<float3> P; P.reserve(samples.size());
@@ -1284,7 +2019,365 @@ void main_setup() {
             }
         }
 
-        if (use_high_order) {
+        const bool use_patch_face_bc = csv_has_patch;
+        std::vector<PatchSurfaceField2D> patch_velocity_fields(6);
+        std::vector<ulong> patch_counts(6, 0ul);
+        if (use_patch_face_bc) {
+            for (const auto& s : samples) {
+                if (s.patch >= 0 && s.patch <= 5) patch_counts[(size_t)s.patch] += 1ul;
+            }
+            println("| Patch samples   | " + alignr(8u, string(patch_name(k_patch_bottom))) + " = " +
+                    alignl(47u, to_string(patch_counts[(size_t)k_patch_bottom])) + " |");
+            for (int patch = k_patch_top; patch <= k_patch_east; ++patch) {
+                patch_velocity_fields[(size_t)patch].build_from_patch(
+                    samples, patch,
+                    [](const SamplePoint& s) { return s.u; },
+                    float3(0.0f));
+                println("|                 | " + alignr(8u, string(patch_name(patch))) + " = " +
+                        alignl(47u, to_string(patch_counts[(size_t)patch])) + " |");
+            }
+        }
+
+#ifdef TEMPERATURE
+        std::vector<PatchSurfaceField2D> patch_temperature_fields(6);
+        if (use_patch_face_bc && use_temperature_bc) {
+            std::vector<ulong> t_patch_counts(6, 0ul);
+            std::vector<float> t_patch_min(6, +FLT_MAX);
+            std::vector<float> t_patch_max(6, -FLT_MAX);
+            for (const auto& s : samples) {
+                if (s.patch < 0 || s.patch > 5) continue;
+                const size_t pid = (size_t)s.patch;
+                t_patch_counts[pid]++;
+                t_patch_min[pid] = fminf(t_patch_min[pid], s.T);
+                t_patch_max[pid] = fmaxf(t_patch_max[pid], s.T);
+            }
+            for (int patch = k_patch_top; patch <= k_patch_east; ++patch) {
+                patch_temperature_fields[(size_t)patch].build_from_patch(
+                    samples, patch,
+                    [](const SamplePoint& s) { return float3(s.T, 0.0f, 0.0f); },
+                    float3(1.0f, 0.0f, 0.0f));
+                if (t_patch_counts[(size_t)patch] > 0ul) {
+                    println("| T patch         | " + string(patch_name(patch)) + ": n=" + to_string(t_patch_counts[(size_t)patch]) +
+                            ", SI " + to_string(fmtf(units.si_T(t_patch_min[(size_t)patch]))) + " .. " +
+                            to_string(fmtf(units.si_T(t_patch_max[(size_t)patch]))) + " K                    |");
+                }
+                else {
+                    println("| T patch         | " + string(patch_name(patch)) + ": n=0                                           |");
+                }
+            }
+        }
+#endif
+
+#ifdef TEMPERATURE
+        GroundTemperaturePlane2D ground_temp_plane;
+        bool use_ground_temperature_bc = false;
+        if (use_temperature_bc && csv_has_patch) {
+            ground_temp_plane.build_from_patch0_samples(samples, 1.0f);
+            use_ground_temperature_bc = ground_temp_plane.has_samples();
+            if (use_ground_temperature_bc) {
+                println("| Ground T plane  | enabled from patch=0 (" + to_string(ground_temp_plane.raw_count()) +
+                        " samples, grid " + to_string(ground_temp_plane.nx()) + "x" +
+                        to_string(ground_temp_plane.ny()) + ", mode=" +
+                        (ground_temp_plane.structured_ready() ? string("2D bilinear") : string("2D nearest")) + ") |");
+            }
+            else {
+                println("| Ground T plane  | patch column detected, but no patch=0 samples found        |");
+            }
+        }
+        auto apply_ground_temperature_plane_bc = [&](const string& order_tag) {
+            if (!use_ground_temperature_bc) return;
+
+            const uint Nx = lbm.get_Nx();
+            const uint Ny = lbm.get_Ny();
+
+            std::vector<float> xy_temp_cache((ulong)Nx * (ulong)Ny, std::numeric_limits<float>::quiet_NaN());
+            ulong mapped_cells = 0ul;
+            ulong unique_xy = 0ul;
+
+            for (ulong n = 0ul; n < lbm.get_N(); ++n) {
+                if ((lbm.flags[n] & TYPE_S) == 0u) continue; // solid only
+
+                uint x = 0u, y = 0u, z = 0u;
+                lbm.coordinates(n, x, y, z);
+                (void)z;
+
+                const ulong xyid = (ulong)y * (ulong)Nx + (ulong)x;
+                float Txy = xy_temp_cache[xyid];
+                if (!std::isfinite(Txy)) {
+                    const float3 pos_xy = lbm.position(x, y, 0u); // ignore z by construction
+                    Txy = ground_temp_plane.eval_xy(pos_xy.x, pos_xy.y);
+                    if (use_temperature_bc) {
+                        Txy = fminf(fmaxf(Txy, T_bc_min_lbm), T_bc_max_lbm);
+                    }
+                    xy_temp_cache[xyid] = Txy;
+                    unique_xy++;
+                }
+
+                // Solid temperature uses ground patch 2D interpolation for the whole vertical column at (x,y).
+                lbm.T[n] = Txy;
+                lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_S | TYPE_T);
+                mapped_cells++;
+            }
+
+            println("| Ground T plane  | mapped " + to_string(mapped_cells) +
+                    " solid cells, unique (x,y)=" + to_string(unique_xy) +
+                    " [" + order_tag + "]                                |");
+            if (mapped_cells == 0ul) {
+                println("| Ground T plane  | WARNING: no solid cells were found                          |");
+            }
+        };
+
+        auto report_temperature_bc_summary = [&](const string& tag) {
+            if (!use_temperature_bc) return;
+            ulong type_t_total = 0ul;
+            ulong type_t_solid = 0ul;
+            ulong type_t_fluid = 0ul;
+            ulong type_t_invalid = 0ul;
+            float t_solid_min = +FLT_MAX, t_solid_max = -FLT_MAX;
+            float t_fluid_min = +FLT_MAX, t_fluid_max = -FLT_MAX;
+            for (ulong n = 0ul; n < lbm.get_N(); ++n) {
+                if ((lbm.flags[n] & TYPE_T) == 0u) continue;
+                type_t_total++;
+                const float Tn = lbm.T[n];
+                if (!std::isfinite(Tn)) {
+                    type_t_invalid++;
+                    continue;
+                }
+                if ((lbm.flags[n] & TYPE_S) != 0u) {
+                    type_t_solid++;
+                    t_solid_min = fminf(t_solid_min, Tn);
+                    t_solid_max = fmaxf(t_solid_max, Tn);
+                }
+                else {
+                    type_t_fluid++;
+                    t_fluid_min = fminf(t_fluid_min, Tn);
+                    t_fluid_max = fmaxf(t_fluid_max, Tn);
+                }
+            }
+
+            println("| Temperature BC  | summary [" + tag + "]: TYPE_T total=" + to_string(type_t_total) +
+                    ", solid=" + to_string(type_t_solid) + ", fluid=" + to_string(type_t_fluid) + "            |");
+            if (type_t_solid > 0ul) {
+                println("| Temperature BC  | solid TYPE_T range SI: " +
+                        to_string(fmtf(units.si_T(t_solid_min))) + " .. " +
+                        to_string(fmtf(units.si_T(t_solid_max))) + " K                      |");
+            }
+            if (type_t_fluid > 0ul) {
+                println("| Temperature BC  | fluid TYPE_T range SI: " +
+                        to_string(fmtf(units.si_T(t_fluid_min))) + " .. " +
+                        to_string(fmtf(units.si_T(t_fluid_max))) + " K                      |");
+            }
+            if (type_t_invalid > 0ul) {
+                println("| Temperature BC  | WARNING: non-finite TYPE_T cells = " + to_string(type_t_invalid) + "                         |");
+            }
+        };
+#endif // TEMPERATURE
+
+        if (use_patch_face_bc) {
+            const uint Nx = lbm.get_Nx();
+            const uint Ny = lbm.get_Ny();
+            const uint Nz = lbm.get_Nz();
+            const int downstream_patch = downstream_to_patch(downstream_bc);
+            std::vector<uchar> voxel_flags((size_t)lbm.get_N());
+            for (ulong n = 0ul; n < lbm.get_N(); ++n) {
+                voxel_flags[(size_t)n] = lbm.flags[n];
+            }
+
+            auto set_zero_velocity = [&](const ulong n) {
+                lbm.u.x[n] = 0.0f;
+                lbm.u.y[n] = 0.0f;
+                lbm.u.z[n] = 0.0f;
+            };
+
+            // Ensure cells below terrain are always solid (robust against tiny STL/domain mismatch gaps).
+            PatchSurfaceField2D ground_height_field;
+            ground_height_field.build_from_patch(
+                samples, k_patch_bottom,
+                [](const SamplePoint& s) { return float3(s.p.z, 0.0f, 0.0f); },
+                float3(z0_lbmu, 0.0f, 0.0f));
+            if (ground_height_field.has_samples()) {
+                std::atomic<ulong> terrain_clipped_to_solid{ 0ul };
+                parallel_for(lbm.get_N(), [&](ulong n) {
+                    if ((lbm.flags[n] & TYPE_S) != 0u) return;
+                    uint x = 0u, y = 0u, z = 0u;
+                    lbm.coordinates(n, x, y, z);
+                    const float3 pos = lbm.position(x, y, z);
+                    const float zg = ground_height_field.eval(pos.x, pos.y).x;
+                    if (pos.z < zg) {
+                        lbm.flags[n] = TYPE_S;
+                        set_zero_velocity(n);
+                        terrain_clipped_to_solid.fetch_add(1ul, std::memory_order_relaxed);
+                    }
+                });
+                if (terrain_clipped_to_solid.load(std::memory_order_relaxed) > 0ul) {
+                    println("| Terrain clip    | below-terrain cells forced to solid: " +
+                            to_string(terrain_clipped_to_solid.load()) + "                    |");
+                }
+                for (ulong n = 0ul; n < lbm.get_N(); ++n) {
+                    voxel_flags[(size_t)n] = lbm.flags[n];
+                }
+            }
+
+            auto voxel_is_solid = [&](const uint xi, const uint yi, const uint zi) -> bool {
+                return (voxel_flags[(size_t)lbm.index(xi, yi, zi)] & TYPE_S) != 0u;
+            };
+
+            std::atomic<ulong> velocity_mapped{ 0ul };
+            std::atomic<ulong> velocity_missing_patch{ 0ul };
+            std::atomic<ulong> outlet_cells{ 0ul };
+            std::atomic<ulong> velocity_grounded{ 0ul };
+            std::atomic<ulong> velocity_below_patch_support{ 0ul };
+            parallel_for(lbm.get_N(), [&](ulong n) {
+                uint x = 0u, y = 0u, z = 0u;
+                lbm.coordinates(n, x, y, z);
+                if (z == 0u) {
+                    lbm.flags[n] = TYPE_S;
+                    set_zero_velocity(n);
+                    return;
+                }
+
+                const int patch = boundary_cell_to_patch(x, y, z, Nx, Ny, Nz);
+                if (patch < 0) return;
+
+                const bool voxel_self_solid = (voxel_flags[(size_t)n] & TYPE_S) != 0u;
+                bool side_below_ground = false;
+                if (patch == k_patch_west && Nx > 1u) {
+                    side_below_ground = voxel_is_solid(1u, y, z);
+                }
+                else if (patch == k_patch_east && Nx > 1u) {
+                    side_below_ground = voxel_is_solid(Nx - 2u, y, z);
+                }
+                else if (patch == k_patch_south && Ny > 1u) {
+                    side_below_ground = voxel_is_solid(x, 1u, z);
+                }
+                else if (patch == k_patch_north && Ny > 1u) {
+                    side_below_ground = voxel_is_solid(x, Ny - 2u, z);
+                }
+
+                if (voxel_self_solid || side_below_ground) {
+                    lbm.flags[n] = TYPE_S;
+                    set_zero_velocity(n);
+                    velocity_grounded.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
+
+                const PatchSurfaceField2D& face_field = patch_velocity_fields[(size_t)patch];
+                if (!face_field.has_samples()) {
+                    velocity_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
+
+                const float3 pos = lbm.position(x, y, z);
+                float a = 0.0f;
+                float b = 0.0f;
+                if (!patch_surface_coordinates(patch, pos, a, b)) {
+                    velocity_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
+
+                const bool is_side_patch =
+                    (patch == k_patch_west || patch == k_patch_east ||
+                     patch == k_patch_south || patch == k_patch_north);
+                if (is_side_patch && face_field.below_sample_support(a, b)) {
+                    lbm.flags[n] = TYPE_S;
+                    set_zero_velocity(n);
+                    velocity_below_patch_support.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
+
+                lbm.flags[n] = TYPE_E;
+                if (patch == downstream_patch) {
+                    outlet_cells.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
+
+                const float3 u = face_field.eval(a, b);
+                lbm.u.x[n] = u.x;
+                lbm.u.y[n] = u.y;
+                lbm.u.z[n] = u.z;
+                velocity_mapped.fetch_add(1ul, std::memory_order_relaxed);
+            });
+            println("| Velocity BC     | patch-driven 2D mapping: " + to_string(velocity_mapped.load()) + " cells                 |");
+            if (velocity_grounded.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | underground no-slip cells: " + to_string(velocity_grounded.load()) + "                     |");
+            }
+            if (velocity_below_patch_support.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | side cells below terrain support -> solid: " + to_string(velocity_below_patch_support.load()) + "     |");
+            }
+            if (outlet_cells.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | downstream outlet cells: " + to_string(outlet_cells.load()) + " (no fixed velocity)        |");
+            }
+            if (velocity_missing_patch.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | WARNING: missing patch samples for " + to_string(velocity_missing_patch.load()) + " cells         |");
+            }
+
+#ifdef TEMPERATURE
+            if (use_temperature_bc) {
+                std::atomic<ulong> temperature_mapped{ 0ul };
+                std::atomic<ulong> temperature_missing_patch{ 0ul };
+                parallel_for(lbm.get_N(), [&](ulong n) {
+                    uint x = 0u, y = 0u, z = 0u;
+                    lbm.coordinates(n, x, y, z);
+                    if (z == 0u) return;
+
+                    const int patch = boundary_cell_to_patch(x, y, z, Nx, Ny, Nz);
+                    if (patch < 0) return;
+                    if ((lbm.flags[n] & TYPE_S) != 0u) return; // solid temperature is handled by ground patch plane
+
+                    const PatchSurfaceField2D& face_field_t = patch_temperature_fields[(size_t)patch];
+                    if (!face_field_t.has_samples()) {
+                        temperature_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
+                        return;
+                    }
+
+                    const float3 pos = lbm.position(x, y, z);
+                    float a = 0.0f;
+                    float b = 0.0f;
+                    if (!patch_surface_coordinates(patch, pos, a, b)) {
+                        temperature_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
+                        return;
+                    }
+                    float Tn = face_field_t.eval(a, b).x;
+                    if (use_temperature_bc) {
+                        Tn = fminf(fmaxf(Tn, T_bc_min_lbm), T_bc_max_lbm);
+                    }
+                    lbm.T[n] = Tn;
+                    lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_T);
+                    temperature_mapped.fetch_add(1ul, std::memory_order_relaxed);
+                });
+                println("| Temperature BC  | patch-driven 2D mapping: " + to_string(temperature_mapped.load()) + " cells              |");
+                if (temperature_missing_patch.load(std::memory_order_relaxed) > 0ul) {
+                    println("|                 | WARNING: missing patch samples for " + to_string(temperature_missing_patch.load()) + " cells      |");
+                }
+            }
+            apply_ground_temperature_plane_bc("patch-2d");
+            report_temperature_bc_summary("patch-2d");
+#endif // TEMPERATURE
+            print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
+
+            if (flux_correction) {
+                print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
+                auto eval = [&](const float3& q)->float3 {
+                    if (downstream_patch < k_patch_top || downstream_patch > k_patch_east) return float3(0.0f);
+                    const PatchSurfaceField2D& f = patch_velocity_fields[(size_t)downstream_patch];
+                    if (!f.has_samples()) return float3(0.0f);
+                    float a = 0.0f;
+                    float b = 0.0f;
+                    if (!patch_surface_coordinates(downstream_patch, q, a, b)) return float3(0.0f);
+                    return f.eval(a, b);
+                };
+                apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
+                    &avg_du, &net_b, &net_a);
+#ifdef TEMPERATURE
+                if (use_temperature_bc) report_temperature_bc_summary("patch-2d/post-flux");
+#endif
+            }
+            else {
+                print_kv_row("Flux correction", "skipped. Set flux_correction=true to enable");
+            }
+        }
+        else if (use_high_order) {
             KNNInterpolatorHD knn_hd(std::move(P), std::move(Uv));
             // Calculate z base threshold in LBM units
             const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu;
@@ -1366,13 +2459,10 @@ void main_setup() {
                         std::thread progress_thread([&]() {
                             while (!done.load(std::memory_order_relaxed)) {
                                 const double pct = 100.0 * (double)processed.load(std::memory_order_relaxed) / (double)Nface;
-                                std::fprintf(stdout, "\r| [%s] temperature BC init (HD): %6.3f%%                      |", now_str().c_str(), pct);
-                                std::fflush(stdout);
+                                reprint("| [" + now_str() + "] temperature BC init (HD): " + to_string((float)pct, 3u) + "% |");
                                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                             }
-                            std::fprintf(stdout, "\r| [%s] temperature BC init (HD): %6.3f%%                      |", now_str().c_str(), 100.0);
-                            std::fputc('\n', stdout);
-                            std::fflush(stdout);
+                            println("| [" + now_str() + "] temperature BC init (HD): 100.000% |");
                         });
 
                         std::vector<std::thread> workers;
@@ -1389,7 +2479,10 @@ void main_setup() {
                                         uint x = 0u, y = 0u, z = 0u;
                                         lbm.coordinates(n, x, y, z);
                                         const float3 pos = lbm.position(x, y, z);
-                                        const float Tn = (pos.z < z_base_threshold_lbmu) ? 1.0f : knn_hd_T.eval(pos).x;
+                                        float Tn = (pos.z < z_base_threshold_lbmu) ? 1.0f : knn_hd_T.eval(pos).x;
+                                        if (use_temperature_bc) {
+                                            Tn = fminf(fmaxf(Tn, T_bc_min_lbm), T_bc_max_lbm);
+                                        }
                                         lbm.T[n] = Tn;
                                         lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_T);
                                         if (++local_done == 512ul) {
@@ -1410,19 +2503,24 @@ void main_setup() {
                     println("| Temperature BC  | mapped " + to_string(mapped_total) + "/" + to_string(Nbc) + " cells (high-order)      |");
                 }
             }
+            apply_ground_temperature_plane_bc("high-order");
+            report_temperature_bc_summary("high-order");
 #endif // TEMPERATURE
-            println("| [" + now_str() + "] Boundary initialization complete (high-order).        |");
+            print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
             if (flux_correction) {
-                println("| [" + now_str() + "] Starting flux correction...                           |");
+                print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 { return inlet_hd(q); };
                 apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+#ifdef TEMPERATURE
+                if (use_temperature_bc) report_temperature_bc_summary("high-order/post-flux");
+#endif
                 // std::fprintf(stdout, "[flux] check: net_before=%.9e, net_after=%.9e, avg|Ku|=%.9e m/s\n", net_b, net_a, avg_du);
             }
             else {
-                println("| Skipping flux correction. Use flux_correction = true to enable.   |");
+                print_kv_row("Flux correction", "skipped. Set flux_correction=true to enable");
             }
         }
         else {
@@ -1452,25 +2550,33 @@ void main_setup() {
                     if (!inlet_face) return;
 
                     const float3 pos = lbm.position(x, y, z);
-                    const float Tn = (pos.z < z_temperature_threshold_lbmu) ? 1.0f : nn_T.eval(pos).x;
+                    float Tn = (pos.z < z_temperature_threshold_lbmu) ? 1.0f : nn_T.eval(pos).x;
+                    if (use_temperature_bc) {
+                        Tn = fminf(fmaxf(Tn, T_bc_min_lbm), T_bc_max_lbm);
+                    }
                     lbm.T[n] = Tn;
                     lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_T);
                     temperature_mapped.fetch_add(1ul, std::memory_order_relaxed);
                 });
                 println("| Temperature BC  | mapped " + to_string(temperature_mapped.load()) + " cells (low-order)                     |");
             }
+            apply_ground_temperature_plane_bc("low-order");
+            report_temperature_bc_summary("low-order");
 #endif // TEMPERATURE
-            println("| [" + now_str() + "] Boundary initialization complete (low-order).             |");
+            print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
             if (flux_correction) {
-                println("| [" + now_str() + "] Starting flux correction...                           |");
+                print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 { return inlet(q); };
                 apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+#ifdef TEMPERATURE
+                if (use_temperature_bc) report_temperature_bc_summary("low-order/post-flux");
+#endif
             }
             else {
-                println("| Skipping flux correction. Use flux_correction = true to enable.   |");
+                print_kv_row("Flux correction", "skipped. Set flux_correction=true to enable");
             }
         }
 
@@ -1525,7 +2631,8 @@ void main_setup() {
 
                 si_ref_u = inflow_si;
                 u_scale = lbm_ref_u / si_ref_u;
-                units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, k_temperature_ref_kelvin);
+                units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
+                units.set_temperature_reference(1.0f, temperature_ref_kelvin);
                 z_off = units.x(z_si_offset);
                 lbm_nu = units.nu(si_nu);
                 lbm_alpha = units.alpha(si_alpha_air);
@@ -1541,16 +2648,16 @@ void main_setup() {
 
                 const float3 inflow_lbmu = wind_velocity_lbmu(inflow_si, angle_deg, u_scale);
 
+                print_section_title("DEVICE INFORMATION");
                 LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
+                lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 
                 lbm.voxelize_mesh_on_device(mesh);
                 println("| Voxelization done.                                                          |");
-                println("|-----------------------------------------------------------------------------|");
-                println("|                         BUILD BOUNDARY CONDITIONS                           |");
-                println("|-----------------------------------------------------------------------------|");
+                print_section_title("BUILD BOUNDARY CONDITIONS");
                 initialize_uniform_velocity(lbm, inflow_lbmu);
                 apply_velocity_boundaries(lbm, inflow_lbmu);
-                println("| " + alignl(75u, "[" + now_str() + "] Boundary initialization complete (dataset).") + " |");
+                print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
                 const std::string vtk_prefix = "DG_" + format_tag(inflow_si) + "_" + format_tag(angle_deg) + "_";
                 run_lbm(lbm, vtk_prefix, true);
@@ -1655,18 +2762,18 @@ void main_setup() {
             const float dir_x = -sinf(angle_rad);
             const float dir_y = -cosf(angle_rad);
 
+            print_section_title("DEVICE INFORMATION");
             LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
+            lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 
             lbm.voxelize_mesh_on_device(mesh);
             println("| Voxelization done.                                                          |");
-            println("|-----------------------------------------------------------------------------|");
-            println("|                         BUILD BOUNDARY CONDITIONS                           |");
-            println("|-----------------------------------------------------------------------------|");
+            print_section_title("BUILD BOUNDARY CONDITIONS");
 
             const std::vector<float> u_by_z = compute_u_by_z(lbm);
             initialize_profile_velocity(lbm, u_by_z, dir_x, dir_y);
             apply_profile_boundaries(lbm, u_by_z, dir_x, dir_y);
-            println("| " + alignl(75u, "[" + now_str() + "] Boundary initialization complete (profile).") + " |");
+            print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
             const std::string vtk_prefix = "ANG_" + format_tag(angle_deg) + "_";
             run_lbm(lbm, vtk_prefix, true);

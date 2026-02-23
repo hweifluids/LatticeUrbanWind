@@ -1514,9 +1514,9 @@ string opencl_c_container() {
 			}
 				) + "#endif" + R( // EQUILIBRIUM_BOUNDARIES
 					float fxn = fx, fyn = fy, fzn = fz;
-	const float cor_x = 2.0f * rhon * (omega_y * uzn - omega_z * uyn);
-	const float cor_y = 2.0f * rhon * (omega_z * uxn - omega_x * uzn);
-	const float cor_z = 2.0f * rhon * (omega_x * uyn - omega_y * uxn);
+	const float cor_x = -2.0f * rhon * (omega_y * uzn - omega_z * uyn);
+	const float cor_y = -2.0f * rhon * (omega_z * uxn - omega_x * uzn);
+	const float cor_z = -2.0f * rhon * (omega_x * uyn - omega_y * uxn);
 	fxn += cor_x;
 	fyn += cor_y;
 	fzn += cor_z;
@@ -1853,9 +1853,9 @@ string opencl_c_container() {
 	float rhon, uxn, uyn, uzn;
 	calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
 	float fxn = fx, fyn = fy, fzn = fz;
-	const float cor_x = 2.0f * rhon * (omega_y * uzn - omega_z * uyn);
-	const float cor_y = 2.0f * rhon * (omega_z * uxn - omega_x * uzn);
-	const float cor_z = 2.0f * rhon * (omega_x * uyn - omega_y * uxn);
+	const float cor_x = -2.0f * rhon * (omega_y * uzn - omega_z * uyn);
+	const float cor_y = -2.0f * rhon * (omega_z * uxn - omega_x * uzn);
+	const float cor_z = -2.0f * rhon * (omega_x * uyn - omega_y * uxn);
 	fxn += cor_x;
 	fyn += cor_y;
 	fzn += cor_z;

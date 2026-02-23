@@ -749,50 +749,38 @@ string LBM_Domain::Graphics::device_defines() const { return
 
 
 vector<Device_Info> smart_device_selection(const uint D) {
-	const vector<Device_Info>& devices = get_devices(); // a vector of all available OpenCL devices
+	const vector<Device_Info>& devices = get_devices(false); // a vector of all available OpenCL devices
 	vector<Device_Info> device_infos(D);
-	const int user_specified_devices = (int)main_arguments.size();
-	print_warning(to_string(D) +"<->"+ to_string(user_specified_devices) +"======");
-	if(user_specified_devices>0) { // user has selevted specific devices as command line arguments
-		if(user_specified_devices==D) { // as much specified devices as domains
-			// print_warning("======"+to_string(D) +"<->" + to_string(user_specified_devices));
-			for(uint d=0; d<D; d++) device_infos[d] = select_device_with_id(to_uint(main_arguments[d]), devices); // use list of devices IDs specified by user
-		} else {
-			// print_warning("!!!!!!!!!!!!!!======"+to_string(D)  +"<->"+ to_string(user_specified_devices));
-			print_warning("Incorrect number of devices specified. Using single fastest device for all domains.");
-			for(uint d=0; d<D; d++) device_infos[d] = select_device_with_most_flops(devices);
-		}
-	} else { // device auto-selection
-		vector<vector<Device_Info>> device_type_ids; // a vector of all different devices, containing vectors of their device IDs
-		for(uint i=0u; i<(uint)devices.size(); i++) {
-			const string name_i = devices[i].name;
-			bool already_exists = false;
-			for(uint j=0u; j<(uint)device_type_ids.size(); j++) {
-				const string name_j = device_type_ids[j][0].name;
-				if(name_i==name_j) {
-					device_type_ids[j].push_back(devices[i]);
-					already_exists = true;
-				}
-			}
-			if(!already_exists) device_type_ids.push_back(vector<Device_Info>(1, devices[i]));
-		}
-		float best_value = -1.0f;
-		int best_j = -1;
+	// Device ID selection via CLI is disabled; always auto-select devices.
+	vector<vector<Device_Info>> device_type_ids; // a vector of all different devices, containing vectors of their device IDs
+	for(uint i=0u; i<(uint)devices.size(); i++) {
+		const string name_i = devices[i].name;
+		bool already_exists = false;
 		for(uint j=0u; j<(uint)device_type_ids.size(); j++) {
-			const float value = device_type_ids[j][0].tflops;
-			if((uint)device_type_ids[j].size()>=D && value>best_value) {
-				best_value = value;
-				best_j = j;
+			const string name_j = device_type_ids[j][0].name;
+			if(name_i==name_j) {
+				device_type_ids[j].push_back(devices[i]);
+				already_exists = true;
 			}
 		}
-		if(best_j>=0) { // select all devices of fastest device type with at least D devices of the same type
-			for(uint d=0; d<D; d++) device_infos[d] = device_type_ids[best_j][d];
-		} else {
-			print_warning("Not enough devices of the same type available. Using single fastest device for all domains.");
-			for(uint d=0; d<D; d++) device_infos[d] = select_device_with_most_flops(devices);
-		}
-		//for(uint j=0u; j<(uint)device_type_ids.size(); j++) print_info("Device Type "+to_string(j)+" ("+device_type_ids[j][0].name+"): "+to_string((uint)device_type_ids[j].size())+"x");
+		if(!already_exists) device_type_ids.push_back(vector<Device_Info>(1, devices[i]));
 	}
+	float best_value = -1.0f;
+	int best_j = -1;
+	for(uint j=0u; j<(uint)device_type_ids.size(); j++) {
+		const float value = device_type_ids[j][0].tflops;
+		if((uint)device_type_ids[j].size()>=D && value>best_value) {
+			best_value = value;
+			best_j = j;
+		}
+	}
+	if(best_j>=0) { // select all devices of fastest device type with at least D devices of the same type
+		for(uint d=0; d<D; d++) device_infos[d] = device_type_ids[best_j][d];
+	} else {
+		print_warning("Not enough devices of the same type available. Using single fastest device for all domains.");
+		for(uint d=0; d<D; d++) device_infos[d] = select_device_with_most_flops(devices);
+	}
+	//for(uint j=0u; j<(uint)device_type_ids.size(); j++) print_info("Device Type "+to_string(j)+" ("+device_type_ids[j][0].name+"): "+to_string((uint)device_type_ids[j].size())+"x");
 	return device_infos;
 }
 

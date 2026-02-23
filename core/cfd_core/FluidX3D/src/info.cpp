@@ -1,6 +1,47 @@
 #include "info.hpp"
 #include "lbm.hpp"
 
+namespace {
+constexpr uint k_progress_col_mlups = 9u;
+constexpr uint k_progress_col_bandwidth = 13u;
+constexpr uint k_progress_col_steps = 11u;
+constexpr uint k_progress_col_current = 19u;
+constexpr uint k_progress_col_time = 36u;
+
+inline string progress_separator_top() {
+	return "|---------.-------'-----.-----------.-------------------.------------------------------------|";
+}
+inline string progress_separator_bottom() {
+	return "|---------'-------------'-----------'-------------------'------------------------------------|";
+}
+inline string progress_header_row(const bool elapsed_time) {
+	return
+		"|"+alignc(k_progress_col_mlups, "MLUPs")+"|"+
+		alignc(k_progress_col_bandwidth, "Bandwidth")+"|"+
+		alignc(k_progress_col_steps, "Steps/s")+"|"+
+		alignc(k_progress_col_current, "Current Step")+"|"+
+		alignc(k_progress_col_time, elapsed_time ? "Elapsed Time" : "Time Remaining")+"|";
+}
+inline string progress_value_row(const Info& info) {
+	if(info.lbm==nullptr) return "";
+	const double dt_smooth = info.runtime_lbm_timestep_smooth>1.0E-9 ? info.runtime_lbm_timestep_smooth : 1.0E-9;
+	float progress_ratio = 1.0f;
+	if(info.steps>0ull) {
+		const float ratio_raw = (float)(info.lbm->get_t()-info.steps_last)/(float)info.steps;
+		progress_ratio = ratio_raw<0.0f ? 0.0f : (ratio_raw>1.0f ? 1.0f : ratio_raw);
+	}
+	const string current = info.steps==max_ulong
+		? to_string(info.lbm->get_t())
+		: to_string(info.lbm->get_t())+" "+print_percentage(progress_ratio);
+	return
+		"|"+alignc(k_progress_col_mlups, to_uint((double)info.lbm->get_N()*1E-6/dt_smooth))+"|"+
+		alignc(k_progress_col_bandwidth, to_string(to_uint((double)info.lbm->get_N()*(double)bandwidth_bytes_per_cell_device()*1E-9/dt_smooth))+" GB/s")+"|"+
+		alignc(k_progress_col_steps, to_uint(1.0/dt_smooth))+"|"+
+		alignc(k_progress_col_current, current)+"|"+
+		alignc(k_progress_col_time, print_time(info.time()))+"|";
+}
+}
+
 Info info;
 
 void Info::append(const ulong steps, const ulong total_steps, const ulong t) {
@@ -25,26 +66,30 @@ double Info::time() const { // returns either elapsed time or remaining time
 	//return steps==max_ulong ? runtime_lbm : ((double)steps-(double)(lbm->get_t()-steps_last))*runtime_lbm_timestep_smooth; // instantaneous time estimation
 }
 void Info::print_logo() const {
-	const int a=color_light_blue, b=color_orange, c=color_pink;
-	print(".-----------------------------------------------------------------------------.\n");
-	print("|                      "); print(  " ______________  ", a);                  print(" ______________ ", b); print("                      |\n");
-	print("|                       "); print( "\\   ________  | ", a);                  print("|  ________   /", b); print("                       |\n");
-	print("|                        "); print("\\  \\       | | ", a);                  print("| |       /  /", b); print("                        |\n");
-	print("|                         "); print("\\  \\   L  | | ", a);                  print("| |  U   /  /", b); print("                         |\n");
-	print("|                          "); print("\\  \\     | | ", a);                  print("| |     /  /", b); print("                          |\n");
-	print("|                           "); print("\\  \\_.-\"  | ", a);                print("|  \"-._/  /", b); print("                           |\n");
-	print("|                            "); print("\\    _.-\" ", a);  print("_ ", c);  print("\"-._    /", b); print("                            |\n");
-	print("|                             "); print("\\.-\" ", a); print("_.-\" \"-._ ", c); print("\"-./", b); print("                             |\n");
-	print("|                              ");                 print(" .-\"  .-\"-.  \"-. ", c);               print("                              |\n");
-	print("|                               ");                 print("\\  v\"     \"v  /", c);               print("                               |\n");
-	print("|                                ");                 print("\\  \\  W  /  /", c);                print("                                |\n");
-	print("|                                 ");                 print("\\  \\   /  /", c);                print("                                 |\n");
-	print("|                                  ");                 print("\\  \\ /  /", c);                print("                                  |\n");
-	print("|                                   ");                 print("\\  '  /", c);                 print("                                   |\n");
-	print("|                                    ");                 print("\\   /", c);                 print("                                    |\n");
-	print("|                                     ");                 print("\\ /", c);                 print("                FluidX3D Version 3.3 |\n");
-	print("|                                      ");                 print( "'", c);                 print("     Copyright (c) Dr. Moritz Lehmann |\n");
-	print("|-----------------------------------------------------------------------------|\n");
+	const uint inner = (uint)CONSOLE_WIDTH-2u;
+	const vector<string> logo = {
+		" ______________   ______________ ",
+		"\\   ________  | |  ________   /",
+		" \\  \\       | | | |       /  /",
+		"  \\  \\   L  | | | |  U   /  /",
+		"   \\  \\     | | | |     /  /",
+		"    \\  \\_.-\"  | |  \"-._/  /",
+		"     \\    _.-\" _ \"-._    /",
+		"      \\.-\" _.-\" \"-._ \"-./",
+		"       .-\"  .-\"-.  \"-.",
+		"       \\  v\"     \"v  /",
+		"        \\  \\  W  /  /",
+		"         \\  \\   /  /",
+		"          \\  \\ /  /",
+		"           \\  '  /",
+		"            \\   /",
+		"             \\ /",
+		"              '      FluidX3D Version 3.3",
+		"                     Copyright (c) Dr. Moritz Lehmann"
+	};
+	print("|"+string(inner, '-')+"|\n");
+	for(const string& line : logo) print("|"+alignc(inner, line)+"|\n");
+	print("|"+string(inner, '-')+"|\n");
 }
 void Info::print_initialize(LBM* lbm) {
 	info.allow_printing.lock(); // disable print_update() until print_initialize() has finished
@@ -83,9 +128,7 @@ void Info::print_initialize(LBM* lbm) {
 	println("| Kin. Viscosity  | "+alignr(57u, /*************************************************************************************/ to_string(lbm->get_nu(), 8u))+" |");
 	println("| Relaxation Time | "+alignr(57u, /************************************************************************************/ to_string(lbm->get_tau(), 8u))+" |");
 	println("| Reynolds Number | "+alignr(57u, /******************************************/ "Re < "+string(Re>=100.0f ? to_string(to_uint(Re)) : to_string(Re, 6u)))+" |");
-#ifdef VOLUME_FORCE
-	println("| Volume Force    | "+alignr(57u, alignr(15u, to_string(lbm->get_fx(), 8u))+","+alignr(15u, to_string(lbm->get_fy(), 8u))+","+alignr(15u, to_string(lbm->get_fz(), 8u)))+" |");
-#endif // VOLUME_FORCE
+	println("| Coriolis Omega  | "+alignr(57u, alignr(15u, to_string(lbm->get_omega_x(), 8u))+","+alignr(15u, to_string(lbm->get_omega_y(), 8u))+","+alignr(15u, to_string(lbm->get_omega_z(), 8u)))+" |");
 #ifdef SURFACE
 	println("| Surface Tension | "+alignr(57u, /**********************************************************************************/ to_string(lbm->get_sigma(), 8u))+" |");
 #endif // SURFACE
@@ -94,8 +137,9 @@ void Info::print_initialize(LBM* lbm) {
 	println("| Thermal Exp.    | "+alignr(57u, /***********************************************************************************/ to_string(lbm->get_beta(), 8u))+" |");
 #endif // TEMPERATURE
 #ifndef INTERACTIVE_GRAPHICS_ASCII
-	println("|---------.-------'-----.-----------.-------------------.---------------------|");
-	println("| MLUPs   | Bandwidth   | Steps/s   | Current Step      | "+string(steps==max_ulong?"Elapsed Time  ":"Time Remaining")+"      |");
+	println(progress_separator_top());
+	println(progress_header_row(steps==max_ulong));
+	println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
 #else // INTERACTIVE_GRAPHICS_ASCII
 	println("'-----------------'-----------------------------------------------------------'");
 #endif // INTERACTIVE_GRAPHICS_ASCII
@@ -105,13 +149,7 @@ void Info::print_initialize(LBM* lbm) {
 void Info::print_update() const {
 	if(lbm==nullptr) return;
 	info.allow_printing.lock();
-	reprint(
-		"|"+alignr(8, to_uint((double)lbm->get_N()*1E-6/runtime_lbm_timestep_smooth))+" |"+ // MLUPs
-		alignr(7, to_uint((double)lbm->get_N()*(double)bandwidth_bytes_per_cell_device()*1E-9/runtime_lbm_timestep_smooth))+" GB/s |"+ // memory bandwidth
-		alignr(10, to_uint(1.0/runtime_lbm_timestep_smooth))+" | "+ // steps/s
-		(steps==max_ulong ? alignr(17, lbm->get_t()) : alignr(12, lbm->get_t())+" "+print_percentage((float)(lbm->get_t()-steps_last)/(float)steps))+" | "+ // current step
-		alignr(19, print_time(time()))+" |" // either elapsed time or remaining time
-	);
+	reprint(progress_value_row(*this));
 #ifdef GRAPHICS
 	if(key_G) { // print camera settings
 		const string camera_position = "float3("+alignr(9u, to_string(camera.pos.x/(float)lbm->get_Nx(), 6u))+"f*(float)Nx, "+alignr(9u, to_string(camera.pos.y/(float)lbm->get_Ny(), 6u))+"f*(float)Ny, "+alignr(9u, to_string(camera.pos.z/(float)lbm->get_Nz(), 6u))+"f*(float)Nz)";
@@ -125,6 +163,9 @@ void Info::print_update() const {
 	info.allow_printing.unlock();
 }
 void Info::print_finalize() {
+	if(lbm!=nullptr) {
+		println();
+	}
 	lbm = nullptr;
-	println("\n|---------'-------------'-----------'-------------------'---------------------|");
+	println(progress_separator_bottom());
 }

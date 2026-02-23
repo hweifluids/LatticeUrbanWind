@@ -198,7 +198,7 @@ inline void print_device_info(const Device_Info& d) { // print OpenCL device inf
 #else // unknown operating system
 	const string os = "unknown operating system";
 #endif // operating system
-	println("\r|----------------.------------------------------------------------------------|");
+	println("|-----------------.-----------------------------------------------------------|");
 	println("| Device ID      | "+alignl(58, to_string(d.id)                             )+" |");
 	println("| Device Name    | "+alignl(58, d.name                                      )+" |");
 	println("| Device Vendor  | "+alignl(58, d.vendor                                    )+" |");
@@ -207,7 +207,7 @@ inline void print_device_info(const Device_Info& d) { // print OpenCL device inf
 	println("| Compute Units  | "+alignl(58, to_string(d.compute_units)+" at "+to_string(d.clock_frequency)+" MHz ("+to_string(d.cores)+" cores, "+to_string(d.tflops, 3)+" TFLOPs/s)")+" |");
 	println("| Memory, Cache  | "+alignl(58, to_string(d.memory)+" MB "+(d.uses_ram ? "" : "V")+"RAM, "+to_string(d.global_cache)+" KB global / "+to_string(d.local_cache)+" KB local")+" |");
 	println("| Buffer Limits  | "+alignl(58, to_string(d.max_global_buffer)+" MB global, "+to_string(d.max_constant_buffer)+" KB constant")+" |");
-	println("|----------------'------------------------------------------------------------|");
+	println("|-----------------'-----------------------------------------------------------|");
 }
 inline vector<Device_Info> get_devices(const bool print_info=true) { // returns a vector of all available OpenCL devices
 	set_environment_variable((char*)"GPU_SINGLE_ALLOC_PERCENT=100"); // fix maximum buffer allocation size limit for AMD GPUs
@@ -234,9 +234,9 @@ inline vector<Device_Info> get_devices(const bool print_info=true) { // returns 
 		exit(1);
 	}
 	if(print_info) {
-		println("\r|----------------.------------------------------------------------------------|");
+		println("|-----------------.-----------------------------------------------------------|");
 		for(uint i=0u; i<(uint)devices.size(); i++) println("| Device ID "+alignr(4u, i)+" | "+alignl(58u, devices[i].name)+" |");
-		println("|----------------'------------------------------------------------------------|");
+		println("|-----------------'-----------------------------------------------------------|");
 	}
 	return devices;
 }

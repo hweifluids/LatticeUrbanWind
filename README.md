@@ -164,7 +164,7 @@ makeluw conf.luw
 Windows:
 
 ```powershell
-runluw.ps1 0
+runluw conf.luw
 ```
 
 Linux:
@@ -174,7 +174,7 @@ cd core/cfd_core/FluidX3D
 ./make.sh 0
 ```
 
-You can pass multiple GPU indices as needed (e.g., `0 1 2`).
+`runluw` and `FluidX3D.exe` now accept the config file path directly as the first argument.
 
 ### 6) Postprocess (optional)
 

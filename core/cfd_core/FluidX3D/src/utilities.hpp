@@ -6,7 +6,7 @@
 #define UTILITIES_CONSOLE_COLOR
 #define UTILITIES_CONSOLE_INPUT
 #define UTILITIES_CONSOLE_DITHER_LOOKUP
-#define CONSOLE_WIDTH 79
+#define CONSOLE_WIDTH 94
 //#define UTILITIES_NO_CPP17
 
 #pragma warning(disable:26451)
@@ -22,6 +22,9 @@
 #include <chrono>
 #include <thread>
 #include <functional> // for parallel_for(...)
+#include <fstream>
+#include <mutex>
+#include <cctype>
 #undef min
 #undef max
 using std::string;
@@ -2850,11 +2853,20 @@ inline string alignr(const uint n, const string& x="") { // converts x to string
 	s += x;
 	return s.substr((uint)min((int)s.length()-(int)n, (int)n), s.length());
 }
+inline string alignc(const uint n, const string& x="") { // converts x to centered string with spaces on both sides such that length is n if x is not longer than n
+	if((uint)x.length()>=n) return x.substr(0u, n);
+	const uint left = (n-(uint)x.length())/2u;
+	const uint right = n-(uint)x.length()-left;
+	return string(left, ' ')+x+string(right, ' ');
+}
 template<typename T> inline string alignl(const uint n, const T x) { // converts x to string with spaces behind such that length is n if x does not have more digits than n
 	return alignl(n, to_string(x));
 }
 template<typename T> inline string alignr(const uint n, const T x) { // converts x to string with spaces in front such that length is n if x does not have more digits than n
 	return alignr(n, to_string(x));
+}
+template<typename T> inline string alignc(const uint n, const T x) { // converts x to centered string with spaces on both sides such that length is n if x does not have more digits than n
+	return alignc(n, to_string(x));
 }
 
 inline string print_time(const double t) { // input: time in seconds, output: formatted string ___y___d__h__m__s
@@ -2881,14 +2893,244 @@ inline string print_progress(const float x, const int n=10) {
 	return s+"] "+print_percentage(x);
 }
 
+inline std::mutex& console_io_mutex() {
+	static std::mutex m;
+	return m;
+}
+inline std::ofstream& console_log_stream() {
+	static std::ofstream f;
+	return f;
+}
+inline string& console_log_path() {
+	static string p;
+	return p;
+}
+inline string strip_ansi_escape_codes(const string& s) {
+	string out;
+	out.reserve(s.size());
+	for(size_t i=0u; i<s.size(); i++) {
+		if((uchar)s[i]==27u && i+1u<s.size() && s[i+1u]=='[') {
+			i += 2u;
+			while(i<s.size() && !((s[i]>='@' && s[i]<='~') || s[i]=='\n' || s[i]=='\r')) i++;
+			continue;
+		}
+		out.push_back(s[i]);
+	}
+	return out;
+}
+inline string truncate_with_ellipsis(const string& s, const uint width) {
+	if(width==0u) return "";
+	if((uint)s.size()<=width) return s;
+	if(width<=3u) return s.substr(0u, width);
+	return s.substr(0u, width-3u)+"...";
+}
+inline string pad_right_exact(const string& s, const uint width) {
+	string out = truncate_with_ellipsis(s, width);
+	if((uint)out.size()<width) out += string(width-(uint)out.size(), ' ');
+	return out;
+}
+inline vector<string> wrap_console_cell(const string& cell, const uint width, const bool allow_wrap, const bool preserve_spacing) {
+	vector<string> lines;
+	if(width==0u) {
+		lines.push_back("");
+		return lines;
+	}
+	string remaining = preserve_spacing ? cell : trim(cell);
+	if(remaining.empty()) {
+		lines.push_back("");
+		return lines;
+	}
+	if(!allow_wrap) {
+		lines.push_back(truncate_with_ellipsis(remaining, width));
+		return lines;
+	}
+	while(!remaining.empty()) {
+		if((uint)remaining.size()<=width) {
+			lines.push_back(remaining);
+			break;
+		}
+		uint cut = width;
+		const size_t space = remaining.rfind(' ', width);
+		if(space!=string::npos && space>0u) cut = (uint)space;
+		if(cut==0u) cut = width;
+		string part = remaining.substr(0u, cut);
+		if(!preserve_spacing) part = trim(part);
+		if(part.empty()) {
+			part = remaining.substr(0u, width);
+			cut = width;
+		}
+		lines.push_back(truncate_with_ellipsis(part, width));
+		remaining = remaining.substr(cut);
+		if(!preserve_spacing) remaining = trim(remaining);
+		else while(!remaining.empty() && remaining.front()==' ') remaining.erase(remaining.begin());
+	}
+	if(lines.empty()) lines.push_back("");
+	return lines;
+}
+inline bool is_border_like_row(const string& inner) {
+	bool has_border_char = false;
+	for(size_t i=0u; i<inner.size(); i++) {
+		const char c = inner[i];
+		if(c==' ' || c=='\t') continue;
+		if(c=='-' || c=='=' || c=='\'' || c=='.' || c=='_' || c=='+') {
+			has_border_char = true;
+			continue;
+		}
+		return false;
+	}
+	return has_border_char;
+}
+inline string rtrim_console_copy(const string& s) {
+	if(s.empty()) return s;
+	size_t e = s.size();
+	while(e>0u && (s[e-1u]==' ' || s[e-1u]=='\t' || s[e-1u]=='\r')) e--;
+	return s.substr(0u, e);
+}
+inline string resize_border_inner(const string& inner, const uint target) {
+	string out = rtrim_console_copy(inner);
+	if((uint)out.size()>target) return out.substr(0u, target);
+	char fill = '-';
+	for(size_t i=out.size(); i>0u; i--) {
+		const char c = out[i-1u];
+		if(c=='-' || c=='=' || c=='_' || c=='+' || c=='.') {
+			fill = c=='.' ? '-' : c;
+			break;
+		}
+	}
+	if((uint)out.size()<target) out += string(target-(uint)out.size(), fill);
+	return out;
+}
+inline uint count_char(const string& s, const char c) {
+	uint n = 0u;
+	for(size_t i=0u; i<s.size(); i++) if(s[i]==c) n++;
+	return n;
+}
+inline vector<string> split_keep_empty(const string& s, const char c) {
+	vector<string> out;
+	size_t start = 0u;
+	while(start<=s.size()) {
+		const size_t pos = s.find(c, start);
+		if(pos==string::npos) {
+			out.push_back(s.substr(start));
+			break;
+		}
+		out.push_back(s.substr(start, pos-start));
+		start = pos+1u;
+	}
+	return out;
+}
+inline string format_console_table_line(const string& line, const bool allow_wrap) {
+	constexpr uint key_col_width = 17u; // keeps separator aligned with |-----------------.----------------...|
+	string normalized = rtrim_console_copy(line);
+	if(!normalized.empty() && normalized.front()=='|' && normalized.back()!='|') normalized += "|";
+	if(normalized.size()<2u || normalized.front()!='|' || normalized.back()!='|') return normalized;
+	const string inner = normalized.substr(1u, normalized.size()-2u);
+	const uint table_width = (uint)CONSOLE_WIDTH;
+	if(table_width<3u) return normalized;
+	const uint inner_target = table_width-2u;
+	if(is_border_like_row(inner)) {
+		return "|"+resize_border_inner(inner, inner_target)+"|";
+	}
+	const uint separator_count = count_char(inner, '|');
+	if(separator_count>=2u) { // already multi-column formatted line; keep original separators/spacing
+		return "|"+pad_right_exact(inner, inner_target)+"|";
+	}
+	vector<string> cells = separator_count==1u ? split_keep_empty(inner, '|') : vector<string>{inner};
+	if(cells.empty()) return "|"+pad_right_exact("", inner_target)+"|";
+	const uint cols = (uint)cells.size();
+	if(table_width<=cols+1u) return normalized;
+	const uint usable = table_width-(cols+1u);
+	vector<uint> widths(cols, usable);
+	if(cols==2u) {
+		const uint min_right = 8u;
+		uint left = key_col_width;
+		if(left>usable-min_right) left = usable-min_right;
+		if(left<4u) left = min(usable, 4u);
+		widths[0] = left;
+		widths[1] = usable-left;
+	}
+	vector<vector<string>> wrapped(cols, vector<string>{""});
+	uint row_count = 1u;
+	for(uint i=0u; i<cols; i++) {
+		if(cols==2u) {
+			const uint text_width = widths[i]>0u ? widths[i]-1u : 0u; // keep one leading space in each cell
+			wrapped[i] = wrap_console_cell(trim(cells[i]), text_width, allow_wrap, false);
+		} else {
+			wrapped[i] = wrap_console_cell(cells[i], widths[i], allow_wrap, true);
+		}
+		row_count = max(row_count, (uint)wrapped[i].size());
+	}
+	string out = "";
+	for(uint r=0u; r<row_count; r++) {
+		string row = "|";
+		for(uint c=0u; c<cols; c++) {
+			string text = r<(uint)wrapped[c].size() ? wrapped[c][r] : "";
+			if(cols==2u) text = " "+text; // requirement: one-space inset from vertical separators
+			row += pad_right_exact(text, widths[c])+"|";
+		}
+		if(r>0u) out += "\n";
+		out += row;
+	}
+	return out;
+}
+inline string format_console_table_block(const string& s, const bool allow_wrap) {
+	string out = "";
+	size_t start = 0u;
+	while(start<=s.size()) {
+		const size_t pos = s.find('\n', start);
+		const string line = pos==string::npos ? s.substr(start) : s.substr(start, pos-start);
+		if(!out.empty()) out += "\n";
+		out += format_console_table_line(line, allow_wrap);
+		if(pos==string::npos) break;
+		start = pos+1u;
+	}
+	return out;
+}
+inline void write_console_log(const string& s) {
+	auto& f = console_log_stream();
+	if(!f.is_open()) return;
+	f << strip_ansi_escape_codes(s);
+	f.flush();
+}
+inline bool set_console_log_file(const string& path) {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	auto& f = console_log_stream();
+	if(f.is_open()) f.close();
+	f.open(path, std::ios::out|std::ios::trunc);
+	if(!f.is_open()) {
+		console_log_path().clear();
+		return false;
+	}
+	console_log_path() = path;
+	return true;
+}
+inline void close_console_log_file() {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	auto& f = console_log_stream();
+	if(f.is_open()) f.close();
+	console_log_path().clear();
+}
+inline string get_console_log_file() {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	return console_log_path();
+}
+
 inline void print(const string& s="") {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
 	std::cout << s;
+	write_console_log(s);
 }
 inline void println(const string& s="") {
-	std::cout << s+"\n";
+	const string formatted = format_console_table_block(s, true);
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	std::cout << formatted+"\n";
+	write_console_log(formatted+"\n");
 }
-inline void reprint(const string& s="") {
-	std::cout << "\r"+s;
+inline void reprint(const string& s="", const bool write_log=false) {
+	const string formatted = format_console_table_line(s, false);
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	std::cout << "\r"+formatted;
+	if(write_log) write_console_log(formatted+"\n");
 }
 inline void wait() {
 	std::cin.get();
@@ -3403,14 +3645,18 @@ inline void print_color_reset() {
 #endif // Windows/Linux
 }
 inline void print(const string& s, const int textcolor) {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
 	print_color(textcolor);
 	std::cout << s;
 	print_color_reset();
+	write_console_log(s);
 }
 inline void print(const string& s, const int textcolor, const int backgroundcolor) {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
 	print_color(textcolor, backgroundcolor);
 	std::cout << s;
 	print_color_reset();
+	write_console_log(s);
 }
 inline void print_no_reset(const string& s, const int textcolor) { // print with color, but don't reset color afterwards (faster)
 	print_color(textcolor);
@@ -3987,10 +4233,14 @@ inline int key_press() { // not working: ¹ (251), num lock (-144), caps lock (-
 #endif // UTILITIES_CONSOLE_INPUT
 #else // UTILITIES_CONSOLE_COLOR
 inline void print(const string& s, const int textcolor) {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
 	std::cout << s;
+	write_console_log(s);
 }
 inline void print(const string& s, const int textcolor, const int backgroundcolor) {
+	std::lock_guard<std::mutex> lock(console_io_mutex());
 	std::cout << s;
+	write_console_log(s);
 }
 #endif // UTILITIES_CONSOLE_COLOR
 

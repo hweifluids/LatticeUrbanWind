@@ -5,8 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Union, Tuple, Optional
 import math
-import vtk
-from vtk.util import numpy_support as nps
+try:
+    import vtk
+    from vtk.util import numpy_support as nps
+except Exception:
+    vtk = None
+    nps = None
 import geopandas as gpd
 from auto_UTM import get_utm_crs_from_conf_raw
 from shapely.geometry import Point, Polygon
@@ -1183,6 +1187,7 @@ def buildBC_dev(
     var_u: str = "u",
     var_v: str = "v",
     elevation_scale: float = 1.0,
+    write_vtk: bool = False,
 ) -> None:
     try:
         # conf and path
@@ -1246,6 +1251,8 @@ def buildBC_dev(
 
 
 
+        has_dem_input = (dem_points_utm is not None) and (dem_elevations is not None)
+
         # upsample if too small (support WRF staggered dims: lon_stag/lat_stag)
         target_n_map = {"lon": 200, "lat": 200, vert: 10}
         if "lon_stag" in ds.dims:
@@ -1272,31 +1279,37 @@ def buildBC_dev(
                 _log_info(f"Dimension {dim} has {ds.sizes[dim]} points, upsample to {target_n}")
 
         if new_coords:
-            _log_info("Start interpolation on lon, lat and vertical (Dense Compute)...")
-            if len(new_coords) == 1:
-                ds = ds.interp(new_coords, method="pchip")
+            if has_dem_input:
+                _log_info(
+                    "Skip Dense Compute interpolation because terrain-first BC sampling "
+                    "must use native NC spacing before horizontal interpolation"
+                )
             else:
-                horizontal_keys = ["lon", "lat", "lon_stag", "lat_stag"]
-                horizontal_coords = {k: v for k, v in new_coords.items() if k in horizontal_keys}
-                vertical_coords = {k: v for k, v in new_coords.items() if k not in horizontal_keys}
+                _log_info("Start interpolation on lon, lat and vertical (Dense Compute)...")
+                if len(new_coords) == 1:
+                    ds = ds.interp(new_coords, method="pchip")
+                else:
+                    horizontal_keys = ["lon", "lat", "lon_stag", "lat_stag"]
+                    horizontal_coords = {k: v for k, v in new_coords.items() if k in horizontal_keys}
+                    vertical_coords = {k: v for k, v in new_coords.items() if k not in horizontal_keys}
 
-                if horizontal_coords:
-                    _log_info("Interpolating horizontal dimensions with linear method...")
-                    ds = ds.interp(horizontal_coords, method="linear")
+                    if horizontal_coords:
+                        _log_info("Interpolating horizontal dimensions with linear method...")
+                        ds = ds.interp(horizontal_coords, method="linear")
 
-                if vertical_coords:
-                    _log_info("Interpolating vertical dimension with pchip method...")
-                    ds = ds.interp(vertical_coords, method="pchip")
+                    if vertical_coords:
+                        _log_info("Interpolating vertical dimension with pchip method...")
+                        ds = ds.interp(vertical_coords, method="pchip")
 
-            ds = ds.persist()
-            _log_info("Finished lon/lat/vertical interpolation")
+                ds = ds.persist()
+                _log_info("Finished lon/lat/vertical interpolation")
 
-            # IMPORTANT: ds.interp() may change the vertical coordinate values/length
-            # (e.g., height 4 -> 10). Refresh (vert, lev) to stay consistent with
-            # the interpolated dataset; otherwise the later vertical remap may fall
-            # back to index-based z levels and collapse z_top.
-            ds, vert, lev = _detect_vertical_dim_and_levels(ds)
-            _log_info(f"Refreshed vertical levels after interpolation: {vert} ({int(np.asarray(lev).size)} levels)")
+                # IMPORTANT: ds.interp() may change the vertical coordinate values/length
+                # (e.g., height 4 -> 10). Refresh (vert, lev) to stay consistent with
+                # the interpolated dataset; otherwise the later vertical remap may fall
+                # back to index-based z levels and collapse z_top.
+                ds, vert, lev = _detect_vertical_dim_and_levels(ds)
+                _log_info(f"Refreshed vertical levels after interpolation: {vert} ({int(np.asarray(lev).size)} levels)")
 
         # extract variables (support WRF names and WRF staggered grids)
         u_name = _resolve_wind_var_name(ds, var_u, ("u", "U"), "u")
@@ -1556,6 +1569,12 @@ def buildBC_dev(
             y1 = np.linspace(0.0, y_range_target, ny_src, dtype=np.float32)
             x_src, y_src = np.meshgrid(x1, y1, indexing="xy")
 
+        # Keep source-grid fields for terrain-first sampling on boundary points.
+        u_src_native = u
+        v_src_native = v
+        w_src_native = w
+        temp_src_native = temp_k
+
         # interpolate to uniform grid using target domain size and chosen resolution
         u_m, v_m, dx, dy = _interp_to_uniform_meter_grid(
             u, v, x_src, y_src,
@@ -1589,6 +1608,7 @@ def buildBC_dev(
 
         # Interpolate DEM to wind grid (if available)
         dem_grid = None
+        dem_points_shifted = None
         dem_data_to_save = None
         if dem_points_utm is not None and dem_elevations is not None:
             _log_info("Interpolating DEM to wind field grid")
@@ -1674,6 +1694,11 @@ def buildBC_dev(
             w   = w[::-1].copy()
             if temp_k is not None:
                 temp_k = temp_k[::-1].copy()
+            u_src_native = u_src_native[::-1].copy()
+            v_src_native = v_src_native[::-1].copy()
+            w_src_native = w_src_native[::-1].copy()
+            if temp_src_native is not None:
+                temp_src_native = temp_src_native[::-1].copy()
 
         # Build strictly increasing z source (AGL, do NOT prepend z=0 here)
         z_src_raw = lev_m.copy().astype(np.float32)
@@ -1715,8 +1740,58 @@ def buildBC_dev(
         if temp_k is not None:
             temp_k = f_t_z(z_new).astype(np.float32)
 
+        # Keep a vertical-remapped copy on the source horizontal grid.
+        f_u_z_src = interp1d(
+            z_src_raw, u_src_native, axis=0, bounds_error=False,
+            fill_value=(u_src_native[0], u_src_native[-1])
+        )
+        f_v_z_src = interp1d(
+            z_src_raw, v_src_native, axis=0, bounds_error=False,
+            fill_value=(v_src_native[0], v_src_native[-1])
+        )
+        f_w_z_src = interp1d(
+            z_src_raw, w_src_native, axis=0, bounds_error=False,
+            fill_value=(w_src_native[0], w_src_native[-1])
+        )
+        if temp_src_native is not None:
+            f_t_z_src = interp1d(
+                z_src_raw, temp_src_native, axis=0, bounds_error=False,
+                fill_value=(temp_src_native[0], temp_src_native[-1])
+            )
+
+        u_src_native = f_u_z_src(z_new).astype(np.float32)
+        v_src_native = f_v_z_src(z_new).astype(np.float32)
+        w_src_native = f_w_z_src(z_new).astype(np.float32)
+        if temp_src_native is not None:
+            temp_src_native = f_t_z_src(z_new).astype(np.float32)
+
         nz = int(nz_new)
         dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
+
+        # Build a single global top plane for both CSV export and si_z_cfd:
+        # clip at (highest terrain + z_limit), then keep consistent everywhere.
+        z_top_from_wind = float((nz - 1) * dz) + float(base_height) if nz > 1 else float(base_height)
+        ground_z_max = float(base_height)
+        if dem_grid is not None:
+            dem_max_scaled = float(np.nanmax(dem_grid)) * float(elevation_scale)
+            if (not math.isfinite(dem_max_scaled)) or (dem_max_scaled < 0.0):
+                dem_max_scaled = 0.0
+            ground_z_max = float(base_height) + dem_max_scaled
+
+        z_top_output = float(z_top_from_wind)
+        if z_limit_agl is not None:
+            z_cap_from_terrain = float(ground_z_max) + float(z_limit_agl)
+            if z_top_output > z_cap_from_terrain:
+                z_top_output = z_cap_from_terrain
+                _log_info(
+                    f"Apply global top clipping by highest terrain + z_limit: "
+                    f"ground_max={ground_z_max:.3f} m, z_limit={z_limit_agl:.3f} m -> top={z_top_output:.3f} m"
+                )
+            else:
+                _log_info(
+                    f"Skip global top clipping: input top {z_top_output:.3f} m <= "
+                    f"highest-terrain cap {z_cap_from_terrain:.3f} m"
+                )
 
 
 
@@ -1748,23 +1823,7 @@ def buildBC_dev(
 
             conf_lines[15] = f"si_x_cfd = [0.000000, {si_x_range:.6f}]"
             conf_lines[16] = f"si_y_cfd = [0.000000, {si_y_range:.6f}]"
-            # vertical range starts at 0, use final CSV Z max (includes base_height, terrain, optional z_limit)
-            z_max_csv = float((nz - 1) * dz) + float(base_height) if nz > 1 else float(base_height)
-
-            if z_limit_agl is not None:
-                max_agl_available = z_max_csv - float(base_height)
-                if max_agl_available > float(z_limit_agl):
-                    if dem_grid is not None:
-                        dem_max_scaled = float(np.nanmax(dem_grid)) * float(elevation_scale)
-                        if (not math.isfinite(dem_max_scaled)) or (dem_max_scaled < 0.0):
-                            dem_max_scaled = 0.0
-                        ground_z_max = float(base_height) + dem_max_scaled
-                    else:
-                        ground_z_max = float(base_height)
-
-                    z_max_csv = min(z_max_csv, ground_z_max + float(z_limit_agl))
-
-            conf_lines[17] = f"si_z_cfd = [0.000000, {z_max_csv:.6f}]"
+            conf_lines[17] = f"si_z_cfd = [0.000000, {z_top_output:.6f}]"
 
 
             conf_lines[20:23] = [
@@ -1775,33 +1834,43 @@ def buildBC_dev(
             conf_file.write_text("\n".join(conf_lines), encoding="utf-8")
             _log_info("Wrote lon/lat and SI ranges to deck file")
 
-        # build VTK uniform grid, origin at 0 0 0
-        grid = vtk.vtkUniformGrid()
-        grid.SetOrigin(0.0, 0.0, 0.0)
-        grid.SetSpacing(dx, dy, dz)
-        grid.SetDimensions(nx, ny, nz)
-
-        def _add(arr: np.ndarray, name: str):
-            vtk_arr = nps.numpy_to_vtk(arr.ravel(order="C"), deep=True, array_type=vtk.VTK_FLOAT)
-            vtk_arr.SetName(name)
-            grid.GetPointData().AddArray(vtk_arr)
-
-        _add(u_m, "u")
-        _add(v_m, "v")
-        _add(w, "w")
-        grid.GetPointData().SetActiveScalars("u")
-
-        writer = vtk.vtkXMLUniformGridWriter() if hasattr(vtk, "vtkXMLUniformGridWriter") else vtk.vtkXMLImageDataWriter()
-        project_home = conf_file.parent
         proj_temp = project_home / "proj_temp"
         proj_temp.mkdir(parents=True, exist_ok=True)
-        vti_path = proj_temp / (Path(nc_path_resolved).with_suffix(".vti").name)
-        writer.SetFileName(str(vti_path))
-        writer.SetInputData(grid)
-        writer.SetDataModeToBinary()
-        writer.Write()
-        mb = Path(vti_path).stat().st_size / 1e6
-        _log_info(f"Wrote VTI: {vti_path} size ~ {mb:.3f} MB")
+
+        if write_vtk:
+            if vtk is None or nps is None:
+                raise RuntimeError("VTK output requested (--write-vtk) but vtk Python package is not installed")
+
+            # build VTK uniform grid, origin at 0 0 0
+            grid = vtk.vtkUniformGrid()
+            grid.SetOrigin(0.0, 0.0, 0.0)
+            grid.SetSpacing(dx, dy, dz)
+            grid.SetDimensions(nx, ny, nz)
+
+            def _add(arr: np.ndarray, name: str):
+                vtk_arr = nps.numpy_to_vtk(arr.ravel(order="C"), deep=True, array_type=vtk.VTK_FLOAT)
+                vtk_arr.SetName(name)
+                grid.GetPointData().AddArray(vtk_arr)
+
+            _add(u_m, "u")
+            _add(v_m, "v")
+            _add(w, "w")
+            grid.GetPointData().SetActiveScalars("u")
+
+            writer = (
+                vtk.vtkXMLUniformGridWriter()
+                if hasattr(vtk, "vtkXMLUniformGridWriter")
+                else vtk.vtkXMLImageDataWriter()
+            )
+            vti_path = proj_temp / (Path(nc_path_resolved).with_suffix(".vti").name)
+            writer.SetFileName(str(vti_path))
+            writer.SetInputData(grid)
+            writer.SetDataModeToBinary()
+            writer.Write()
+            mb = Path(vti_path).stat().st_size / 1e6
+            _log_info(f"Wrote VTI: {vti_path} size ~ {mb:.3f} MB")
+        else:
+            _log_info("Skip VTI output (default). Use --write-vtk to enable.")
 
         # Save DEM data as pkl for 3_voxelization_with_dem.py
         if dem_data_to_save is not None:
@@ -1810,38 +1879,11 @@ def buildBC_dev(
                 pickle.dump(dem_data_to_save, f)
             _log_info(f"Saved DEM grid data to: {dem_pkl_path}")
 
-        # Prepare interpolation for terrain-adjusted wind field
-        # Fixed top height: z_max_output = z_top_from_wind + base_height
-        z_max_output = float((nz - 1) * dz) + float(base_height)  # absolute Z in CSV coordinates (includes base_height)
+        # Prepare interpolation for terrain-adjusted wind field.
+        # Use the same top as si_z_cfd upper bound to keep CFD domain and CSV consistent.
+        z_max_output = float(z_top_output)
 
         z_original = np.arange(nz, dtype=np.float32) * dz  # AGL in wind grid (0, dz, 2*dz, ...)
-
-        # Optional z_limit cropping for CSV output
-        # z_limit is treated as AGL height above local ground (ground = base_height + dem_diff_scaled)
-        z_limit_agl = None
-        crop_csv_by_zlimit = False
-
-        if conf_raw:
-            m_zlim = re.search(r"z_limit\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-            if m_zlim:
-                try:
-                    z_limit_agl = float(m_zlim.group(1))
-                except Exception:
-                    z_limit_agl = None
-
-        if (z_limit_agl is not None) and math.isfinite(z_limit_agl) and (z_limit_agl > 0.0):
-            # max available AGL (at lowest terrain, dem_diff min is expected 0)
-            max_agl_available = z_max_output - base_height
-            if max_agl_available > z_limit_agl:
-                crop_csv_by_zlimit = True
-                _log_info(
-                    f"Apply z_limit cropping for CSV (AGL): z_limit_agl={z_limit_agl:.3f} m, "
-                    f"base_height={base_height:.3f} m -> lowest-ground cap Z={base_height + z_limit_agl:.3f} m"
-                )
-            else:
-                _log_info(
-                    f"Skip z_limit cropping for CSV because input top AGL {max_agl_available:.3f} m <= z_limit_agl {z_limit_agl:.3f} m"
-                )
 
 
         if dem_grid is not None:
@@ -1861,54 +1903,267 @@ def buildBC_dev(
         else:
             _log_info(f"No DEM data, applying flat base offset: Z = Z_grid + {base_height}m")
 
-        def _interpolate_wind_at_z(u_col, v_col, w_col, z_target, z_src, dem_offset):
+        def _idw_interp_1d(col: np.ndarray, z_query: float, z_src: np.ndarray) -> float:
+            if z_query <= z_src[0]:
+                return float(col[0])
+            if z_query >= z_src[-1]:
+                return float(col[-1])
+
+            k_upper = int(np.searchsorted(z_src, z_query))
+            k_lower = k_upper - 1
+
+            z_lower = float(z_src[k_lower])
+            z_upper = float(z_src[k_upper])
+            d_lower = abs(z_query - z_lower)
+            d_upper = abs(z_query - z_upper)
+
+            if d_lower < 1e-6:
+                return float(col[k_lower])
+            if d_upper < 1e-6:
+                return float(col[k_upper])
+
+            w_lower = 1.0 / d_lower
+            w_upper = 1.0 / d_upper
+            w_sum = w_lower + w_upper
+            return float((w_lower * float(col[k_lower]) + w_upper * float(col[k_upper])) / w_sum)
+
+        def _interpolate_wind_at_z(
+            u_col: np.ndarray,
+            v_col: np.ndarray,
+            w_col: np.ndarray,
+            z_target: float,
+            z_src: np.ndarray,
+            dem_offset: float,
+            t_col: Optional[np.ndarray] = None,
+        ) -> Tuple[float, float, float, Optional[float]]:
             """
-            Interpolate wind components at target z using IDW.
-            z_target: target z in output coordinates (e.g., 1150m)
-            z_src: original z levels (0, dz, 2*dz, ...)
-            dem_offset: base_height + dem_elevation
+            Interpolate wind (and optional temperature) at target z using IDW between bracketing levels.
+            z_target: absolute target z in CSV coordinates
+            z_src: original z levels in AGL coordinates
+            dem_offset: local ground z (base_height + local terrain)
             """
-            # Map target z back to original coordinate
-            z_in_original = z_target - dem_offset
+            # Apply local terrain uplift to source z first, then interpolate at target absolute z.
+            z_src_terrain = z_src + np.float32(dem_offset)
+            z_target_clamped = float(
+                np.clip(z_target, float(z_src_terrain[0]), float(z_src_terrain[-1]))
+            )
 
-            # Clamp to valid range
-            z_in_original = np.clip(z_in_original, z_src[0], z_src[-1])
+            u_interp = _idw_interp_1d(u_col, z_target_clamped, z_src_terrain)
+            v_interp = _idw_interp_1d(v_col, z_target_clamped, z_src_terrain)
+            w_interp = _idw_interp_1d(w_col, z_target_clamped, z_src_terrain)
 
-            # Find two nearest levels for IDW
-            if z_in_original <= z_src[0]:
-                return u_col[0], v_col[0], w_col[0]
-            elif z_in_original >= z_src[-1]:
-                return u_col[-1], v_col[-1], w_col[-1]
-            else:
-                # Find bracketing indices
-                k_upper = np.searchsorted(z_src, z_in_original)
-                k_lower = k_upper - 1
+            if t_col is None:
+                return u_interp, v_interp, w_interp, None
 
-                z_lower = z_src[k_lower]
-                z_upper = z_src[k_upper]
+            t_interp = _idw_interp_1d(t_col, z_target_clamped, z_src_terrain)
+            return u_interp, v_interp, w_interp, t_interp
 
-                # IDW with power=1 (linear-like but using inverse distance)
-                d_lower = abs(z_in_original - z_lower)
-                d_upper = abs(z_in_original - z_upper)
+        use_terrain_first_sampling = False
+        src_interp_idx = None
+        src_interp_w = None
+        src_interp_n = 0
+        src_dem_flat = None
+        u_src_flat = None
+        v_src_flat = None
+        w_src_flat = None
+        t_src_flat = None
 
-                if d_lower < 1e-6:
-                    return u_col[k_lower], v_col[k_lower], w_col[k_lower]
-                elif d_upper < 1e-6:
-                    return u_col[k_upper], v_col[k_upper], w_col[k_upper]
+        if (dem_grid is not None) and (dem_points_shifted is not None):
+            try:
+                src_pts = np.column_stack([x_src.ravel(), y_src.ravel()]).astype(np.float64)
+                src_valid = np.isfinite(src_pts).all(axis=1)
+                if src_valid.sum() < 1:
+                    raise RuntimeError("no valid source points")
+
+                src_pts_valid = src_pts[src_valid]
+                src_valid_idx = np.flatnonzero(src_valid).astype(np.int32)
+
+                # Terrain uplift is evaluated on source NC points (coarse), then interpolated to target points.
+                dem_k = int(min(12, dem_points_shifted.shape[0]))
+                if dem_k < 1:
+                    raise RuntimeError("DEM points are empty after coordinate transform")
+
+                dem_tree = cKDTree(dem_points_shifted)
+                dem_d, dem_i = dem_tree.query(src_pts_valid, k=dem_k)
+                if dem_k == 1:
+                    dem_src_valid = dem_elevations[dem_i].astype(np.float64)
                 else:
-                    w_lower = 1.0 / d_lower
-                    w_upper = 1.0 / d_upper
-                    w_sum = w_lower + w_upper
+                    dem_d = np.maximum(dem_d, 1e-10)
+                    dem_w = 1.0 / (dem_d ** 2.0)
+                    dem_w /= dem_w.sum(axis=1, keepdims=True)
+                    dem_src_valid = np.sum(dem_w * dem_elevations[dem_i], axis=1)
+                dem_src_valid = np.asarray(dem_src_valid, dtype=np.float32)
+                dem_src_valid = dem_src_valid - np.float32(np.nanmin(dem_src_valid))
+                dem_src_valid = np.maximum(dem_src_valid, np.float32(0.0))
 
-                    u_interp = (w_lower * u_col[k_lower] + w_upper * u_col[k_upper]) / w_sum
-                    v_interp = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
-                    w_interp = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
+                src_dem_flat = np.zeros(src_pts.shape[0], dtype=np.float32)
+                src_dem_flat[src_valid_idx] = dem_src_valid
 
-                    return u_interp, v_interp, w_interp
+                x_q = np.linspace(0.0, x_range_target, nx, dtype=np.float64)
+                y_q = np.linspace(0.0, y_range_target, ny, dtype=np.float64)
+                Xq, Yq = np.meshgrid(x_q, y_q, indexing="xy")
+                qpts = np.column_stack([Xq.ravel(), Yq.ravel()])
+                m_q = qpts.shape[0]
+                # High-order smooth interpolation from coarse->fine:
+                # local quadratic MLS (Moving Least Squares) with Wendland-C2 kernel.
+                # This is continuous and avoids IDW-style artifacts/staircasing.
+                src_h_mls_k = int(min(24, src_pts_valid.shape[0]))
+                if src_h_mls_k < 1:
+                    raise RuntimeError("no source points for horizontal MLS")
+
+                basis_dim = 6 if src_h_mls_k >= 6 else (3 if src_h_mls_k >= 3 else 1)
+                p0 = np.zeros((basis_dim,), dtype=np.float64)
+                p0[0] = 1.0
+
+                tree_src = cKDTree(src_pts_valid)
+                src_dist, src_idx_local = tree_src.query(qpts, k=src_h_mls_k)
+
+                if src_h_mls_k == 1:
+                    src_dist = src_dist[:, None]
+                    src_idx_local = src_idx_local[:, None]
+
+                src_interp_idx = src_valid_idx[src_idx_local].astype(np.int32)
+                src_interp_w = np.empty((m_q, src_h_mls_k), dtype=np.float32)
+                src_interp_n = int(src_h_mls_k)
+
+                for qi in range(m_q):
+                    qx = float(qpts[qi, 0])
+                    qy = float(qpts[qi, 1])
+                    ids_local = src_idx_local[qi]
+                    d_local = np.asarray(src_dist[qi], dtype=np.float64)
+
+                    px = src_pts_valid[ids_local, 0].astype(np.float64)
+                    py = src_pts_valid[ids_local, 1].astype(np.float64)
+
+                    h = float(np.max(d_local))
+                    if (not math.isfinite(h)) or (h <= 1e-12):
+                        h = 1.0
+                    h *= 1.000001
+
+                    xn = (px - qx) / h
+                    yn = (py - qy) / h
+                    r = np.sqrt(xn * xn + yn * yn)
+
+                    # Wendland C2 compact kernel: w = (1-r)^4 * (4r+1), r in [0,1]
+                    t = np.clip(1.0 - r, 0.0, None)
+                    wk = (t ** 4) * (4.0 * r + 1.0)
+
+                    wk_sum = float(np.sum(wk))
+                    if (not math.isfinite(wk_sum)) or (wk_sum <= 1e-14):
+                        wk = np.ones_like(r, dtype=np.float64)
+                        wk_sum = float(np.sum(wk))
+
+                    if basis_dim == 1:
+                        c = wk / wk_sum
+                    else:
+                        if basis_dim == 3:
+                            b = np.column_stack([
+                                np.ones_like(xn),
+                                xn,
+                                yn,
+                            ])
+                        else:
+                            b = np.column_stack([
+                                np.ones_like(xn),
+                                xn,
+                                yn,
+                                xn * xn,
+                                xn * yn,
+                                yn * yn,
+                            ])
+
+                        bw = b * wk[:, None]
+                        m_mat = b.T @ bw
+                        reg = 1e-10 * (float(np.trace(m_mat)) / float(basis_dim)) + 1e-12
+                        m_mat = m_mat.copy()
+                        m_mat[np.diag_indices(basis_dim)] += reg
+
+                        try:
+                            t_coef = np.linalg.solve(m_mat, p0)
+                            c = wk * (b @ t_coef)
+                            c_sum = float(np.sum(c))
+                            if (not math.isfinite(c_sum)) or (abs(c_sum) <= 1e-14):
+                                c = wk / wk_sum
+                            else:
+                                c = c / c_sum
+
+                            # Shape-preserving limiter to suppress oscillatory ringing from negative lobes.
+                            neg_mass = float(np.sum(np.abs(c[c < 0.0])))
+                            if neg_mass > 0.08:
+                                c_pos = wk / wk_sum
+                                alpha = min(1.0, (neg_mass - 0.08) / 0.30)
+                                c = (1.0 - alpha) * c + alpha * c_pos
+                                c = c / float(np.sum(c))
+                        except Exception:
+                            c = wk / wk_sum
+
+                    src_interp_w[qi, :] = c.astype(np.float32)
+
+                u_src_flat = u_src_native.reshape(nz, -1)
+                v_src_flat = v_src_native.reshape(nz, -1)
+                w_src_flat = w_src_native.reshape(nz, -1)
+                if temp_src_native is not None:
+                    t_src_flat = temp_src_native.reshape(nz, -1)
+
+                use_terrain_first_sampling = True
+                _log_info(
+                    "Boundary sampling order switched to terrain-first: "
+                    f"uplift on source columns first, then horizontal MLS interpolation "
+                    f"(quadratic, Wendland-C2, k={src_interp_n}) to target points"
+                )
+            except Exception as e:
+                _log_warn(
+                    f"Terrain-first boundary sampling initialization failed ({e}); "
+                    "fallback to target-column sampling"
+                )
+                use_terrain_first_sampling = False
+
+        def _sample_wind_at_point(
+            j: int,
+            i: int,
+            z_target: float,
+            ground_z_local: float,
+            write_temp_flag: bool,
+        ) -> Tuple[float, float, float, Optional[float]]:
+            if use_terrain_first_sampling:
+                q_idx = int(j * nx + i)
+                ids = src_interp_idx[q_idx]
+                wxy = src_interp_w[q_idx]
+
+                u_acc = 0.0
+                v_acc = 0.0
+                w_acc = 0.0
+                t_acc = 0.0
+
+                for n in range(src_interp_n):
+                    w_n = float(wxy[n])
+                    if w_n == 0.0:
+                        continue
+                    sid = int(ids[n])
+                    src_ground = float(base_height) + float(src_dem_flat[sid]) * float(elevation_scale)
+                    z_query = float(np.clip(z_target - src_ground, float(z_original[0]), float(z_original[-1])))
+
+                    u_acc += w_n * _idw_interp_1d(u_src_flat[:, sid], z_query, z_original)
+                    v_acc += w_n * _idw_interp_1d(v_src_flat[:, sid], z_query, z_original)
+                    w_acc += w_n * _idw_interp_1d(w_src_flat[:, sid], z_query, z_original)
+                    if write_temp_flag and (t_src_flat is not None):
+                        t_acc += w_n * _idw_interp_1d(t_src_flat[:, sid], z_query, z_original)
+
+                if write_temp_flag:
+                    return u_acc, v_acc, w_acc, t_acc
+                return u_acc, v_acc, w_acc, None
+
+            u_col = u_m[:, j, i]
+            v_col = v_m[:, j, i]
+            w_col = w[:, j, i]
+            t_col = temp_k[:, j, i] if write_temp_flag else None
+            return _interpolate_wind_at_z(
+                u_col, v_col, w_col, z_target, z_original, ground_z_local, t_col
+            )
 
         bc_sum = np.zeros(3, dtype=float)
         bc_cnt = 0
-        csv_path = vti_path.parent / "SurfData_Latest.csv"
+        csv_path = proj_temp / "SurfData_Latest.csv"
         write_temp = temp_k is not None
 
         # Log elevation scale if not 1.0
@@ -1916,107 +2171,91 @@ def buildBC_dev(
             _log_info(f"Applying elevation scale {elevation_scale}x to CSV output")
         if write_temp:
             _log_info("Append temperature column T (Kelvin) to boundary CSV")
+        _log_info("Append patch column to boundary CSV: top=1, south=2, north=3, west=4, east=5, bottom=0")
 
-        def _write_csv_row(fp, x, y, z, uval, vval, wval, tval: Optional[float] = None):
+        patch_bottom = 0
+        patch_top = 1
+        patch_south = 2
+        patch_north = 3
+        patch_west = 4
+        patch_east = 5
+
+        if dz > 0.0 and math.isfinite(dz):
+            ground_eps = max(1e-3, min(0.1, 0.05 * dz))
+        else:
+            ground_eps = 0.05
+        _log_info(f"Bottom patch points are sampled at ground + {ground_eps:.4f} m")
+
+        def _local_ground_and_cap_z(j: int, i: int) -> Tuple[float, float]:
+            dem_diff = float(dem_grid[j, i]) if dem_grid is not None else 0.0
+            dem_diff_scaled = dem_diff * float(elevation_scale)
+            ground_z = float(base_height) + dem_diff_scaled
+            z_cap_here = float(z_max_output)
+            return ground_z, z_cap_here
+
+        def _write_csv_row(
+            fp,
+            x: float,
+            y: float,
+            z: float,
+            uval: float,
+            vval: float,
+            wval: float,
+            patch: int,
+            tval: Optional[float] = None,
+        ) -> None:
             if write_temp:
-                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval},{float(tval)}\n")
+                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval},{float(tval)},{int(patch)}\n")
             else:
-                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval}\n")
+                fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval},{int(patch)}\n")
 
         with open(csv_path, "w", encoding="utf-8") as f:
             if write_temp:
-                f.write("X,Y,Z,u,v,w,T\n")
+                f.write("X,Y,Z,u,v,w,T,patch\n")
             else:
-                f.write("X,Y,Z,u,v,w\n")
-            # bottom face (k=0)
-            # for j in range(ny):
-            #     y = j * dy
-            #     for i in range(nx):
-            #         x = i * dx
-            #         dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-            #         # Apply elevation scale to CSV output
-            #         dem_diff_scaled = dem_diff * elevation_scale
-            #         z_output = base_height + dem_diff_scaled
+                f.write("X,Y,Z,u,v,w,patch\n")
 
-            #         # Use bottom layer data
-            #         uval = u_m[0, j, i]
-            #         vval = v_m[0, j, i]
-            #         wval = 0.0
-
-            #         f.write(f"{x:.3f},{y:.3f},{z_output:.3f},{uval},{vval},{wval}\n")
-            #         bc_sum += np.array([uval, vval, wval])
-            #         bc_cnt += 1
-
-            # top face: interpolate at capped top height for each (x,y)
+            # bottom face: sample slightly above local terrain
             for j in range(ny):
                 y = j * dy
                 for i in range(nx):
                     x = i * dx
-                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                    dem_diff_scaled = dem_diff * elevation_scale
 
-                    ground_z = base_height + dem_diff_scaled
-
-                    if crop_csv_by_zlimit:
-                        z_cap_here = ground_z + z_limit_agl
-                        if z_cap_here > z_max_output:
-                            z_top_here = z_max_output
-                        else:
-                            z_top_here = z_cap_here
-                    else:
-                        z_top_here = z_max_output
-
-                    if ground_z >= z_top_here:
+                    ground_z, z_top_here = _local_ground_and_cap_z(j, i)
+                    if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (z_top_here <= ground_z):
                         continue
 
-                    z_in_original = z_top_here - ground_z  # AGL
+                    z_span = z_top_here - ground_z
+                    z_bottom_here = ground_z + min(ground_eps, 0.5 * z_span)
+                    if z_bottom_here >= z_top_here - 1e-6:
+                        continue
 
-                    u_col = u_m[:, j, i]
-                    v_col = v_m[:, j, i]
-                    w_col = w[:, j, i]
-                    if write_temp:
-                        t_col = temp_k[:, j, i]
-
-                    if z_in_original <= z_original[0]:
-                        uval, vval, wval = u_col[0], v_col[0], w_col[0]
-                        if write_temp:
-                            tval = t_col[0]
-                    elif z_in_original >= z_original[-1]:
-                        uval, vval, wval = u_col[-1], v_col[-1], w_col[-1]
-                        if write_temp:
-                            tval = t_col[-1]
-                    else:
-                        k_upper = np.searchsorted(z_original, z_in_original)
-                        k_lower = k_upper - 1
-
-                        z_lower = z_original[k_lower]
-                        z_upper = z_original[k_upper]
-
-                        d_lower = abs(z_in_original - z_lower)
-                        d_upper = abs(z_in_original - z_upper)
-
-                        if d_lower < 1e-6:
-                            uval, vval, wval = u_col[k_lower], v_col[k_lower], w_col[k_lower]
-                            if write_temp:
-                                tval = t_col[k_lower]
-                        elif d_upper < 1e-6:
-                            uval, vval, wval = u_col[k_upper], v_col[k_upper], w_col[k_upper]
-                            if write_temp:
-                                tval = t_col[k_upper]
-                        else:
-                            w_lower = 1.0 / d_lower
-                            w_upper = 1.0 / d_upper
-                            w_sum = w_lower + w_upper
-
-                            uval = (w_lower * u_col[k_lower] + w_upper * u_col[k_upper]) / w_sum
-                            vval = (w_lower * v_col[k_lower] + w_upper * v_col[k_upper]) / w_sum
-                            wval = (w_lower * w_col[k_lower] + w_upper * w_col[k_upper]) / w_sum
-                            if write_temp:
-                                tval = (w_lower * t_col[k_lower] + w_upper * t_col[k_upper]) / w_sum
+                    uval, vval, wval, tval = _sample_wind_at_point(
+                        j, i, z_bottom_here, ground_z, write_temp
+                    )
 
                     _write_csv_row(
-                        f, x, y, z_top_here, uval, vval, 0.0,
-                        float(tval) if write_temp else None
+                        f, x, y, z_bottom_here, uval, vval, wval, patch_bottom, tval
+                    )
+                    bc_sum += np.array([uval, vval, wval])
+                    bc_cnt += 1
+
+            # top face: keep as a flat plane (do not follow terrain)
+            for j in range(ny):
+                y = j * dy
+                for i in range(nx):
+                    x = i * dx
+                    ground_z, z_top_here = _local_ground_and_cap_z(j, i)
+
+                    if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (ground_z >= z_top_here):
+                        continue
+
+                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                        j, i, z_top_here, ground_z, write_temp
+                    )
+
+                    _write_csv_row(
+                        f, x, y, z_top_here, uval, vval, 0.0, patch_top, tval
                     )
                     bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
@@ -2024,35 +2263,22 @@ def buildBC_dev(
             # south and north faces
             for j in (0, ny - 1):
                 y = j * dy
+                patch_side = patch_south if j == 0 else patch_north
                 for i in range(nx):
                     x = i * dx
-                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                    dem_diff_scaled = dem_diff * elevation_scale
-
-                    ground_z = base_height + dem_diff_scaled
-
-                    if crop_csv_by_zlimit:
-                        z_cap_here = ground_z + z_limit_agl
-                        if z_cap_here > z_max_output:
-                            z_cap_here = z_max_output
-                    else:
-                        z_cap_here = z_max_output
-
-                    z_top_here = z_cap_here
+                    ground_z, z_top_here = _local_ground_and_cap_z(j, i)
 
                     if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (z_top_here <= ground_z):
                         continue
 
                     # ground point (always)
-                    k0 = 0
-                    uval = float(u_m[k0, j, i])
-                    vval = float(v_m[k0, j, i])
-                    wval = 0.0
-                    _write_csv_row(
-                        f, x, y, ground_z, uval, vval, wval,
-                        float(temp_k[k0, j, i]) if write_temp else None
+                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                        j, i, ground_z, ground_z, write_temp
                     )
-                    bc_sum += np.array([uval, vval, wval])
+                    _write_csv_row(
+                        f, x, y, ground_z, uval, vval, 0.0, patch_side, tval
+                    )
+                    bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
 
                     if dz <= 0.0 or (not math.isfinite(dz)):
@@ -2072,49 +2298,35 @@ def buildBC_dev(
                         if z_out >= z_top_here - 1e-6:
                             continue
 
-                        uval = float(u_m[k_agl, j, i])
-                        vval = float(v_m[k_agl, j, i])
-                        wval = 0.0
-                        _write_csv_row(
-                            f, x, y, z_out, uval, vval, wval,
-                            float(temp_k[k_agl, j, i]) if write_temp else None
+                        uval, vval, _w_interp, tval = _sample_wind_at_point(
+                            j, i, z_out, ground_z, write_temp
                         )
-                        bc_sum += np.array([uval, vval, wval])
+                        _write_csv_row(
+                            f, x, y, z_out, uval, vval, 0.0, patch_side, tval
+                        )
+                        bc_sum += np.array([uval, vval, 0.0])
                         bc_cnt += 1
 
 
             # west and east faces
             for i in (0, nx - 1):
                 x = i * dx
+                patch_side = patch_west if i == 0 else patch_east
                 for j in range(ny):
                     y = j * dy
-                    dem_diff = dem_grid[j, i] if dem_grid is not None else 0.0
-                    dem_diff_scaled = dem_diff * elevation_scale
-
-                    ground_z = base_height + dem_diff_scaled
-
-                    if crop_csv_by_zlimit:
-                        z_cap_here = ground_z + z_limit_agl
-                        if z_cap_here > z_max_output:
-                            z_cap_here = z_max_output
-                    else:
-                        z_cap_here = z_max_output
-
-                    z_top_here = z_cap_here
+                    ground_z, z_top_here = _local_ground_and_cap_z(j, i)
 
                     if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (z_top_here <= ground_z):
                         continue
 
                     # ground point (always)
-                    k0 = 0
-                    uval = float(u_m[k0, j, i])
-                    vval = float(v_m[k0, j, i])
-                    wval = 0.0
-                    _write_csv_row(
-                        f, x, y, ground_z, uval, vval, wval,
-                        float(temp_k[k0, j, i]) if write_temp else None
+                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                        j, i, ground_z, ground_z, write_temp
                     )
-                    bc_sum += np.array([uval, vval, wval])
+                    _write_csv_row(
+                        f, x, y, ground_z, uval, vval, 0.0, patch_side, tval
+                    )
+                    bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
 
                     if dz <= 0.0 or (not math.isfinite(dz)):
@@ -2134,14 +2346,13 @@ def buildBC_dev(
                         if z_out >= z_top_here - 1e-6:
                             continue
 
-                        uval = float(u_m[k_agl, j, i])
-                        vval = float(v_m[k_agl, j, i])
-                        wval = 0.0
-                        _write_csv_row(
-                            f, x, y, z_out, uval, vval, wval,
-                            float(temp_k[k_agl, j, i]) if write_temp else None
+                        uval, vval, _w_interp, tval = _sample_wind_at_point(
+                            j, i, z_out, ground_z, write_temp
                         )
-                        bc_sum += np.array([uval, vval, wval])
+                        _write_csv_row(
+                            f, x, y, z_out, uval, vval, 0.0, patch_side, tval
+                        )
+                        bc_sum += np.array([uval, vval, 0.0])
                         bc_cnt += 1
 
 
@@ -2156,7 +2367,7 @@ def buildBC_dev(
             else:
                 dt_str = "20990101120000"
                 _log_warn("datetime not provided in conf, use 20990101120000")
-            dst_path = vti_path.parent / f"SurfData_{dt_str}.csv"
+            dst_path = proj_temp / f"SurfData_{dt_str}.csv"
             shutil.copyfile(csv_path, dst_path)
             _log_info(f"Copied timestamped CSV: {dst_path}")
 
@@ -2220,6 +2431,15 @@ if __name__ == "__main__":
         default=1.0,
         help="Scale factor for elevation differences (for visualization/testing). Default: 1.0"
     )
+    parser.add_argument(
+        "--write-vtk",
+        action="store_true",
+        help="Enable VTK (*.vti) output. Disabled by default."
+    )
 
     args = parser.parse_args()
-    buildBC_dev(args.conf_file, elevation_scale=args.elevation_scale)
+    buildBC_dev(
+        args.conf_file,
+        elevation_scale=args.elevation_scale,
+        write_vtk=args.write_vtk,
+    )

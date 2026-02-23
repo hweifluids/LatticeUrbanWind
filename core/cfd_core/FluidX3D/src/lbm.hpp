@@ -141,6 +141,9 @@ public:
 	float get_fx() const { return fx; } // get global froce per volume
 	float get_fy() const { return fy; } // get global froce per volume
 	float get_fz() const { return fz; } // get global froce per volume
+	float get_omega_x() const { return omega_x; } // get Coriolis rotation x-component
+	float get_omega_y() const { return omega_y; } // get Coriolis rotation y-component
+	float get_omega_z() const { return omega_z; } // get Coriolis rotation z-component
 	float get_sigma() const { return sigma; } // get surface tension coefficient
 	float get_alpha() const { return alpha; } // get thermal diffusion coefficient
 	float get_beta() const { return beta; } // get thermal expansion coefficient
@@ -301,7 +304,7 @@ public:
 			else print_error("Error in vtk_type(): Type not supported.");
 			return "";
 		}
-		inline void write_vtk(const string& path, const bool convert_to_si_units=true) { // write binary .vtk file
+		inline void write_vtk(const string& path, const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
 			float spacing = 1.0f;
 			T unit_conversion_factor = (T)1;
 			if(convert_to_si_units) {
@@ -309,7 +312,7 @@ public:
 				if(name=="rho") unit_conversion_factor = (T)units.si_rho(1.0f);
 				if(name=="u"  ) unit_conversion_factor = (T)units.si_u  (1.0f);
 				if(name=="F"  ) unit_conversion_factor = (T)units.si_F  (1.0f);
-				if(name=="T"  ) unit_conversion_factor = (T)units.si_T  (1.0f);
+				if(name=="T"  ) unit_conversion_factor = (T)units.si_dT (1.0f);
 			}
 			const string filename = create_file_extension(path, ".vtk");
 			float3 origin = spacing*float3(0.5f-0.5f*(float)Nx, 0.5f-0.5f*(float)Ny, 0.5f-0.5f*(float)Nz);
@@ -334,16 +337,20 @@ public:
 				if(N==0ull) break; // chunk_remainder may be 0, then skip last iteration
 				parallel_for(N, [&](ulong i) {
 					for(uint d=0u; d<dimensions(); d++) { // LBM to SI units, LittleEndian to BigEndian, AoS to SoA
-						data[i*(ulong)dimensions()+(ulong)d] = reverse_bytes((T)(unit_conversion_factor*reference(c*chunk_elements+i, d)));
+						const T value = reference(c*chunk_elements+i, d);
+						const T si_value = convert_to_si_units&&name=="T" ? (T)units.si_T((float)value) : (T)(unit_conversion_factor*value);
+						data[i*(ulong)dimensions()+(ulong)d] = reverse_bytes(si_value);
 					}
 				});
 				file.write((char*)data, N*(ulong)dimensions()*sizeof(T)); // write binary data
 			}
 			file.close();
 			delete[] data;
-			info.allow_printing.lock();
-			print_info("File \""+filename+"\" saved.");
-			info.allow_printing.unlock();
+			if(print_saved_message) {
+				info.allow_printing.lock();
+				print_info("File \""+filename+"\" saved.");
+				info.allow_printing.unlock();
+			}
 		}
 
 	public:
@@ -405,12 +412,12 @@ public:
 			for(uint domain=0u; domain<D; domain++) buffers[domain]->enqueue_write_to_device();
 			for(uint domain=0u; domain<D; domain++) buffers[domain]->finish_queue();
 		}
-		inline void write_host_to_vtk(const string& path="", const bool convert_to_si_units=true) { // write binary .vtk file
-			write_vtk(default_filename(path, name, ".vtk", lbm->get_t()), convert_to_si_units);
+		inline void write_host_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
+			write_vtk(default_filename(path, name, ".vtk", lbm->get_t()), convert_to_si_units, print_saved_message);
 		}
-		inline void write_device_to_vtk(const string& path="", const bool convert_to_si_units=true) { // write binary .vtk file
+		inline void write_device_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
 			read_from_device();
-			write_host_to_vtk(path, convert_to_si_units);
+			write_host_to_vtk(path, convert_to_si_units, print_saved_message);
 		}
 	};
 
@@ -472,6 +479,9 @@ public:
 	float get_fx() const { return lbm_domain[0]->get_fx(); } // get global froce per volume
 	float get_fy() const { return lbm_domain[0]->get_fy(); } // get global froce per volume
 	float get_fz() const { return lbm_domain[0]->get_fz(); } // get global froce per volume
+	float get_omega_x() const { return lbm_domain[0]->get_omega_x(); } // get Coriolis rotation x-component
+	float get_omega_y() const { return lbm_domain[0]->get_omega_y(); } // get Coriolis rotation y-component
+	float get_omega_z() const { return lbm_domain[0]->get_omega_z(); } // get Coriolis rotation z-component
 	float get_sigma() const { return lbm_domain[0]->get_sigma(); } // get surface tension coefficient
 	float get_alpha() const { return lbm_domain[0]->get_alpha(); } // get thermal diffusion coefficient
 	float get_beta() const { return lbm_domain[0]->get_beta(); } // get thermal expansion coefficient
