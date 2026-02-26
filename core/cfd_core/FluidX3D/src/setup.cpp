@@ -65,6 +65,7 @@ struct SamplePoint {
     int patch = -1; // -1 means unspecified/legacy CSV
 };
 struct ProfileSample { float z; float u; };
+struct DemCsvPoint { float x; float y; float elevation; };
 
 class GroundTemperaturePlane2D {
 public:
@@ -589,6 +590,97 @@ static std::vector<ProfileSample> read_profile_dat(const string& path) {
     return out;
 }
 
+// helper: read interpolated_dem.csv (columns x,y,elevation in SI units)
+static std::vector<DemCsvPoint> read_interpolated_dem_csv(
+    const string& path,
+    float* x_min = nullptr, float* x_max = nullptr,
+    float* y_min = nullptr, float* y_max = nullptr,
+    float* elev_min = nullptr, float* elev_max = nullptr
+) {
+    if (x_min) *x_min = 0.0f;
+    if (x_max) *x_max = 0.0f;
+    if (y_min) *y_min = 0.0f;
+    if (y_max) *y_max = 0.0f;
+    if (elev_min) *elev_min = 0.0f;
+    if (elev_max) *elev_max = 0.0f;
+
+    std::vector<DemCsvPoint> out;
+    std::ifstream fin(path);
+    if (!fin.is_open()) return out;
+
+    auto split_csv = [](const string& s) -> std::vector<string> {
+        std::vector<string> out_cols;
+        std::stringstream ss(s);
+        string tok;
+        while (std::getline(ss, tok, ',')) out_cols.push_back(trim_copy(tok));
+        return out_cols;
+    };
+    auto to_lower_copy = [](string s) -> string {
+        for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+        return s;
+    };
+    auto find_col = [&](const std::vector<string>& cols, const string& key) -> int {
+        const string key_lc = to_lower_copy(key);
+        for (size_t i = 0u; i < cols.size(); ++i) {
+            if (to_lower_copy(cols[i]) == key_lc) return (int)i;
+        }
+        return -1;
+    };
+
+    string header_line;
+    if (!std::getline(fin, header_line)) return out;
+    const std::vector<string> header_cols = split_csv(header_line);
+    int idx_x = find_col(header_cols, "x");
+    int idx_y = find_col(header_cols, "y");
+    int idx_e = find_col(header_cols, "elevation");
+    if (idx_e < 0) idx_e = find_col(header_cols, "z");
+    const bool use_named = (idx_x >= 0) && (idx_y >= 0) && (idx_e >= 0);
+
+    float xmin = +FLT_MAX, xmax = -FLT_MAX;
+    float ymin = +FLT_MAX, ymax = -FLT_MAX;
+    float emin = +FLT_MAX, emax = -FLT_MAX;
+
+    string line;
+    while (std::getline(fin, line)) {
+        if (line.empty()) continue;
+        for (char& ch : line) {
+            if (ch == ';' || ch == '\t') ch = ',';
+        }
+        const std::vector<string> cols = split_csv(line);
+        float x = 0.0f, y = 0.0f, e = 0.0f;
+
+        if (use_named) {
+            const int need_max = std::max(idx_x, std::max(idx_y, idx_e));
+            if ((int)cols.size() <= need_max) continue;
+            x = (float)atof(cols[idx_x].c_str());
+            y = (float)atof(cols[idx_y].c_str());
+            e = (float)atof(cols[idx_e].c_str());
+        }
+        else {
+            if (cols.size() < 3u) continue;
+            x = (float)atof(cols[0].c_str());
+            y = (float)atof(cols[1].c_str());
+            e = (float)atof(cols[2].c_str());
+        }
+
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(e)) continue;
+        out.push_back(DemCsvPoint{ x, y, e });
+        xmin = fminf(xmin, x); xmax = fmaxf(xmax, x);
+        ymin = fminf(ymin, y); ymax = fmaxf(ymax, y);
+        emin = fminf(emin, e); emax = fmaxf(emax, e);
+    }
+
+    if (!out.empty()) {
+        if (x_min) *x_min = xmin;
+        if (x_max) *x_max = xmax;
+        if (y_min) *y_min = ymin;
+        if (y_max) *y_max = ymax;
+        if (elev_min) *elev_min = emin;
+        if (elev_max) *elev_max = emax;
+    }
+    return out;
+}
+
 static float interpolate_profile_cubic(const std::vector<float>& z,
                                        const std::vector<float>& u,
                                        const float zq) {
@@ -1001,6 +1093,9 @@ void main_setup() {
     const float profile_dz_si = 0.1f;
     bool buoyancy_enabled = true; // default-on unless explicitly false/False/0
     bool buoyancy_explicit = false;
+    bool datetime_from_config = false;
+    bool has_cut_lon_manual = false;
+    bool has_cut_lat_manual = false;
 
     // ---------------------- read *.luw / *.luwdg ------------------------------
     std::string parent; // project directory that contains the configure file
@@ -1144,7 +1239,10 @@ void main_setup() {
                     };
 
                 if (key == "casename")        caseName = unquote(val);
-                else if (key == "datetime")   datetime = unquote(val);
+                else if (key == "datetime") {
+                    datetime = unquote(val);
+                    datetime_from_config = true;
+                }
                 else if (key == "downstream_bc") downstream_bc = unquote(val);
                 else if (key == "high_order") {
                     std::string v = unquote(val);
@@ -1188,8 +1286,14 @@ void main_setup() {
                     if (v == "true" || v == "1") enable_coriolis = true;
                 }
 
-                else if (key == "cut_lon_manual") parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
-                else if (key == "cut_lat_manual") parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
+                else if (key == "cut_lon_manual") {
+                    parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
+                    has_cut_lon_manual = true;
+                }
+                else if (key == "cut_lat_manual") {
+                    parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
+                    has_cut_lat_manual = true;
+                }
                 else if (key == "inflow") parse_float_list(val, inflow_list);
                 else if (key == "angle") parse_float_list(val, angle_list);
 
@@ -1232,6 +1336,15 @@ void main_setup() {
             parent = std::filesystem::path(conf_used_path).parent_path().string();
 
         }
+    }
+
+    if (profile_generation && !datetime_from_config) {
+        println("| Profile mode    | datetime not set in *.luwpf, use fallback " + datetime + " |");
+    }
+    if (profile_generation && enable_coriolis && !(has_cut_lon_manual && has_cut_lat_manual)) {
+        println("| WARNING: coriolis_term=true but cut_lon_manual/cut_lat_manual is missing in *.luwpf. |");
+        println("| WARNING: Coriolis is auto-disabled for Profile mode.                         |");
+        enable_coriolis = false;
     }
 
     const std::string lbm_log_path = init_console_log_file(parent);
@@ -1613,6 +1726,12 @@ void main_setup() {
     print_section_title("LOADING GEOMETRY AND VOXELIZE");
     print_kv_row("Geometry", "Loading buildings as geometry, meshing...");
 
+    std::vector<DemCsvPoint> profile_dem_points_raw;
+    float profile_dem_xmin = 0.0f, profile_dem_xmax = 0.0f;
+    float profile_dem_ymin = 0.0f, profile_dem_ymax = 0.0f;
+    float profile_dem_emin = 0.0f, profile_dem_emax = 0.0f;
+    bool profile_dem_loaded = false;
+
     std::string stl_path;
     {
         std::filesystem::path dir = std::filesystem::path(parent) / "proj_temp";
@@ -1622,12 +1741,30 @@ void main_setup() {
         }
         const std::string prefix = caseName;
 
-        // First try {parent}/proj_temp/{caseName}_DG.stl
+        const std::filesystem::path dem_pf_candidate = dir / (prefix + "_DEM_PF.stl");
         const std::filesystem::path dg_candidate = dir / (prefix + "_DG.stl");
-        if (std::filesystem::exists(dg_candidate) && std::filesystem::is_regular_file(dg_candidate)) {
+        if (profile_generation &&
+            std::filesystem::exists(dem_pf_candidate) &&
+            std::filesystem::is_regular_file(dem_pf_candidate)) {
+            stl_path = dem_pf_candidate.string();
+        }
+        else if (std::filesystem::exists(dg_candidate) && std::filesystem::is_regular_file(dg_candidate)) {
             stl_path = dg_candidate.string();
         }
-        else {
+        else if (profile_generation) {
+            // Profile mode fallback: any *_DEM_PF.stl
+            const std::string dem_pf_suffix = "_DEM_PF.stl";
+            for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                if (!entry.is_regular_file()) continue;
+                const std::string fname = entry.path().filename().string();
+                if (fname.size() >= dem_pf_suffix.size() &&
+                    fname.substr(fname.size() - dem_pf_suffix.size()) == dem_pf_suffix) {
+                    stl_path = entry.path().string();
+                    break;
+                }
+            }
+        }
+        if (stl_path.empty()) {
             // Fallback to any *_DG.stl
             const std::string dg_suffix = "_DG.stl";
             for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -1636,7 +1773,7 @@ void main_setup() {
                 if (fname.size() >= dg_suffix.size() &&
                     fname.substr(fname.size() - dg_suffix.size()) == dg_suffix) {
                     stl_path = entry.path().string();
-                    break; // first match
+                    break;
                 }
             }
         }
@@ -1653,7 +1790,13 @@ void main_setup() {
         }
 
         if (stl_path.empty()) {
-            println("ERROR: no STL file. Tried " + dg_candidate.string() + ", *_DG.stl, then *.stl under " + dir.string());
+            if (profile_generation) {
+                println("ERROR: no STL file. Tried " + dem_pf_candidate.string() + ", *_DEM_PF.stl, " +
+                        dg_candidate.string() + ", *_DG.stl, then *.stl under " + dir.string());
+            }
+            else {
+                println("ERROR: no STL file. Tried " + dg_candidate.string() + ", *_DG.stl, then *.stl under " + dir.string());
+            }
             wait(); exit(-1);
         }
 
@@ -1664,16 +1807,44 @@ void main_setup() {
     print_kv_row("Time code", "[" + now_str() + "]");
 
     if (!mesh) { println("ERROR: failed to load STL"); wait(); exit(-1); }
+    const float3 stl_size_si = mesh->get_bounding_box_size();
     const float3 stl_min_si = mesh->pmin;
+    const float3 stl_max_si = mesh->pmax;
     const float3 domain_min_si = float3(
         units.si_x(0.5f - 0.5f * (float)lbm_N.x),
         units.si_x(0.5f - 0.5f * (float)lbm_N.y),
         units.si_x(0.5f - 0.5f * (float)lbm_N.z));
     vtk_origin_shift = stl_min_si - domain_min_si;
-    const float target_lbm_x = units.x(si_size.x); const float scale_geom = target_lbm_x / mesh->get_bounding_box_size().x; mesh->scale(scale_geom);
+    const float target_lbm_x = units.x(si_size.x);
+    const float scale_geom = target_lbm_x / stl_size_si.x;
+    mesh->scale(scale_geom);
     mesh->translate(float3(1.0f - mesh->pmin.x, 1.0f - mesh->pmin.y, 1.0f - mesh->pmin.z));
 
+    print_kv_row("Geometry STL", stl_path);
+    print_kv_row("STL bounds SI", "x=[" + to_string(stl_min_si.x, 3u) + ", " + to_string(stl_max_si.x, 3u) +
+            "], y=[" + to_string(stl_min_si.y, 3u) + ", " + to_string(stl_max_si.y, 3u) +
+            "], z=[" + to_string(stl_min_si.z, 3u) + ", " + to_string(stl_max_si.z, 3u) + "]");
     print_kv_row("Geometry", "scaled by " + to_string(scale_geom, 4u) + ", ready for voxelization");
+
+    if (profile_generation) {
+        const std::string dem_csv_path = parent + "/proj_temp/interpolated_dem.csv";
+        profile_dem_points_raw = read_interpolated_dem_csv(
+            dem_csv_path,
+            &profile_dem_xmin, &profile_dem_xmax,
+            &profile_dem_ymin, &profile_dem_ymax,
+            &profile_dem_emin, &profile_dem_emax
+        );
+        profile_dem_loaded = !profile_dem_points_raw.empty();
+        if (profile_dem_loaded) {
+            print_kv_row("Terrain DEM", "Loaded " + to_string((ulong)profile_dem_points_raw.size()) + " points from interpolated_dem.csv");
+            print_kv_row("DEM bounds SI", "x=[" + to_string(profile_dem_xmin, 3u) + ", " + to_string(profile_dem_xmax, 3u) +
+                    "], y=[" + to_string(profile_dem_ymin, 3u) + ", " + to_string(profile_dem_ymax, 3u) +
+                    "], elev=[" + to_string(profile_dem_emin, 3u) + ", " + to_string(profile_dem_emax, 3u) + "]");
+        }
+        else {
+            print_kv_row("Terrain DEM", "interpolated_dem.csv not found or empty, fallback to flat ground");
+        }
+    }
 
     auto run_lbm = [&](LBM& lbm, const std::string& vtk_prefix, const bool extra_spacing) {
         print_section_title("LBM SOLVER INFORMATION");
@@ -2627,66 +2798,165 @@ void main_setup() {
             profile_u_lbmu[i] = profile_u_si[i] * u_scale;
         }
 
+        const float3 origin_lbmu = float3(
+            0.5f - 0.5f * (float)lbm_N.x,
+            0.5f - 0.5f * (float)lbm_N.y,
+            0.5f - 0.5f * (float)lbm_N.z
+        );
+        const float flat_ground_lbmu = origin_lbmu.z + units.x(z_si_offset);
+        GroundTemperaturePlane2D profile_ground_plane;
+        bool use_profile_dem_ground = false;
+        float ground_z_min_lbm = flat_ground_lbmu;
+        float ground_z_max_lbm = flat_ground_lbmu;
+
+        if (profile_dem_loaded) {
+            const float dem_rx = profile_dem_xmax - profile_dem_xmin;
+            const float dem_ry = profile_dem_ymax - profile_dem_ymin;
+            const float stl_rx = stl_size_si.x;
+            const float stl_ry = stl_size_si.y;
+            if (dem_rx > 1.0e-6f && dem_ry > 1.0e-6f && stl_rx > 1.0e-6f && stl_ry > 1.0e-6f) {
+                const float dem_to_stl_sx = stl_rx / dem_rx;
+                const float dem_to_stl_sy = stl_ry / dem_ry;
+                const float scale_warn = fmaxf(fabsf(dem_to_stl_sx - 1.0f), fabsf(dem_to_stl_sy - 1.0f));
+                const float off_warn_x = fabsf(profile_dem_xmin - stl_min_si.x) / stl_rx;
+                const float off_warn_y = fabsf(profile_dem_ymin - stl_min_si.y) / stl_ry;
+                if (scale_warn > 0.02f || off_warn_x > 0.02f || off_warn_y > 0.02f) {
+                    println("| Terrain DEM     | WARNING: DEM/STL XY bounds mismatch. Apply affine bounds alignment. |");
+                    println("|                 | DEM->STL scale x=" + to_string(dem_to_stl_sx, 6u) +
+                            ", y=" + to_string(dem_to_stl_sy, 6u) + "                             |");
+                }
+
+                std::vector<SamplePoint> dem_ground_samples;
+                dem_ground_samples.reserve(profile_dem_points_raw.size());
+                ground_z_min_lbm = +FLT_MAX;
+                ground_z_max_lbm = -FLT_MAX;
+                for (const auto& dp : profile_dem_points_raw) {
+                    const float x_stl_raw = stl_min_si.x + (dp.x - profile_dem_xmin) * dem_to_stl_sx;
+                    const float y_stl_raw = stl_min_si.y + (dp.y - profile_dem_ymin) * dem_to_stl_sy;
+                    const float z_stl_raw = z_si_offset + dp.elevation;
+
+                    const float x_lbm = origin_lbmu.x + (x_stl_raw - stl_min_si.x) * scale_geom;
+                    const float y_lbm = origin_lbmu.y + (y_stl_raw - stl_min_si.y) * scale_geom;
+                    const float z_lbm = origin_lbmu.z + (z_stl_raw - stl_min_si.z) * scale_geom;
+
+                    if (!std::isfinite(x_lbm) || !std::isfinite(y_lbm) || !std::isfinite(z_lbm)) continue;
+                    SamplePoint sp;
+                    sp.p = float3(x_lbm, y_lbm, 0.0f);
+                    sp.T = z_lbm;
+                    sp.patch = k_patch_bottom;
+                    dem_ground_samples.push_back(sp);
+                    ground_z_min_lbm = fminf(ground_z_min_lbm, z_lbm);
+                    ground_z_max_lbm = fmaxf(ground_z_max_lbm, z_lbm);
+                }
+
+                if (!dem_ground_samples.empty()) {
+                    profile_ground_plane.build_from_patch0_samples(dem_ground_samples, flat_ground_lbmu);
+                    use_profile_dem_ground = profile_ground_plane.has_samples();
+                }
+                if (use_profile_dem_ground) {
+                    const float gmin_si = units.si_x(ground_z_min_lbm - origin_lbmu.z);
+                    const float gmax_si = units.si_x(ground_z_max_lbm - origin_lbmu.z);
+                    println("| Terrain DEM     | profile ground enabled. z(SI) range " +
+                            to_string(gmin_si, 3u) + " .. " + to_string(gmax_si, 3u) + " m |");
+                }
+                else {
+                    println("| Terrain DEM     | no valid points after mapping, fallback to flat ground     |");
+                }
+            }
+            else {
+                println("| Terrain DEM     | invalid DEM or STL XY range, fallback to flat ground       |");
+            }
+        }
+
         const uint total_cases = static_cast<uint>(angle_list.size());
         uint case_index = 0u;
+        const bool profile_single_case_standard_output = (total_cases == 1u);
+        if (profile_single_case_standard_output) {
+            println("| Output logic    | standard luw naming: <datetime>_raw_* and <datetime>_avg  |");
+        }
+        else {
+            println("| Output logic    | multi-angle mode keeps ANG_<angle>_ prefix to avoid overwrite |");
+            println("|                 | each case still uses same run_nstep/purge_avg workflow      |");
+        }
 
-        auto compute_u_by_z = [&](LBM& lbm) {
-            const uint Nz = lbm.get_Nz();
-            std::vector<float> u_by_z(Nz, 0.0f);
-            const float z_base_lbmu = lbm.position(0u, 0u, 0u).z + units.x(z_si_offset);
+        auto profile_speed_lbmu = [&](const float pos_z, const float ground_z) {
+            if (pos_z <= ground_z) return 0.0f;
             const float inv_dz = 1.0f / profile_dz_si;
             const uint last_idx = static_cast<uint>(profile_u_lbmu.size() - 1u);
-            for (uint z = 0u; z < Nz; ++z) {
-                const float pos_z = lbm.position(0u, 0u, z).z;
-                float u_mag = 0.0f;
-                if (pos_z >= z_base_lbmu) {
-                    float z_above_si = units.si_x(pos_z - z_base_lbmu);
-                    if (z_above_si < 0.0f) z_above_si = 0.0f;
-                    long idx_l = std::lround(z_above_si * inv_dz);
-                    if (idx_l < 0l) idx_l = 0l;
-                    uint idx = static_cast<uint>(idx_l);
-                    if (idx > last_idx) idx = last_idx;
-                    u_mag = profile_u_lbmu[idx];
-                }
-                u_by_z[z] = u_mag;
-            }
-            return u_by_z;
+            float z_agl_si = units.si_x(pos_z - ground_z);
+            if (z_agl_si < 0.0f) z_agl_si = 0.0f;
+            long idx_l = std::lround(z_agl_si * inv_dz);
+            if (idx_l < 0l) idx_l = 0l;
+            uint idx = static_cast<uint>(idx_l);
+            if (idx > last_idx) idx = last_idx;
+            return profile_u_lbmu[idx];
         };
 
-        auto initialize_profile_velocity = [&](LBM& lbm, const std::vector<float>& u_by_z,
-                                                const float dir_x, const float dir_y) {
+        auto initialize_profile_velocity = [&](LBM& lbm,
+                                               const std::vector<float>& ground_xy,
+                                               const float dir_x, const float dir_y) {
+            const uint Nx = lbm.get_Nx();
             const ulong Ntot = lbm.get_N();
-            for (ulong n = 0ull; n < Ntot; ++n) {
+            parallel_for(Ntot, [&](ulong n) {
                 uint x = 0u, y = 0u, z = 0u;
                 lbm.coordinates(n, x, y, z);
-                const float u_mag = u_by_z[z];
+                if ((lbm.flags[n] & TYPE_S) != 0u) {
+                    lbm.u.x[n] = 0.0f;
+                    lbm.u.y[n] = 0.0f;
+                    lbm.u.z[n] = 0.0f;
+                    return;
+                }
+                const float ground_z = ground_xy[(ulong)y * (ulong)Nx + (ulong)x];
+                const float u_mag = profile_speed_lbmu(lbm.position(x, y, z).z, ground_z);
                 lbm.u.x[n] = dir_x * u_mag;
                 lbm.u.y[n] = dir_y * u_mag;
                 lbm.u.z[n] = 0.0f;
-            }
+            });
         };
 
-        auto apply_profile_boundaries = [&](LBM& lbm, const std::vector<float>& u_by_z,
-                                             const float dir_x, const float dir_y) {
+        auto apply_profile_boundaries = [&](LBM& lbm,
+                                            const std::vector<float>& ground_xy,
+                                            const float dir_x, const float dir_y) {
             const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
-            const bool has_ground = (Nz > 1u);
             const ulong Ntot = lbm.get_N();
-            for (ulong n = 0ull; n < Ntot; ++n) {
+            std::atomic<ulong> mapped_bc{ 0ul };
+            std::atomic<ulong> terrain_solid_bc{ 0ul };
+            parallel_for(Ntot, [&](ulong n) {
                 uint x = 0u, y = 0u, z = 0u;
                 lbm.coordinates(n, x, y, z);
-                if (has_ground && z == 0u) {
+                if (z == 0u) {
                     lbm.flags[n] = TYPE_S;
-                    continue;
+                    lbm.u.x[n] = 0.0f;
+                    lbm.u.y[n] = 0.0f;
+                    lbm.u.z[n] = 0.0f;
+                    return;
                 }
                 const bool is_boundary =
-                    (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || (has_ground && z == Nz - 1u));
-                if (is_boundary) {
-                    lbm.flags[n] = TYPE_E;
-                    const float u_mag = u_by_z[z];
-                    lbm.u.x[n] = dir_x * u_mag;
-                    lbm.u.y[n] = dir_y * u_mag;
+                    (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u);
+                if (!is_boundary) return;
+                if ((lbm.flags[n] & TYPE_S) != 0u) return;
+
+                const float ground_z = ground_xy[(ulong)y * (ulong)Nx + (ulong)x];
+                const float pos_z = lbm.position(x, y, z).z;
+                if (pos_z <= ground_z) {
+                    lbm.flags[n] = TYPE_S;
+                    lbm.u.x[n] = 0.0f;
+                    lbm.u.y[n] = 0.0f;
                     lbm.u.z[n] = 0.0f;
+                    terrain_solid_bc.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
                 }
+                lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_E);
+                const float u_mag = profile_speed_lbmu(pos_z, ground_z);
+                lbm.u.x[n] = dir_x * u_mag;
+                lbm.u.y[n] = dir_y * u_mag;
+                lbm.u.z[n] = 0.0f;
+                mapped_bc.fetch_add(1ul, std::memory_order_relaxed);
+            });
+            println("| Velocity BC     | profile boundaries mapped: " + to_string(mapped_bc.load()) + " cells                |");
+            if (terrain_solid_bc.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | boundary cells below local terrain -> solid: " +
+                        to_string(terrain_solid_bc.load()) + "                     |");
             }
         };
 
@@ -2714,12 +2984,76 @@ void main_setup() {
             println("| Voxelization done.                                                          |");
             print_section_title("BUILD BOUNDARY CONDITIONS");
 
-            const std::vector<float> u_by_z = compute_u_by_z(lbm);
-            initialize_profile_velocity(lbm, u_by_z, dir_x, dir_y);
-            apply_profile_boundaries(lbm, u_by_z, dir_x, dir_y);
+            const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
+            std::vector<float> ground_xy((ulong)Nx * (ulong)Ny, flat_ground_lbmu);
+            if (use_profile_dem_ground) {
+                const float zmin = lbm.position(0u, 0u, 0u).z;
+                const float zmax = lbm.position(0u, 0u, Nz - 1u).z;
+                parallel_for((ulong)Nx * (ulong)Ny, [&](ulong id) {
+                    const uint x = (uint)(id % (ulong)Nx);
+                    const uint y = (uint)(id / (ulong)Nx);
+                    const float3 pxy = lbm.position(x, y, 0u);
+                    float zg = profile_ground_plane.eval_xy(pxy.x, pxy.y);
+                    if (!std::isfinite(zg)) zg = flat_ground_lbmu;
+                    zg = fminf(fmaxf(zg, zmin), zmax);
+                    ground_xy[id] = zg;
+                });
+                float gmin = +FLT_MAX, gmax = -FLT_MAX;
+                for (const float zg : ground_xy) {
+                    gmin = fminf(gmin, zg);
+                    gmax = fmaxf(gmax, zg);
+                }
+                println("| Terrain ground  | mapped z(SI) range " +
+                        to_string(units.si_x(gmin - origin_lbmu.z), 3u) + " .. " +
+                        to_string(units.si_x(gmax - origin_lbmu.z), 3u) + " m                     |");
+            }
+
+            if (use_profile_dem_ground) {
+                std::atomic<ulong> terrain_clipped_to_solid{ 0ul };
+                parallel_for(lbm.get_N(), [&](ulong n) {
+                    if ((lbm.flags[n] & TYPE_S) != 0u) return;
+                    uint x = 0u, y = 0u, z = 0u;
+                    lbm.coordinates(n, x, y, z);
+                    const float pos_z = lbm.position(x, y, z).z;
+                    const float ground_z = ground_xy[(ulong)y * (ulong)Nx + (ulong)x];
+                    if (pos_z < ground_z) {
+                        lbm.flags[n] = TYPE_S;
+                        lbm.u.x[n] = 0.0f;
+                        lbm.u.y[n] = 0.0f;
+                        lbm.u.z[n] = 0.0f;
+                        terrain_clipped_to_solid.fetch_add(1ul, std::memory_order_relaxed);
+                    }
+                });
+                if (terrain_clipped_to_solid.load(std::memory_order_relaxed) > 0ul) {
+                    println("| Terrain clip    | below-terrain cells forced to solid: " +
+                            to_string(terrain_clipped_to_solid.load()) + "                    |");
+                }
+            }
+
+            initialize_profile_velocity(lbm, ground_xy, dir_x, dir_y);
+            apply_profile_boundaries(lbm, ground_xy, dir_x, dir_y);
             print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
-            const std::string vtk_prefix = "ANG_" + format_tag(angle_deg) + "_";
+            if (flux_correction) {
+                print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
+                auto eval = [&](const float3& q)->float3 {
+                    uint x = 0u, y = 0u, z = 0u;
+                    lbm.coordinates(q, x, y, z);
+                    const float ground_z = ground_xy[(ulong)y * (ulong)Nx + (ulong)x];
+                    const float u_mag = profile_speed_lbmu(q.z, ground_z);
+                    return float3(dir_x * u_mag, dir_y * u_mag, 0.0f);
+                };
+                apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
+                    &avg_du, &net_b, &net_a);
+            }
+            else {
+                print_kv_row("Flux correction", "skipped. Set flux_correction=true to enable");
+            }
+
+            const std::string vtk_prefix = profile_single_case_standard_output
+                ? std::string("")
+                : ("ANG_" + format_tag(angle_deg) + "_");
             run_lbm(lbm, vtk_prefix, true);
         }
     }
