@@ -44,6 +44,7 @@ bool use_high_order = false;
 bool flux_correction = false;
 uint research_output_steps = 0u; 
 uint purge_avg_steps = 0u;
+ulong run_nstep_override = 0ull;
 std::string validation_status = "fail"; 
 bool enable_coriolis = false;       
 
@@ -859,7 +860,7 @@ static string init_console_log_file(const string& project_dir) {
 }
 
 static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, const uint Nz,
-                          const float* u_avg, const float* rho_avg, const float* T_avg,
+                          const float* u_avg, const float* rho_avg, const float* T_avg, const uchar* flags,
                           const float* M2_u, const float* M2_v, const float* M2_w,
                           const ulong avg_count, const bool convert_to_si_units,
                           const bool print_saved_message=true) {
@@ -929,6 +930,13 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     if (T_avg) {
         write_field("T_avg", T_avg, 1u, T_factor, T_offset);
     }
+    std::vector<float> fluid(points, 1.0f);
+    if (flags) {
+        parallel_for(points, [&](ulong n) {
+            fluid[n] = (flags[n] & TYPE_S) ? 0.0f : 1.0f;
+        });
+    }
+    write_field("fluid", fluid.data(), 1u, 1.0f);
 
     std::vector<float> tke(points, 0.0f);
     if (avg_count > 1ull && M2_u && M2_v && M2_w) {
@@ -1165,6 +1173,10 @@ void main_setup() {
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "run_nstep") {
+                    const long long v = atoll(unquote(val).c_str());
+                    run_nstep_override = v > 0ll ? static_cast<ulong>(v) : 0ull;
+                }
                 else if (key == "purge_avg") {
                     const int v = atoi(val.c_str());
                     purge_avg_steps = v > 0 ? static_cast<uint>(v) : 0u;
@@ -1280,6 +1292,7 @@ void main_setup() {
     println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
     println("| GPU Decompose   | " + alignr(49u, to_string(Dx)) + ", " + alignr(2u, to_string(Dy)) + ", " + alignr(2u, to_string(Dz)) + " |");
     println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
+    println("| Run Steps       | " + alignr(57u, run_nstep_override > 0ull ? to_string(run_nstep_override) + " (run_nstep)" : string("20001 (default)")) + " |");
     println("| Purge Avg Steps | " + alignr(57u, purge_avg_steps > 0u ? to_string(purge_avg_steps) : string("off")) + " |");
     println("| Buoyancy Switch | " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
 
@@ -1667,8 +1680,10 @@ void main_setup() {
 
         lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
 
-        const ulong lbm_T = 20001ull;
-        const uint  vtk_dt = 20000u;        // export VTK
+        const ulong default_run_steps = 20001ull;
+        const ulong base_run_steps = run_nstep_override > 0ull ? run_nstep_override : default_run_steps;
+        const ulong extra_run_steps = research_output_steps > 0u ? (ulong)research_output_steps : 0ull;
+        const ulong total_steps = base_run_steps + extra_run_steps;
         auto print_task_finished = [&]() {
             print_kv_row("Task finished", "[" + now_str() + "]");
             if (extra_spacing) {
@@ -1702,7 +1717,11 @@ void main_setup() {
             vtk_saved_files.clear();
         };
 
-        const ulong total_steps = lbm_T + (research_output_steps > 0u ? (ulong)research_output_steps : 0ull);
+        print_kv_row("Run steps", to_string(total_steps) + (run_nstep_override > 0ull ? " (run_nstep override)" : " (default)"));
+        if (extra_run_steps > 0ull) {
+            print_kv_row("Extra steps", to_string(extra_run_steps) + " (legacy research_output)");
+        }
+
         const bool do_avg = purge_avg_steps > 0u;
         const ulong avg_window = do_avg ? std::min((ulong)purge_avg_steps, total_steps) : 0ull;
         const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + 1ull) : max_ulong;
@@ -1808,6 +1827,11 @@ void main_setup() {
                 flush_vtk_saved_files();
                 return;
             }
+            lbm.flags.read_from_device();
+            std::vector<uchar> flags_host((size_t)Ncells, (uchar)0u);
+            parallel_for(Ncells, [&](ulong n) {
+                flags_host[(size_t)n] = lbm.flags[n];
+            });
             const std::string avg_name = vtk_prefix + datetime + "_avg";
             const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
 #ifdef TEMPERATURE
@@ -1816,12 +1840,42 @@ void main_setup() {
             const float* T_avg_ptr = nullptr;
 #endif
             write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(),
-                          avg_u.data(), avg_rho.data(), T_avg_ptr,
+                          avg_u.data(), avg_rho.data(), T_avg_ptr, flags_host.data(),
                           M2_u.data(), M2_v.data(), M2_w.data(),
                           avg_count, true, false);
             push_vtk_saved_file(avg_file);
             flush_vtk_saved_files();
             print_kv_row("Avg samples", to_string(avg_count));
+        };
+
+        auto write_final_transient = [&]() {
+            const ulong vtk_t = lbm.get_t();
+            push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
+            lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
+            lbm.rho.write_device_to_vtk(vtk_dir, true, false);
+#ifdef TEMPERATURE
+            if (use_temperature_bc) {
+                push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
+                lbm.T.write_device_to_vtk(vtk_dir, true, false);
+            }
+#endif
+        };
+
+        auto maybe_write_transform_info = [&]() {
+            if (extra_run_steps == 0ull) return;
+            println("| Writing transform.info...                                                  |");
+            std::string info_path = parent + "/proj_temp/transform.info";
+            std::ofstream info_file(info_path);
+            if (info_file.is_open()) {
+                const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+                info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
+                info_file.close();
+                println("| Successfully wrote " + info_path + " |");
+            }
+            else {
+                println("ERROR: Could not open " + info_path + " for writing.");
+            }
         };
 
 #if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)
@@ -1833,10 +1887,10 @@ void main_setup() {
             30.0f,                                // pitch
             80.0f);                               // FOV
 
-        lbm.run(0u, lbm_T); // initialize fields and graphics buffers
-        while (lbm.get_t() < lbm_T) {
+        lbm.run(0u, total_steps); // initialize fields and graphics buffers
+        while (lbm.get_t() < total_steps) {
             // ------------------ off-screen PNG rendering (optional video) ------------------
-            if (lbm.graphics.next_frame(lbm_T, 1.0f)) {
+            if (lbm.graphics.next_frame(total_steps, 1.0f)) {
                 {
                     auto __old_cwd = std::filesystem::current_path();
                     std::filesystem::current_path(snapshots_dir);
@@ -1844,131 +1898,21 @@ void main_setup() {
                     std::filesystem::current_path(__old_cwd);
                 }
             }
-
-            // ------------------ synchronous VTK output ------------------
-            if (lbm.get_t() != 0u && lbm.get_t() % vtk_dt == 0u) {
-                const ulong vtk_t = lbm.get_t();
-                // velocity (vector field)
-                push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
-                lbm.u.write_device_to_vtk(vtk_dir, true, false);
-                // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
-                push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
-                lbm.rho.write_device_to_vtk(vtk_dir, true, false);
-#ifdef TEMPERATURE
-                if (use_temperature_bc) {
-                    // temperature in SI units (Kelvin)
-                    push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
-                    lbm.T.write_device_to_vtk(vtk_dir, true, false);
-                }
-#endif
-            }
-
-            lbm.run(1u, lbm_T);
+            lbm.run(1u, total_steps);
             maybe_accumulate_avg();
         }
-        if (research_output_steps > 0) {
-            println("|-----------------------------------------------------------------------------|");
-            println("| Starting research output phase: " + to_string(research_output_steps) + " steps...                        |");
-
-            std::vector<std::string> vtk_filenames;
-            vtk_filenames.reserve(research_output_steps);
-
-            const ulong lbm_T_research = lbm.get_t() + research_output_steps;
-
-            while (lbm.get_t() < lbm_T_research) {
-                lbm.run(1u, lbm_T_research);
-                const ulong vtk_t = lbm.get_t();
-                push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
-                lbm.u.write_device_to_vtk(vtk_dir, true, false);
-                // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
-                push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
-                lbm.rho.write_device_to_vtk(vtk_dir, true, false);
-#ifdef TEMPERATURE
-                if (use_temperature_bc) {
-                    // temperature in SI units (Kelvin)
-                    push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
-                    lbm.T.write_device_to_vtk(vtk_dir, true, false);
-                }
-#endif
-                maybe_accumulate_avg();
-            }
-
-            println("| Research output phase complete. Writing transform.info...             |");
-
-            // 4. Write transform.info
-            std::string info_path = parent + "/proj_temp/transform.info";
-            std::ofstream info_file(info_path);
-            if (info_file.is_open()) {
-                // dt_si = (cell_m / 1.0) * (lbm_ref_u / si_ref_u) * 1.0
-                const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
-
-                info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
-
-                info_file.close();
-                println("| Successfully wrote " + info_path + " |");
-            }
-            else {
-                println("ERROR: Could not open " + info_path + " for writing.");
-            }
-        }
+        write_final_transient();
+        maybe_write_transform_info();
         finalize_avg();
         print_task_finished();
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
-        while (lbm.get_t() < lbm_T) {
-            if (lbm.get_t() != 0u && lbm.get_t() % vtk_dt == 0u) {
-                const string vtk_file = vtk_dir + "step_" + to_string(lbm.get_t(), 5u) + ".vtk";
-                lbm.write_vtk(vtk_file, true, true);
-#ifdef TEMPERATURE
-                if (use_temperature_bc) {
-                    lbm.T.write_device_to_vtk(vtk_dir, true);
-                }
-#endif
-            }
-            lbm.run(1u, lbm_T);
+        while (lbm.get_t() < total_steps) {
+            lbm.run(1u, total_steps);
             maybe_accumulate_avg();
         }
-        if (research_output_steps > 0) {
-            println("|-----------------------------------------------------------------------------|");
-            println("| Starting research output phase: " + to_string(research_output_steps) + " steps...                        |");
-
-            std::vector<std::string> vtk_filenames;
-            vtk_filenames.reserve(research_output_steps);
-
-            const ulong lbm_T_research = lbm.get_t() + research_output_steps;
-
-            while (lbm.get_t() < lbm_T_research) {
-                lbm.run(1u, lbm_T_research);
-                lbm.u.write_device_to_vtk(vtk_dir, true);
-                // density as proxy for pressure (p = c_s^2 * (rho-1) can be computed in ParaView)
-                lbm.rho.write_device_to_vtk(vtk_dir, true);
-#ifdef TEMPERATURE
-                if (use_temperature_bc) {
-                    // temperature in SI units (Kelvin)
-                    lbm.T.write_device_to_vtk(vtk_dir, true);
-                }
-#endif
-                maybe_accumulate_avg();
-            }
-
-            println("| Research output phase complete. Writing transform.info...             |");
-
-            // 4. write transform.info
-            std::string info_path = parent + "/proj_temp/transform.info";
-            std::ofstream info_file(info_path);
-            if (info_file.is_open()) {
-                // dt_si = (cell_m / 1.0) * (lbm_ref_u / si_ref_u) * 1.0
-                const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
-
-                info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
-
-                info_file.close();
-                println("| Successfully wrote " + info_path + " |");
-            }
-            else {
-                println("ERROR: Could not open " + info_path + " for writing.");
-            }
-        }
+        write_final_transient();
+        maybe_write_transform_info();
         finalize_avg();
         print_task_finished();
 #endif

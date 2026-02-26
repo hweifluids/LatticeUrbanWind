@@ -28,6 +28,57 @@ const uint dimensions = 3u;
 const uint transfers = 9u;
 #endif // D3Q27
 
+namespace {
+struct TriangleAABB {
+	float3 pmin;
+	float3 pmax;
+};
+struct DomainProjectedBounds {
+	float min_a;
+	float max_a;
+	float min_b;
+	float max_b;
+};
+
+inline TriangleAABB triangle_aabb(const float3& p0, const float3& p1, const float3& p2) {
+	TriangleAABB aabb;
+	aabb.pmin = float3(
+		fmin(fmin(p0.x, p1.x), p2.x),
+		fmin(fmin(p0.y, p1.y), p2.y),
+		fmin(fmin(p0.z, p1.z), p2.z)
+	);
+	aabb.pmax = float3(
+		fmax(fmax(p0.x, p1.x), p2.x),
+		fmax(fmax(p0.y, p1.y), p2.y),
+		fmax(fmax(p0.z, p1.z), p2.z)
+	);
+	return aabb;
+}
+inline DomainProjectedBounds make_projected_bounds(const uint direction, const float x_min, const float x_max, const float y_min, const float y_max, const float z_min, const float z_max) {
+	if(direction==0u) return DomainProjectedBounds{ y_min, y_max, z_min, z_max }; // yz projection
+	if(direction==1u) return DomainProjectedBounds{ x_min, x_max, z_min, z_max }; // xz projection
+	return DomainProjectedBounds{ x_min, x_max, y_min, y_max }; // xy projection
+}
+inline bool overlap_1d(const float min0, const float max0, const float min1, const float max1, const float pad, const float eps) {
+	return max0>=min1-pad-eps && min0<=max1+pad+eps;
+}
+inline bool overlaps_projected(const TriangleAABB& tri, const DomainProjectedBounds& dom, const uint direction, const float pad, const float eps) {
+	float tri_min_a = 0.0f, tri_max_a = 0.0f, tri_min_b = 0.0f, tri_max_b = 0.0f;
+	if(direction==0u) { // yz
+		tri_min_a = tri.pmin.y; tri_max_a = tri.pmax.y;
+		tri_min_b = tri.pmin.z; tri_max_b = tri.pmax.z;
+	} else if(direction==1u) { // xz
+		tri_min_a = tri.pmin.x; tri_max_a = tri.pmax.x;
+		tri_min_b = tri.pmin.z; tri_max_b = tri.pmax.z;
+	} else { // xy
+		tri_min_a = tri.pmin.x; tri_max_a = tri.pmax.x;
+		tri_min_b = tri.pmin.y; tri_max_b = tri.pmax.y;
+	}
+	return overlap_1d(tri_min_a, tri_max_a, dom.min_a, dom.max_a, pad, eps) &&
+		overlap_1d(tri_min_b, tri_max_b, dom.min_b, dom.max_b, pad, eps);
+}
+} // namespace
+
 uint bytes_per_cell_host() { // returns the number of Bytes per cell allocated in host memory
 	uint bytes_per_cell = 17u; // rho, u, flags
 #ifdef FORCE_FIELD
@@ -349,102 +400,112 @@ uint LBM_Domain::get_velocity_set() const {
 //}
 
 // voxelize triangle mesh
-void LBM_Domain::voxelize_mesh_on_device(const Mesh* mesh, const uchar flag, const float3& rotation_center, const float3& linear_velocity, const float3& rotational_velocity) { 
-	Memory<float3> p0(device, mesh->triangle_number, 1u, mesh->p0);
-	Memory<float3> p1(device, mesh->triangle_number, 1u, mesh->p1);
-	Memory<float3> p2(device, mesh->triangle_number, 1u, mesh->p2);
-	Memory<float> bounding_box_and_velocity(device, 16u);
+void LBM_Domain::voxelize_mesh_on_device(const Mesh* mesh, const uchar flag, const float3& rotation_center, const float3& linear_velocity, const float3& rotational_velocity, const uint direction_override_0, const uint direction_override_1, const vector<uint>* triangle_ids_0, const vector<uint>* triangle_ids_1) {
+	(void)direction_override_1;
+	(void)triangle_ids_1;
 	// use bounding box of mesh to speed up voxelization; add tolerance of 2 cells for re-voxelization of moving objects
-	const float x0 = mesh->pmin.x - 2.0f, y0 = mesh->pmin.y - 2.0f, z0 = mesh->pmin.z - 2.0f, x1 = mesh->pmax.x + 2.0f, y1 = mesh->pmax.y + 2.0f, z1 = mesh->pmax.z + 2.0f; 
+	const float x0 = mesh->pmin.x - 2.0f, y0 = mesh->pmin.y - 2.0f, z0 = mesh->pmin.z - 2.0f, x1 = mesh->pmax.x + 2.0f, y1 = mesh->pmax.y + 2.0f, z1 = mesh->pmax.z + 2.0f;
+	const ulong A[3] = { (ulong)Ny*(ulong)Nz, (ulong)Nz*(ulong)Nx, (ulong)Nx*(ulong)Ny };
+	auto run_voxelize_pass = [&](const uint direction, const uchar pass_flag, const vector<uint>* triangle_ids) {
+		if(direction>2u) return;
+		if(triangle_ids!=nullptr&&triangle_ids->empty()) return;
+		const uint triangle_number = triangle_ids==nullptr ? mesh->triangle_number : (uint)triangle_ids->size();
+		if(triangle_number==0u) return;
 
-	{
-		uint tri_n = static_cast<uint>(mesh->triangle_number);
-		float tri_n_f;
-		std::memcpy(&tri_n_f, &tri_n, sizeof(uint));
-		bounding_box_and_velocity[0] = tri_n_f;
-	}
-
-	bounding_box_and_velocity[1] = x0;
-	bounding_box_and_velocity[2] = y0;
-	bounding_box_and_velocity[3] = z0;
-	bounding_box_and_velocity[4] = x1;
-	bounding_box_and_velocity[5] = y1;
-	bounding_box_and_velocity[6] = z1;
-	bounding_box_and_velocity[7] = rotation_center.x;
-	bounding_box_and_velocity[8] = rotation_center.y;
-	bounding_box_and_velocity[9] = rotation_center.z;
-	bounding_box_and_velocity[10] = linear_velocity.x;
-	bounding_box_and_velocity[11] = linear_velocity.y;
-	bounding_box_and_velocity[12] = linear_velocity.z;
-	bounding_box_and_velocity[13] = rotational_velocity.x;
-	bounding_box_and_velocity[14] = rotational_velocity.y;
-	bounding_box_and_velocity[15] = rotational_velocity.z;
-	uint direction = 0u;
-	if (length(rotational_velocity) == 0.0f) { // choose direction of minimum bounding-box cross-section area
-		float v[3] = { (y1 - y0) * (z1 - z0), (z1 - z0) * (x1 - x0), (x1 - x0) * (y1 - y0) };
-		float vmin = v[0];
-		for (uint i = 1u; i < 3u; i++) {
-			if (v[i] < vmin) {
-				vmin = v[i];
-				direction = i;
+		vector<float3> p0_subset, p1_subset, p2_subset;
+		float3* p0_host = mesh->p0;
+		float3* p1_host = mesh->p1;
+		float3* p2_host = mesh->p2;
+		if(triangle_ids!=nullptr) {
+			p0_subset.resize(triangle_number);
+			p1_subset.resize(triangle_number);
+			p2_subset.resize(triangle_number);
+			for(uint i=0u; i<triangle_number; i++) {
+				const uint triangle_id = (*triangle_ids)[i];
+				p0_subset[i] = mesh->p0[triangle_id];
+				p1_subset[i] = mesh->p1[triangle_id];
+				p2_subset[i] = mesh->p2[triangle_id];
 			}
+			p0_host = p0_subset.data();
+			p1_host = p1_subset.data();
+			p2_host = p2_subset.data();
 		}
-	}
-	else { // choose direction closest to rotation axis
-		float v[3] = { fabsf(rotational_velocity.x), fabsf(rotational_velocity.y), fabsf(rotational_velocity.z) };
-		float vmax = v[0];
-		for (uint i = 1u; i < 3u; i++) {
-			if (v[i] > vmax) {
-				vmax = v[i];
-				direction = i; // find direction of minimum bounding-box cross-section area
-			}
+
+		Memory<float3> p0(device, triangle_number, 1u, p0_host);
+		Memory<float3> p1(device, triangle_number, 1u, p1_host);
+		Memory<float3> p2(device, triangle_number, 1u, p2_host);
+		Memory<float> bounding_box_and_velocity(device, 16u);
+		{
+			float triangle_number_as_float;
+			std::memcpy(&triangle_number_as_float, &triangle_number, sizeof(uint));
+			bounding_box_and_velocity[0] = triangle_number_as_float;
 		}
-	}
-	const ulong A[3] = { (ulong)Ny * (ulong)Nz, (ulong)Nz * (ulong)Nx, (ulong)Nx * (ulong)Ny };
-
-	if (flag == TYPE_S) {
-		Kernel kernel_voxelize_mesh_x(device, A[0], "voxelize_mesh", 0u, fi, u, flags, t + 1ull, (uchar)TYPE_X, p0, p1, p2, bounding_box_and_velocity);
-#ifdef SURFACE
-		kernel_voxelize_mesh_x.add_parameters(mass, massex);
-#endif // SURFACE
-		Kernel kernel_voxelize_mesh_y(device, A[1], "voxelize_mesh", 1u, fi, u, flags, t + 1ull, (uchar)TYPE_Y, p0, p1, p2, bounding_box_and_velocity);
-#ifdef SURFACE
-		kernel_voxelize_mesh_y.add_parameters(mass, massex);
-#endif // SURFACE
-
-		p0.write_to_device();
-		p1.write_to_device();
-		p2.write_to_device();
+		bounding_box_and_velocity[1] = x0;
+		bounding_box_and_velocity[2] = y0;
+		bounding_box_and_velocity[3] = z0;
+		bounding_box_and_velocity[4] = x1;
+		bounding_box_and_velocity[5] = y1;
+		bounding_box_and_velocity[6] = z1;
+		bounding_box_and_velocity[7] = rotation_center.x;
+		bounding_box_and_velocity[8] = rotation_center.y;
+		bounding_box_and_velocity[9] = rotation_center.z;
+		bounding_box_and_velocity[10] = linear_velocity.x;
+		bounding_box_and_velocity[11] = linear_velocity.y;
+		bounding_box_and_velocity[12] = linear_velocity.z;
+		bounding_box_and_velocity[13] = rotational_velocity.x;
+		bounding_box_and_velocity[14] = rotational_velocity.y;
+		bounding_box_and_velocity[15] = rotational_velocity.z;
 		bounding_box_and_velocity.write_to_device();
 
-		kernel_voxelize_mesh_x.run();
-		kernel_voxelize_mesh_y.run();
+		Kernel kernel_voxelize_mesh(device, A[direction], "voxelize_mesh", direction, fi, u, flags, t+1ull, pass_flag, p0, p1, p2, bounding_box_and_velocity);
+#ifdef SURFACE
+		kernel_voxelize_mesh.add_parameters(mass, massex);
+#endif // SURFACE
+		kernel_voxelize_mesh.run();
+	};
 
-		Kernel kernel_finalize(device, get_N(), "finalize_voxelize_and", flags, x0, y0, z0, x1, y1, z1);
-		kernel_finalize.run();
+	if(flag==TYPE_S) {
+		const uint direction_0 = direction_override_0==max_uint ? 2u : direction_override_0;
+		run_voxelize_pass(direction_0, (uchar)TYPE_S, triangle_ids_0);
 		// echo counts after voxelization
 		flags.read_from_device();
 		ulong solid_cells = 0ull, fluid_cells = 0ull;
 		const ulong N_local = flags.length();
-		for (ulong n = 0ull; n < N_local; n++) {
+		for(ulong n=0ull; n<N_local; n++) {
 			const uchar f = flags[n];
-			if (f & TYPE_S) solid_cells++;
-			else            fluid_cells++;
+			if(f&TYPE_S) solid_cells++;
+			else         fluid_cells++;
 		}
-		print_info("Voxelized cells: solid = " + to_string(solid_cells) + ", fluid = " + to_string(fluid_cells) + ".");
-
-	}
-	else {
-		Kernel kernel_voxelize_mesh(device, A[direction], "voxelize_mesh", direction, fi, u, flags, t + 1ull, flag, p0, p1, p2, bounding_box_and_velocity);
-#ifdef SURFACE
-		kernel_voxelize_mesh.add_parameters(mass, massex);
-#endif // SURFACE
-		p0.write_to_device();
-		p1.write_to_device();
-		p2.write_to_device();
-		bounding_box_and_velocity.write_to_device();
-		kernel_voxelize_mesh.run();
-
+		print_info(
+			"Voxelized cells (single-GPU local domain, includes halos, device "+to_string(device.info.id)+
+			"): solid = "+to_string(solid_cells)+", fluid = "+to_string(fluid_cells)+", total = "+to_string(N_local)+"."
+		);
+	} else {
+		uint direction = direction_override_0;
+		if(direction==max_uint) {
+			if(length(rotational_velocity)==0.0f) { // choose direction of minimum bounding-box cross-section area
+				float v[3] = { (y1-y0)*(z1-z0), (z1-z0)*(x1-x0), (x1-x0)*(y1-y0) };
+				float vmin = v[0];
+				direction = 0u;
+				for(uint i=1u; i<3u; i++) {
+					if(v[i]<vmin) {
+						vmin = v[i];
+						direction = i;
+					}
+				}
+			} else { // choose direction closest to rotation axis
+				float v[3] = { fabsf(rotational_velocity.x), fabsf(rotational_velocity.y), fabsf(rotational_velocity.z) };
+				float vmax = v[0];
+				direction = 0u;
+				for(uint i=1u; i<3u; i++) {
+					if(v[i]>vmax) {
+						vmax = v[i];
+						direction = i;
+					}
+				}
+			}
+		}
+		run_voxelize_pass(direction, flag, triangle_ids_0);
 	}
 }
 void LBM_Domain::enqueue_unvoxelize_mesh_on_device(const Mesh* mesh, const uchar flag) { // remove voxelized triangle mesh from LBM grid
@@ -751,19 +812,49 @@ string LBM_Domain::Graphics::device_defines() const { return
 vector<Device_Info> smart_device_selection(const uint D) {
 	const vector<Device_Info>& devices = get_devices(false); // a vector of all available OpenCL devices
 	vector<Device_Info> device_infos(D);
+	if(devices.empty()) print_error("No OpenCL devices found.");
+	vector<Device_Info> candidate_devices;
+	candidate_devices.reserve(devices.size());
+	for(uint i=0u; i<(uint)devices.size(); i++) {
+		if(devices[i].is_gpu) candidate_devices.push_back(devices[i]);
+	}
+	if(candidate_devices.empty()) {
+		print_warning("No GPU OpenCL devices found. Falling back to all OpenCL devices for domain assignment.");
+		candidate_devices = devices;
+	}
+	const uint available_cards = (uint)candidate_devices.size();
+	if(D>available_cards) {
+		print_info(
+			"Requested domain partitions: "+to_string(D)+
+			", available physical cards: "+to_string(available_cards)+"."
+		);
+		for(uint i=0u; i<available_cards; i++) {
+			const Device_Info& di = candidate_devices[i];
+			print_info(
+				"Available card "+to_string(i)+": id="+to_string(di.id)+
+				", model=\""+di.name+"\", vendor=\""+di.vendor+
+				"\", memory="+to_string(di.memory)+" MB."
+			);
+		}
+		print_error(
+			"Domain partition count ("+to_string(D)+
+			") exceeds available physical cards ("+to_string(available_cards)+
+			"). Reduce Dx*Dy*Dz to <= "+to_string(available_cards)+"."
+		);
+	}
 	// Device ID selection via CLI is disabled; always auto-select devices.
 	vector<vector<Device_Info>> device_type_ids; // a vector of all different devices, containing vectors of their device IDs
-	for(uint i=0u; i<(uint)devices.size(); i++) {
-		const string name_i = devices[i].name;
+	for(uint i=0u; i<(uint)candidate_devices.size(); i++) {
+		const string name_i = candidate_devices[i].name;
 		bool already_exists = false;
 		for(uint j=0u; j<(uint)device_type_ids.size(); j++) {
 			const string name_j = device_type_ids[j][0].name;
 			if(name_i==name_j) {
-				device_type_ids[j].push_back(devices[i]);
+				device_type_ids[j].push_back(candidate_devices[i]);
 				already_exists = true;
 			}
 		}
-		if(!already_exists) device_type_ids.push_back(vector<Device_Info>(1, devices[i]));
+		if(!already_exists) device_type_ids.push_back(vector<Device_Info>(1, candidate_devices[i]));
 	}
 	float best_value = -1.0f;
 	int best_j = -1;
@@ -777,8 +868,31 @@ vector<Device_Info> smart_device_selection(const uint D) {
 	if(best_j>=0) { // select all devices of fastest device type with at least D devices of the same type
 		for(uint d=0; d<D; d++) device_infos[d] = device_type_ids[best_j][d];
 	} else {
-		print_warning("Not enough devices of the same type available. Using single fastest device for all domains.");
-		for(uint d=0; d<D; d++) device_infos[d] = select_device_with_most_flops(devices);
+		print_warning(
+			"Not enough identical devices for "+to_string(D)+
+			" domains. Using mixed models without oversubscription."
+		);
+		vector<char> used(candidate_devices.size(), false);
+		for(uint d=0u; d<D; d++) {
+			int best_i = -1;
+			for(uint i=0u; i<(uint)candidate_devices.size(); i++) {
+				if(used[i]) continue;
+				if(best_i<0) {
+					best_i = (int)i;
+					continue;
+				}
+				const Device_Info& a = candidate_devices[i];
+				const Device_Info& b = candidate_devices[(uint)best_i];
+				if(a.tflops>b.tflops ||
+				   (a.tflops==b.tflops && a.memory>b.memory) ||
+				   (a.tflops==b.tflops && a.memory==b.memory && a.id<b.id)) {
+					best_i = (int)i;
+				}
+			}
+			if(best_i<0) print_error("Internal device selection error.");
+			used[(uint)best_i] = true;
+			device_infos[d] = candidate_devices[(uint)best_i];
+		}
 	}
 	//for(uint j=0u; j<(uint)device_type_ids.size(); j++) print_info("Device Type "+to_string(j)+" ("+device_type_ids[j][0].name+"): "+to_string((uint)device_type_ids[j].size())+"x");
 	return device_infos;
@@ -1160,12 +1274,203 @@ void LBM::write_status(const string& path) { // write LBM status report to a .tx
 }
 
 void LBM::voxelize_mesh_on_device(const Mesh* mesh, const uchar flag, const float3& rotation_center, const float3& linear_velocity, const float3& rotational_velocity) { // voxelize triangle mesh
+	vector<TriangleAABB> triangle_bounds(mesh->triangle_number);
+	parallel_for(mesh->triangle_number, [&](uint i) {
+		triangle_bounds[i] = triangle_aabb(mesh->p0[i], mesh->p1[i], mesh->p2[i]);
+	});
+
+	uint direction_0 = 0u;
+	if(flag==TYPE_S) {
+		// Force single-pass voxelization along z for TYPE_S.
+		direction_0 = 2u;
+	} else if(length(rotational_velocity)==0.0f) { // choose direction of minimum bounding-box cross-section area
+		const float x0 = mesh->pmin.x-2.0f, y0 = mesh->pmin.y-2.0f, z0 = mesh->pmin.z-2.0f;
+		const float x1 = mesh->pmax.x+2.0f, y1 = mesh->pmax.y+2.0f, z1 = mesh->pmax.z+2.0f;
+		float v[3] = { (y1-y0)*(z1-z0), (z1-z0)*(x1-x0), (x1-x0)*(y1-y0) };
+		float vmin = v[0];
+		for(uint i=1u; i<3u; i++) {
+			if(v[i]<vmin) {
+				vmin = v[i];
+				direction_0 = i;
+			}
+		}
+	} else { // choose direction closest to rotation axis
+		float v[3] = { fabsf(rotational_velocity.x), fabsf(rotational_velocity.y), fabsf(rotational_velocity.z) };
+		float vmax = v[0];
+		for(uint i=1u; i<3u; i++) {
+			if(v[i]>vmax) {
+				vmax = v[i];
+				direction_0 = i;
+			}
+		}
+	}
+
+	const float overlap_pad = 1.0f;
+	const float overlap_eps = 1.0e-4f;
+	const uint domain_count = get_D();
+	const bool print_subset_summary = domain_count>1u && length(linear_velocity)==0.0f && length(rotational_velocity)==0.0f;
+	vector<uint> subset_triangles_pass0(domain_count, 0u);
+	vector<float> voxelize_add_mb_per_domain(domain_count, 0.0f);
+	vector<vector<uint>> triangle_ids_per_domain(domain_count);
+	const uint NxDx = Nx/Dx, NyDy = Ny/Dy, NzDz = Nz/Dz;
+	const uint Hx = Dx>1u, Hy = Dy>1u, Hz = Dz>1u;
+	const uint local_Nx = NxDx+2u*Hx, local_Ny = NyDy+2u*Hy, local_Nz = NzDz+2u*Hz;
+	auto collect_domain_triangle_ids = [&](const uint d) {
+		const uint domain_x = (d%(Dx*Dy))%Dx;
+		const uint domain_y = (d%(Dx*Dy))/Dx;
+		const uint domain_z = d/(Dx*Dy);
+		const int Ox = (int)(domain_x*NxDx)-(int)Hx;
+		const int Oy = (int)(domain_y*NyDy)-(int)Hy;
+		const int Oz = (int)(domain_z*NzDz)-(int)Hz;
+		const float x_min = (float)Ox;
+		const float y_min = (float)Oy;
+		const float z_min = (float)Oz;
+		const float x_max = (float)(Ox+(int)local_Nx-1);
+		const float y_max = (float)(Oy+(int)local_Ny-1);
+		const float z_max = (float)(Oz+(int)local_Nz-1);
+		const DomainProjectedBounds bounds_0 = make_projected_bounds(direction_0, x_min, x_max, y_min, y_max, z_min, z_max);
+
+		vector<uint> triangle_ids_0;
+		triangle_ids_0.reserve(mesh->triangle_number/domain_count+1u);
+		for(uint i=0u; i<mesh->triangle_number; i++) {
+			if(overlaps_projected(triangle_bounds[i], bounds_0, direction_0, overlap_pad, overlap_eps)) triangle_ids_0.push_back(i);
+		}
+		subset_triangles_pass0[d] = (uint)triangle_ids_0.size();
+		triangle_ids_per_domain[d].swap(triangle_ids_0);
+	};
+
 	if(get_D()==1u) {
-		lbm_domain[0]->voxelize_mesh_on_device(mesh, flag, rotation_center, linear_velocity, rotational_velocity); // if this crashes on Windows, create a TdrDelay 32-bit DWORD with decimal value 300 in Computer\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\GraphicsDrivers
+		collect_domain_triangle_ids(0u); // if this crashes on Windows, create a TdrDelay 32-bit DWORD with decimal value 300 in Computer\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\GraphicsDrivers
 	} else {
 		parallel_for((ulong)get_D(), get_D(), [&](ulong d) {
-			lbm_domain[d]->voxelize_mesh_on_device(mesh, flag, rotation_center, linear_velocity, rotational_velocity);
+			collect_domain_triangle_ids((uint)d);
 		});
+	}
+
+	// Preflight memory estimate for voxelization allocations on each device before any OpenCL buffer is created.
+	const float voxelize_add_mb_per_triangle = 36.0f/1048576.0f; // p0/p1/p2 buffers, each float3
+	const float voxelize_add_mb_fixed = 64.0f/1048576.0f; // bounding_box_and_velocity[16]
+	for(uint d=0u; d<domain_count; d++) {
+		const Device_Info& di = lbm_domain[d]->get_device().info;
+		const uint triangle_count = subset_triangles_pass0[d];
+		const float add_mb = voxelize_add_mb_fixed + voxelize_add_mb_per_triangle*(float)triangle_count;
+		voxelize_add_mb_per_domain[d] = add_mb;
+		const float predicted_total_mb = (float)di.memory_used + add_mb;
+		print_info(
+			"Voxelize preflight d="+to_string(d)+
+			" (gpu "+to_string(di.id)+"): triangles="+to_string(triangle_count)+
+			", intent alloc="+to_string(add_mb/1024.0f, 3u)+" GB"+
+			", predicted total="+to_string(predicted_total_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+" GB"
+		);
+		const float p0_mb = (float)triangle_count*12.0f/1048576.0f;
+		if(p0_mb>(float)di.max_global_buffer) {
+			print_warning(
+				"Voxelize preflight d="+to_string(d)+": single triangle buffer intends "+to_string(p0_mb/1024.0f, 3u)+
+				" GB, exceeds CL max alloc "+to_string((float)di.max_global_buffer/1024.0f, 3u)+" GB."
+			);
+		}
+		if(predicted_total_mb>(float)di.memory) {
+			print_warning(
+				"Voxelize preflight d="+to_string(d)+": predicted total allocation exceeds device memory ("+
+				to_string(predicted_total_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+" GB)."
+			);
+		} else if(predicted_total_mb>0.95f*(float)di.memory) {
+			print_warning(
+				"Voxelize preflight d="+to_string(d)+": predicted total allocation is above 95% memory ("+
+				to_string(predicted_total_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+" GB)."
+			);
+		}
+	}
+	vector<uint> gpu_ids;
+	vector<vector<uint>> domains_per_gpu;
+	for(uint d=0u; d<domain_count; d++) {
+		const uint gpu_id = lbm_domain[d]->get_device().info.id;
+		uint g = 0u;
+		for(; g<(uint)gpu_ids.size(); g++) {
+			if(gpu_ids[g]==gpu_id) break;
+		}
+		if(g==(uint)gpu_ids.size()) {
+			gpu_ids.push_back(gpu_id);
+			domains_per_gpu.push_back(vector<uint>());
+		}
+		domains_per_gpu[g].push_back(d);
+	}
+	for(uint g=0u; g<(uint)gpu_ids.size(); g++) {
+		const vector<uint>& domains = domains_per_gpu[g];
+		if(domains.empty()) continue;
+		const Device_Info& di = lbm_domain[domains[0]]->get_device().info;
+		float base_sum_mb = 0.0f;
+		float temp_sum_mb = 0.0f;
+		float temp_max_mb = 0.0f;
+		string domain_list = "";
+		for(uint i=0u; i<(uint)domains.size(); i++) {
+			const uint d = domains[i];
+			base_sum_mb += (float)lbm_domain[d]->get_device().info.memory_used;
+			temp_sum_mb += voxelize_add_mb_per_domain[d];
+			temp_max_mb = fmax(temp_max_mb, voxelize_add_mb_per_domain[d]);
+			domain_list += (i==0u ? "" : ",")+to_string(d);
+		}
+		const float predicted_seq_mb = base_sum_mb + temp_max_mb; // group is launched sequentially on same physical GPU
+		const float predicted_parallel_mb = base_sum_mb + temp_sum_mb;
+		print_info(
+			"Voxelize preflight GPU "+to_string(di.id)+": domains={"+domain_list+"}, intent total="+
+			to_string(predicted_seq_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+
+			" GB (base="+to_string(base_sum_mb/1024.0f, 3u)+" GB, temp seq="+to_string(temp_max_mb/1024.0f, 3u)+
+			" GB, temp parallel="+to_string(temp_sum_mb/1024.0f, 3u)+" GB)."
+		);
+		if(predicted_seq_mb>(float)di.memory) {
+			print_warning(
+				"Voxelize preflight GPU "+to_string(di.id)+": predicted sequential peak exceeds memory ("+
+				to_string(predicted_seq_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+" GB)."
+			);
+		} else if(predicted_seq_mb>0.90f*(float)di.memory) {
+			print_warning(
+				"Voxelize preflight GPU "+to_string(di.id)+": predicted sequential peak is above 90% ("+
+				to_string(predicted_seq_mb/1024.0f, 3u)+" / "+to_string((float)di.memory/1024.0f, 3u)+" GB)."
+			);
+		}
+	}
+
+	auto launch_voxelize_domain = [&](const uint d) {
+		lbm_domain[d]->voxelize_mesh_on_device(mesh, flag, rotation_center, linear_velocity, rotational_velocity, direction_0, max_uint, &triangle_ids_per_domain[d], nullptr);
+	};
+	if(domain_count==1u) {
+		launch_voxelize_domain(0u);
+	} else if(gpu_ids.size()<=1u) { // single physical GPU with multiple domains: launch sequentially to minimize transient peak
+		for(uint d=0u; d<domain_count; d++) launch_voxelize_domain(d);
+	} else {
+		parallel_for((ulong)gpu_ids.size(), gpu_ids.size(), [&](ulong g) {
+			const vector<uint>& domains = domains_per_gpu[(uint)g];
+			for(uint i=0u; i<(uint)domains.size(); i++) launch_voxelize_domain(domains[i]);
+		});
+	}
+
+	if(print_subset_summary) {
+		ulong pass0_sum = 0ull;
+		uint pass0_min = subset_triangles_pass0[0], pass0_max = subset_triangles_pass0[0];
+		for(uint d=0u; d<domain_count; d++) {
+			const uint n0 = subset_triangles_pass0[d];
+			pass0_sum += (ulong)n0;
+			pass0_min = min(pass0_min, n0);
+			pass0_max = max(pass0_max, n0);
+		}
+		const float mb_factor = 36.0f/1048576.0f; // 3 arrays * float3
+		print_info(
+			"Voxelize pass "+to_string(direction_0)+" triangle subsets: min="+to_string(pass0_min)+", max="+to_string(pass0_max)+", sum="+to_string(pass0_sum)+", d0="+to_string(subset_triangles_pass0[0])+
+			", est peak MB/GPU="+to_string((float)pass0_max*mb_factor, 2u)
+		);
+	}
+	if(flag==TYPE_S) {
+		ulong solid_global = 0ull, fluid_global = 0ull;
+		const ulong N_global = flags.length();
+		for(ulong n=0ull; n<N_global; n++) {
+			if(flags[n]&TYPE_S) solid_global++;
+			else                fluid_global++;
+		}
+		print_info(
+			"Voxelized cells (whole domain global, no halos): solid = "+to_string(solid_global)+
+			", fluid = "+to_string(fluid_global)+", total = "+to_string(N_global)+"."
+		);
 	}
 #ifdef MOVING_BOUNDARIES
 	if((flag&(TYPE_S|TYPE_E))==TYPE_S&&(length(linear_velocity)>0.0f||length(rotational_velocity)>0.0f)) update_moving_boundaries();

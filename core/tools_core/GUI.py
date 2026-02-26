@@ -33,6 +33,7 @@ SCHEMA_ORDER = [
     FieldSpec("high_order", "High order interpolation", "Numerical Control", "bool", quoted=False),
     FieldSpec("flux_correction", "Flux correction", "Numerical Control", "bool", quoted=False),
     FieldSpec("coriolis_term", "Coriolis source term", "Numerical Control", "bool", quoted=False),
+    FieldSpec("run_nstep", "Run steps override", "Numerical Control", "int", quoted=False),
     FieldSpec("research_output", "N Snapshots for research", "Numerical Control", "int", quoted=False),
 
     FieldSpec("si_x_cfd", "CFD domain: X", "Internal Information", "list", list_len=2, elem_type="float"),

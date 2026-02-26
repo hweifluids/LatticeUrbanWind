@@ -158,7 +158,7 @@ public:
 		this->omega_y = omega_y;
 		this->omega_z = omega_z;
 	}
-	void voxelize_mesh_on_device(const Mesh* mesh, const uchar flag=TYPE_S, const float3& rotation_center=float3(0.0f), const float3& linear_velocity=float3(0.0f), const float3& rotational_velocity=float3(0.0f)); // voxelize mesh
+	void voxelize_mesh_on_device(const Mesh* mesh, const uchar flag=TYPE_S, const float3& rotation_center=float3(0.0f), const float3& linear_velocity=float3(0.0f), const float3& rotational_velocity=float3(0.0f), const uint direction_override_0=max_uint, const uint direction_override_1=max_uint, const vector<uint>* triangle_ids_0=nullptr, const vector<uint>* triangle_ids_1=nullptr); // voxelize mesh
 	void enqueue_unvoxelize_mesh_on_device(const Mesh* mesh, const uchar flag=TYPE_S); // remove voxelized triangle mesh from LBM grid
 
 #ifdef GRAPHICS
