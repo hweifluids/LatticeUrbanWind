@@ -20,7 +20,7 @@ from trimesh import boolean
 import re
 from scipy.interpolate import griddata
 from auto_UTM import get_utm_crs_from_conf_raw
-from dem_tif_to_shp import ensure_dem_shp_from_tif
+from terrainreader import ensure_dem_shp_from_tif
 
 def _parse_base_height_from_conf_raw(conf_raw: str) -> float | None:
     """
