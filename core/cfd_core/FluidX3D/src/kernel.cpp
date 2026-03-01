@@ -2384,6 +2384,78 @@ string opencl_c_container() {
 	}
 }
 
+)+R(kernel void vk_inlet_apply(const uint use_interp,
+                              const float t0,
+                              const float t1,
+                              const float alpha,
+                              const ulong point_count,
+                              const ulong mode_count,
+                              const ulong mode_stride,
+                              const global ulong* point_cell,
+                              const global uchar* point_face,
+                              const global float* point_data,
+                              const global float* mode_data,
+                              global float* u) {
+	const ulong i = get_global_id(0);
+	if(i >= point_count) return;
+	const ulong n = point_cell[i];
+	const ulong N = point_count;
+	const ulong M = mode_count;
+	const ulong V = mode_stride;
+	const ulong fid = (ulong)(point_face[i] & (uchar)0x03u);
+	const ulong fbase = fid * M;
+
+	const float px = point_data[i];
+	const float py = point_data[N + i];
+	const float pz = point_data[2ul * N + i];
+	const float ubx = point_data[3ul * N + i];
+	const float uby = point_data[4ul * N + i];
+	const float ubz = point_data[5ul * N + i];
+	const float sigma = point_data[6ul * N + i];
+	if(!(sigma > 0.0f)) {
+		u[                 n] = ubx;
+		u[    def_N + n] = uby;
+		u[2ul * def_N + n] = ubz;
+		return;
+	}
+
+	float qx = 0.0f;
+	float qy = 0.0f;
+	float qz = 0.0f;
+	for(ulong m = 0ull; m < M; ++m) {
+		const ulong idx = fbase + m;
+		const float kx = mode_data[idx];
+		const float ky = mode_data[V + idx];
+		const float kz = mode_data[2ul * V + idx];
+		const float omega = mode_data[3ul * V + idx];
+		const float Ax = mode_data[4ul * V + idx];
+		const float Ay = mode_data[5ul * V + idx];
+		const float Az = mode_data[6ul * V + idx];
+		const float phix = mode_data[7ul * V + idx];
+		const float phiy = mode_data[8ul * V + idx];
+		const float phiz = mode_data[9ul * V + idx];
+		const float phase0 = fma(kx, px, fma(ky, py, fma(kz, pz, omega * t0)));
+		float vx = Ax * cos(phase0 + phix);
+		float vy = Ay * cos(phase0 + phiy);
+		float vz = Az * cos(phase0 + phiz);
+		if(use_interp != 0u) {
+			const float phase1 = fma(kx, px, fma(ky, py, fma(kz, pz, omega * t1)));
+			const float vx1 = Ax * cos(phase1 + phix);
+			const float vy1 = Ay * cos(phase1 + phiy);
+			const float vz1 = Az * cos(phase1 + phiz);
+			vx = fma(alpha, vx1 - vx, vx);
+			vy = fma(alpha, vy1 - vy, vy);
+			vz = fma(alpha, vz1 - vz, vz);
+		}
+		qx += vx;
+		qy += vy;
+		qz += vz;
+	}
+	u[                 n] = fma(sigma, qx, ubx);
+	u[    def_N + n] = fma(sigma, qy, uby);
+	u[2ul * def_N + n] = fma(sigma, qz, ubz);
+}
+
 
 ) + R(// ################################################## graphics code ##################################################
 

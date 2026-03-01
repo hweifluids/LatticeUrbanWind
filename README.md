@@ -2,7 +2,7 @@
 
 **Meter-level, hundred-KM-scale, Minute-computation, Billion-grid Winds - Supporting next-gen real-time low-altitude applications**
 
-LatticeUrbanWind (LUW) is a validated workflow toolkit for fast urban wind simulation that couples mesoscale wind fields (e.g., WRF NetCDF, or data from national center) with the FluidX3D lattice Boltzmann solver, i.e., it is a NWP-LBM-LES platform. It provides data inspection, boundary-condition building, geometry preparation, voxelization, and validation utilities so you can go from regional wind data and city geometry to a ready-to-run CFD case.
+LatticeUrbanWind (LUW) is a validated workflow toolkit for fast urban wind simulation that couples mesoscale wind fields (e.g., WRF NetCDF, or data from national centers) with the FluidX3D lattice Boltzmann solver, i.e., it is a NWP-LBM-LES platform. It provides data inspection, boundary-condition building, geometry preparation, voxelization, and validation utilities so you can go from regional wind data and city geometry to a ready-to-run CFD.
 On the other hand, it also supports the fast generation of wind field dataset (also considering terrain and buildings) as well as profile-based inflow simulations for research purposes, i.e., pre-defined batch run.
 
 The application potentials include but not limited to: urban air mobility (UAM), buidling ventilation, pedestrian wind environment, machine learning prediction of wind fields, real-time low-altitude support of events, observation data assimilation.
@@ -261,15 +261,19 @@ Each run mode has a corresponding example under `examples/`. These examples are 
 - **Dataset generation** example (`*.luwdg`)
 - **Profile research** example (`*.luwpf`)
 
-## Troubleshooting
+## Maintainers
 
-- **`LUW_HOME is not set`**: ensure the environment variable is exported and `$LUW_HOME/bin` is on PATH.
-- **OpenCL not found**: install the correct GPU driver package and verify with `clinfo` (Linux) or the Windows env check.
-- **Python deps fail**: activate `.venv` and reinstall `installer/requirements.txt`.
+- Huanxia Wei (Tongji University/The University of Manchester)
+- Prof. Qing Jia (Tongji University)
+- Dr. Shuai Han (NMIC China Meteorological Administration)
 
-## Acknowledgements
+## Contributors
 
-This project is developed with cooperation and support from the National Meteorological Center of China Meteorological Administration.
+- Yue Cao (Tongji University/UC Berkeley)
+- Shixiong Zhou (HKUSTGZ)
+- Zheng Jian (Shensi Lab)
+- Wenguang Liang (NMIC China Meteorological Administration)
+
 
 ## Contact
 
@@ -277,6 +281,10 @@ If you have questions, suggestions, or want to collaborate or contribute (then a
 
 - Email: huanxia.wei@u.nus.edu
 - WeChat: TJerCZ
+
+## Acknowledgements
+
+This project is developed with funding and support from the National Meteorological Center of China Meteorological Administration.
 
 ## License
 

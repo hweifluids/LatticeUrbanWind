@@ -32,10 +32,22 @@ n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
 gpu_memory = 20000
 cell_size = 
+unsteady_output = 0
 validation = pass
 high_order = true
 flux_correction = true
 coriolis_term = true
+vk_inlet_enable = false
+vk_inlet_ti = 0.10
+vk_inlet_sigma = 0.0
+vk_inlet_L = 0.0
+vk_inlet_nmodes = 128
+vk_inlet_seed = 1469598103934665603
+vk_inlet_update_stride = 1
+vk_inlet_uc_mode = NORMAL_COMPONENT
+vk_inlet_same_realization_all_faces = false
+vk_inlet_stride_interpolation = false
+vk_inlet_inflow_only = true
 
 
 

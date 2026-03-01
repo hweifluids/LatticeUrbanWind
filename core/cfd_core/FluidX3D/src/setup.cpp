@@ -12,8 +12,13 @@
 #include <algorithm>
 #include <mutex>
 #include <cctype>
+#include <array>
+#include <functional>
 #include <iostream>
 #include <filesystem>
+#include <memory>
+#include <random>
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -43,6 +48,7 @@ std::string conf_used_path = "Integrated defaults (*.luw not found)";
 bool use_high_order = false;
 bool flux_correction = false;
 uint research_output_steps = 0u; 
+uint unsteady_output_interval = 0u;
 uint purge_avg_steps = 0u;
 ulong run_nstep_override = 0ull;
 std::string validation_status = "fail"; 
@@ -57,6 +63,720 @@ constexpr int k_patch_south = 2;
 constexpr int k_patch_north = 3;
 constexpr int k_patch_west = 4;
 constexpr int k_patch_east = 5;
+constexpr int k_vk_nmodes_default = 128;
+constexpr int k_vk_nmodes_max = 512;
+
+enum class VkInletUcMode {
+    NORM_MEAN = 0,
+    NORMAL_COMPONENT = 1
+};
+
+struct VkInletSettings {
+    bool enable = false;
+    // turbulence intensity (fraction); sigma_local uses uc_mode:
+    // NORM_MEAN -> ti*|U_base|, NORMAL_COMPONENT -> ti*|U_base·n_face|
+    float ti = 0.0f;
+    float sigma_si = 0.0f;
+    float L_si = 0.0f;
+    int nmodes = k_vk_nmodes_default;
+    ulong seed = 1469598103934665603ull;
+    int update_stride = 1;
+    VkInletUcMode uc_mode = VkInletUcMode::NORMAL_COMPONENT;
+    bool same_realization_all_faces = false;
+    bool stride_interpolation = false; // optional double-buffer interpolation for stride > 1
+    bool inflow_only = true; // true: only U·n>0 cells, false: all non-downstream side boundary cells
+};
+VkInletSettings vk_inlet_settings;
+
+struct VkInletRuntimeConfig {
+    bool enable = false;
+    float ti = 0.0f;
+    float sigma_lbm = 0.0f;
+    float L_lbm = 0.0f;
+    int nmodes = k_vk_nmodes_default;
+    ulong seed = 1469598103934665603ull;
+    int update_stride = 1;
+    VkInletUcMode uc_mode = VkInletUcMode::NORMAL_COMPONENT;
+    bool same_realization_all_faces = false;
+    bool stride_interpolation = false;
+    bool inflow_only = true;
+    int downstream_face_id = -1; // {0:west,1:east,2:south,3:north}, -1 means unknown/none
+};
+
+static const char* vk_uc_mode_name(const VkInletUcMode mode) {
+    return (mode == VkInletUcMode::NORM_MEAN) ? "NORM_MEAN" : "NORMAL_COMPONENT";
+}
+
+class VonKarmanInletUpdater {
+public:
+    explicit VonKarmanInletUpdater(const VkInletRuntimeConfig& cfg) : cfg_(cfg) {}
+
+    bool initialize(LBM& lbm) {
+        active_ = false;
+        domains_.clear();
+        last_applied_t_ = max_ulong;
+        for (auto& modes : face_modes_) modes.clear();
+        if (!cfg_.enable) return false;
+        if (!(cfg_.L_lbm > 0.0f) || cfg_.nmodes <= 0) return false;
+
+        const uint Nx = lbm.get_Nx();
+        const uint Ny = lbm.get_Ny();
+        const uint Nz = lbm.get_Nz();
+        if (Nx < 2u || Ny < 2u || Nz < 3u) {
+            println("| VK inlet        | disabled: grid too small for side-only turbulent inlet     |");
+            return false;
+        }
+
+        setup_face_geometry_();
+        if (cfg_.downstream_face_id >= 0 && cfg_.downstream_face_id <= 3) {
+            println("| VK inlet        | downstream face excluded: " + string(face_name_(cfg_.downstream_face_id)) + "                 |");
+        }
+        collect_face_points_(lbm);
+
+        uint face_enabled_count = 0u;
+        float3 mean_u_all = float3(0.0f);
+        double sum_u_mag = 0.0;
+        ulong count_u = 0ull;
+        for (size_t i = 0u; i < faces_.size(); ++i) {
+            VkFaceData& face = faces_[i];
+            if (!face.enabled || face.points.empty()) continue;
+            face_enabled_count++;
+            for (const VkPoint& p : face.points) {
+                mean_u_all += p.base_u;
+                sum_u_mag += (double)length(p.base_u);
+                count_u++;
+            }
+            println("| VK inlet face   | " + string(face_name_(face.id)) +
+                    ": points=" + to_string((ulong)face.points.size()) +
+                    ", Uc=" + to_string(face.uc, 6u) + "                                  |");
+        }
+
+        if (face_enabled_count == 0u) {
+            println("| VK inlet        | enabled in config, but no valid side inflow faces found    |");
+            return false;
+        }
+
+        if (count_u == 0ull) return false;
+        const float u_ref = (float)(sum_u_mag / (double)count_u);
+        const float3 mean_u = mean_u_all / (float)count_u;
+        float3 conv_dir = mean_u;
+        const float conv_len = length(conv_dir);
+        if (conv_len > 1.0e-7f) conv_dir /= conv_len;
+        else conv_dir = float3(1.0f, 0.0f, 0.0f);
+
+        if (cfg_.same_realization_all_faces) {
+            println("| VK inlet        | same realization on all active side faces                   |");
+        } else {
+            println("| VK inlet        | independent realization per active side face                |");
+        }
+        println("| VK inlet filter | " + string(cfg_.inflow_only
+            ? "inflow-only by face-normal velocity"
+            : "all non-downstream side boundary cells") + "            |");
+        if (!build_face_modes_(u_ref, conv_dir, cfg_.seed)) {
+            println("| VK inlet        | failed to build VK spectrum modes                           |");
+            return false;
+        }
+
+        if (!build_gpu_runtime_(lbm)) {
+            println("| VK inlet        | no valid GPU runtime mapping for side inflow faces         |");
+            return false;
+        }
+
+        active_ = true;
+        println("| VK inlet        | active: L_lbm=" + to_string(cfg_.L_lbm, 6u) +
+                ", TI=" + to_string(cfg_.ti, 4u) +
+                ", sigma_lbm(fallback)=" + to_string(cfg_.sigma_lbm, 6u) +
+                ", stride=" + to_string((ulong)cfg_.update_stride) +
+                ", uc_mode=" + string(vk_uc_mode_name(cfg_.uc_mode)) +
+                ", inflow_only=" + string(cfg_.inflow_only ? "true" : "false") +
+                ", interp=" + string(cfg_.stride_interpolation ? "true" : "false") + " |");
+        println("| VK inlet modes  | per-face modes=" + to_string((ulong)cfg_.nmodes) + "                                  |");
+        return true;
+    }
+
+    bool active() const { return active_; }
+
+    bool update(LBM& lbm, const ulong t) {
+        (void)lbm;
+        if (!active_) return false;
+        if (last_applied_t_ == t) return false;
+        last_applied_t_ = t;
+
+        uint use_interp = 0u;
+        float t0 = 0.0f;
+        float t1 = 0.0f;
+        float alpha = 0.0f;
+        compute_time_params_(t, use_interp, t0, t1, alpha);
+
+        bool updated = false;
+        for (const auto& rt_ptr : domains_) {
+            if (!rt_ptr || !rt_ptr->active) continue;
+            DomainRuntime& rt = *rt_ptr;
+            rt.kernel_apply.set_parameters(0u, use_interp, t0, t1, alpha).enqueue_run();
+            updated = true;
+        }
+        return updated;
+    }
+
+private:
+    enum VkFaceId : int {
+        WEST = 0,
+        EAST = 1,
+        SOUTH = 2,
+        NORTH = 3
+    };
+
+    struct VkMode {
+        float kx = 0.0f;
+        float ky = 0.0f;
+        float kz = 0.0f;
+        float omega = 0.0f;
+        float Ax = 0.0f;
+        float Ay = 0.0f;
+        float Az = 0.0f;
+        float phix = 0.0f;
+        float phiy = 0.0f;
+        float phiz = 0.0f;
+    };
+
+    struct VkPoint {
+        ulong n = 0ull;
+        uint x = 0u;
+        uint y = 0u;
+        uint z = 0u;
+        float3 base_u = float3(0.0f);
+    };
+
+    struct VkFaceData {
+        int id = WEST;
+        float3 n = float3(0.0f);
+        float3 t1 = float3(0.0f);
+        float3 t2 = float3(0.0f);
+        float uc = 0.0f;
+        bool enabled = false;
+        std::vector<VkPoint> points;
+    };
+
+    struct DomainPoint {
+        ulong local_n = 0ull;
+        uchar face_id = 0u;
+        float px = 0.0f;
+        float py = 0.0f;
+        float pz = 0.0f;
+        float3 base_u = float3(0.0f);
+        float sigma = 0.0f;
+    };
+
+    struct DomainRuntime {
+        bool active = false;
+        ulong point_count = 0ull;
+        ulong mode_count = 0ull;
+        ulong mode_stride = 0ull;
+        Memory<ulong> point_cell;
+        Memory<uchar> point_face;
+        Memory<float> point_data; // SoA: px, py, pz, base_u.x, base_u.y, base_u.z, sigma
+        Memory<float> mode_data;  // SoA over 4 faces: kx, ky, kz, omega, Ax, Ay, Az, phix, phiy, phiz
+        Kernel kernel_apply;
+    };
+
+    static const char* face_name_(const int id) {
+        if (id == WEST) return "west";
+        if (id == EAST) return "east";
+        if (id == SOUTH) return "south";
+        if (id == NORTH) return "north";
+        return "unknown";
+    }
+
+    void setup_face_geometry_() {
+        faces_[0].id = WEST;
+        faces_[0].n = float3(+1.0f, 0.0f, 0.0f);
+        faces_[0].t1 = float3(0.0f, +1.0f, 0.0f);
+        faces_[0].t2 = float3(0.0f, 0.0f, +1.0f);
+
+        faces_[1].id = EAST;
+        faces_[1].n = float3(-1.0f, 0.0f, 0.0f);
+        faces_[1].t1 = float3(0.0f, +1.0f, 0.0f);
+        faces_[1].t2 = float3(0.0f, 0.0f, +1.0f);
+
+        faces_[2].id = SOUTH;
+        faces_[2].n = float3(0.0f, +1.0f, 0.0f);
+        faces_[2].t1 = float3(+1.0f, 0.0f, 0.0f);
+        faces_[2].t2 = float3(0.0f, 0.0f, +1.0f);
+
+        faces_[3].id = NORTH;
+        faces_[3].n = float3(0.0f, -1.0f, 0.0f);
+        faces_[3].t1 = float3(+1.0f, 0.0f, 0.0f);
+        faces_[3].t2 = float3(0.0f, 0.0f, +1.0f);
+    }
+
+    bool cell_is_valid_side_inlet_(LBM& lbm, const ulong n, const VkFaceData& face, const uint x, const uint y, const uint z) {
+        (void)x;
+        (void)y;
+        if (z == 0u || z + 1u >= lbm.get_Nz()) return false; // exclude bottom and top
+        if ((lbm.flags[n] & TYPE_S) != 0u) return false;
+        if ((lbm.flags[n] & TYPE_E) == 0u) return false;
+
+        if (!cfg_.inflow_only) return true;
+        const float3 base_u = float3(lbm.u.x[n], lbm.u.y[n], lbm.u.z[n]);
+        const float vn = dot(base_u, face.n);
+        return vn > 1.0e-7f; // inflow-only side cells
+    }
+
+    void add_point_(VkFaceData& face, const ulong n, const uint x, const uint y, const uint z, LBM& lbm) {
+        VkPoint p;
+        p.n = n;
+        p.x = x;
+        p.y = y;
+        p.z = z;
+        p.base_u = float3(lbm.u.x[n], lbm.u.y[n], lbm.u.z[n]);
+        face.points.push_back(p);
+    }
+
+    void collect_face_points_(LBM& lbm) {
+        for (auto& face : faces_) {
+            face.points.clear();
+            face.uc = 0.0f;
+            face.enabled = false;
+        }
+
+        const uint Nx = lbm.get_Nx();
+        const uint Ny = lbm.get_Ny();
+        const uint Nz = lbm.get_Nz();
+        if (Nx < 2u || Ny < 2u || Nz < 3u) return;
+
+        const bool use_west  = (cfg_.downstream_face_id != WEST);
+        const bool use_east  = (cfg_.downstream_face_id != EAST);
+        const bool use_south = (cfg_.downstream_face_id != SOUTH);
+        const bool use_north = (cfg_.downstream_face_id != NORTH);
+
+        // West and east include corners; south and north skip x corners to keep a deterministic exclusive ownership.
+        for (uint z = 1u; z + 1u < Nz; ++z) {
+            for (uint y = 0u; y < Ny; ++y) {
+                if (use_west) {
+                    const ulong n_w = lbm.index(0u, y, z);
+                    if (cell_is_valid_side_inlet_(lbm, n_w, faces_[WEST], 0u, y, z)) {
+                        add_point_(faces_[WEST], n_w, 0u, y, z, lbm);
+                    }
+                }
+                if (use_east) {
+                    const ulong n_e = lbm.index(Nx - 1u, y, z);
+                    if (cell_is_valid_side_inlet_(lbm, n_e, faces_[EAST], Nx - 1u, y, z)) {
+                        add_point_(faces_[EAST], n_e, Nx - 1u, y, z, lbm);
+                    }
+                }
+            }
+            if (Nx > 2u) {
+                for (uint x = 1u; x + 1u < Nx; ++x) {
+                    if (use_south) {
+                        const ulong n_s = lbm.index(x, 0u, z);
+                        if (cell_is_valid_side_inlet_(lbm, n_s, faces_[SOUTH], x, 0u, z)) {
+                            add_point_(faces_[SOUTH], n_s, x, 0u, z, lbm);
+                        }
+                    }
+                    if (use_north) {
+                        const ulong n_n = lbm.index(x, Ny - 1u, z);
+                        if (cell_is_valid_side_inlet_(lbm, n_n, faces_[NORTH], x, Ny - 1u, z)) {
+                            add_point_(faces_[NORTH], n_n, x, Ny - 1u, z, lbm);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (auto& face : faces_) {
+            if (face.points.empty()) continue;
+            float3 mean_u = float3(0.0f);
+            for (const VkPoint& p : face.points) mean_u += p.base_u;
+            mean_u /= (float)face.points.size();
+            face.uc = (cfg_.uc_mode == VkInletUcMode::NORM_MEAN)
+                ? length(mean_u)
+                : fabsf(dot(mean_u, face.n));
+
+            if (!(face.uc > 1.0e-7f)) {
+                println("| VK inlet face   | " + string(face_name_(face.id)) + ": disabled (Uc is too small)               |");
+                continue;
+            }
+            face.enabled = true;
+        }
+    }
+
+    static ulong mix_seed_(const ulong seed, const uint face_id) {
+        ulong x = seed ^ (0x9E3779B97F4A7C15ull * (ulong)(face_id + 1u));
+        x ^= (x >> 33u);
+        x *= 0xff51afd7ed558ccdull;
+        x ^= (x >> 33u);
+        x *= 0xc4ceb9fe1a85ec53ull;
+        x ^= (x >> 33u);
+        return x;
+    }
+
+    bool build_modes_for_seed_(const float u_ref, const float3& conv_dir, const ulong seed, std::vector<VkMode>& out_modes) {
+        out_modes.clear();
+        const float L = cfg_.L_lbm;
+        if (!(L > 0.0f) || cfg_.nmodes <= 0) return false;
+
+        const float delta_min = 1.0f; // lattice spacing on side planes
+        const float k_max = pif / delta_min;
+        float k_min = 2.0f * pif / (10.0f * L);
+        if (!(k_min > 0.0f) || !std::isfinite(k_min)) k_min = 1.0e-4f;
+        if (k_min >= 0.99f * k_max) {
+            k_min = 0.1f * k_max;
+            println("| VK inlet        | warning: adjusted k_min to keep k-band valid               |");
+        }
+        const float log_k_min = logf(k_min);
+        const float log_k_max = logf(k_max);
+        const float log_k_span = fmaxf(log_k_max - log_k_min, 1.0e-6f);
+
+        std::mt19937_64 rng((unsigned long long)seed);
+        std::uniform_real_distribution<float> uni01(0.0f, 1.0f);
+
+        std::vector<float> a_raw((size_t)cfg_.nmodes, 0.0f);
+        out_modes.resize((size_t)cfg_.nmodes);
+        double sum_a2 = 0.0;
+
+        for (int m = 0; m < cfg_.nmodes; ++m) {
+            const float xi = ((float)m + uni01(rng)) / (float)cfg_.nmodes;
+            const float k = expf(log_k_min + xi * log_k_span);
+
+            // Isotropic direction in local (t1, t2, n) coordinates.
+            const float zeta = 2.0f * uni01(rng) - 1.0f;
+            const float az = 2.0f * pif * uni01(rng);
+            const float r = sqrtf(fmaxf(0.0f, 1.0f - zeta * zeta));
+            const float dir_x = r * cosf(az);
+            const float dir_y = r * sinf(az);
+            const float dir_z = zeta;
+            const float kx = k * dir_x;
+            const float ky = k * dir_y;
+            const float kz = k * dir_z;
+
+            const float kL = k * L;
+            const float denom = powf(1.0f + kL * kL, 17.0f / 6.0f);
+            const float W = (denom > 0.0f) ? (powf(k, 4.0f) / denom) : 0.0f;
+            const float a = sqrtf(fmaxf(W, 0.0f));
+            a_raw[(size_t)m] = a;
+            sum_a2 += (double)a * (double)a;
+
+            VkMode mode;
+            mode.kx = kx;
+            mode.ky = ky;
+            mode.kz = kz;
+            mode.omega = u_ref * (kx * conv_dir.x + ky * conv_dir.y + kz * conv_dir.z);
+            mode.phix = 2.0f * pif * uni01(rng);
+            mode.phiy = 2.0f * pif * uni01(rng);
+            mode.phiz = 2.0f * pif * uni01(rng);
+            out_modes[(size_t)m] = mode;
+        }
+
+        const double variance_raw = 0.5 * sum_a2;
+        if (!(variance_raw > 0.0)) {
+            out_modes.clear();
+            return false;
+        }
+        const float scale = 1.0f / (float)sqrt(variance_raw); // unit-RMS basis, point-wise sigma applies later
+        for (size_t m = 0u; m < out_modes.size(); ++m) {
+            const float A = a_raw[m] * scale;
+            out_modes[m].Ax = A;
+            out_modes[m].Ay = A;
+            out_modes[m].Az = A;
+        }
+        return true;
+    }
+
+    bool build_face_modes_(const float u_ref, const float3& conv_dir, const ulong seed) {
+        for (auto& modes : face_modes_) modes.clear();
+
+        bool any_active = false;
+        for (const auto& face : faces_) {
+            if (face.enabled && !face.points.empty()) {
+                any_active = true;
+                break;
+            }
+        }
+        if (!any_active) return false;
+
+        if (cfg_.same_realization_all_faces) {
+            std::vector<VkMode> shared;
+            if (!build_modes_for_seed_(u_ref, conv_dir, seed, shared)) return false;
+            for (int fid = 0; fid <= 3; ++fid) {
+                if (faces_[(size_t)fid].enabled && !faces_[(size_t)fid].points.empty()) {
+                    face_modes_[(size_t)fid] = shared;
+                }
+            }
+            return true;
+        }
+
+        bool built_any = false;
+        for (int fid = 0; fid <= 3; ++fid) {
+            if (!faces_[(size_t)fid].enabled || faces_[(size_t)fid].points.empty()) continue;
+            if (!build_modes_for_seed_(u_ref, conv_dir, mix_seed_(seed, (uint)fid), face_modes_[(size_t)fid])) {
+                return false;
+            }
+            built_any = true;
+        }
+        return built_any;
+    }
+
+    bool build_gpu_runtime_(LBM& lbm) {
+        const ulong mode_count = (ulong)cfg_.nmodes;
+        if (mode_count == 0ull) return false;
+        for (int fid = 0; fid <= 3; ++fid) {
+            if (!faces_[(size_t)fid].enabled || faces_[(size_t)fid].points.empty()) continue;
+            if (face_modes_[(size_t)fid].size() != (size_t)mode_count) return false;
+        }
+
+        const ulong mode_stride = 4ull * mode_count; // fixed 4 side faces
+        std::vector<float> mode_data((size_t)(10ull * mode_stride), 0.0f);
+        auto set_mode = [&](const ulong face_id, const ulong m, const VkMode& mode) {
+            const ulong idx = face_id * mode_count + m;
+            mode_data[(size_t)idx] = mode.kx;
+            mode_data[(size_t)(mode_stride + idx)] = mode.ky;
+            mode_data[(size_t)(2ull * mode_stride + idx)] = mode.kz;
+            mode_data[(size_t)(3ull * mode_stride + idx)] = mode.omega;
+            mode_data[(size_t)(4ull * mode_stride + idx)] = mode.Ax;
+            mode_data[(size_t)(5ull * mode_stride + idx)] = mode.Ay;
+            mode_data[(size_t)(6ull * mode_stride + idx)] = mode.Az;
+            mode_data[(size_t)(7ull * mode_stride + idx)] = mode.phix;
+            mode_data[(size_t)(8ull * mode_stride + idx)] = mode.phiy;
+            mode_data[(size_t)(9ull * mode_stride + idx)] = mode.phiz;
+        };
+        for (int fid = 0; fid <= 3; ++fid) {
+            const auto& modes = face_modes_[(size_t)fid];
+            for (ulong m = 0ull; m < (ulong)modes.size(); ++m) {
+                set_mode((ulong)fid, m, modes[(size_t)m]);
+            }
+        }
+
+        const uint D = lbm.get_D();
+        const uint Dx = lbm.get_Dx();
+        const uint Dy = lbm.get_Dy();
+        const uint Dz = lbm.get_Dz();
+        const uint nx_inner = lbm.get_Nx() / Dx;
+        const uint ny_inner = lbm.get_Ny() / Dy;
+        const uint nz_inner = lbm.get_Nz() / Dz;
+        const uint Hx = Dx > 1u ? 1u : 0u;
+        const uint Hy = Dy > 1u ? 1u : 0u;
+        const uint Hz = Dz > 1u ? 1u : 0u;
+
+        std::vector<std::vector<DomainPoint>> domain_points(D);
+        double sigma_sum_global = 0.0;
+        ulong sigma_count_global = 0ull;
+        float sigma_min_global = FLT_MAX;
+        float sigma_max_global = 0.0f;
+        std::array<double, 4u> sigma_sum_face = { 0.0, 0.0, 0.0, 0.0 };
+        std::array<ulong, 4u> sigma_count_face = { 0ull, 0ull, 0ull, 0ull };
+        std::array<float, 4u> sigma_min_face = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
+        std::array<float, 4u> sigma_max_face = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ulong map_mismatch_count = 0ull;
+        ulong face_mismatch_count = 0ull;
+        ulong local_flag_mismatch_count = 0ull;
+        for (const VkFaceData& face : faces_) {
+            if (!face.enabled || face.points.empty()) continue;
+            for (const VkPoint& p : face.points) {
+                const uint x = p.x;
+                const uint y = p.y;
+                const uint z = p.z;
+                const uint dx = x / nx_inner;
+                const uint dy = y / ny_inner;
+                const uint dz = z / nz_inner;
+                const uint domain = dx + (dy + dz * Dy) * Dx;
+                if (domain >= D) continue;
+
+                const ulong lNx = lbm.lbm_domain[domain]->get_Nx();
+                const ulong lNy = lbm.lbm_domain[domain]->get_Ny();
+                const uint px = x % nx_inner;
+                const uint py = y % ny_inner;
+                const uint pz = z % nz_inner;
+                const ulong lx = (ulong)px + (ulong)Hx;
+                const ulong ly = (ulong)py + (ulong)Hy;
+                const ulong lz = (ulong)pz + (ulong)Hz;
+
+                const float u_char = (cfg_.uc_mode == VkInletUcMode::NORM_MEAN)
+                    ? length(p.base_u)
+                    : fabsf(dot(p.base_u, face.n));
+                const float sigma_local = cfg_.ti > 0.0f ? (cfg_.ti * u_char) : cfg_.sigma_lbm;
+                if (!(sigma_local > 0.0f)) continue;
+
+                DomainPoint dp;
+                dp.local_n = lx + (ly + lz * lNy) * lNx;
+                dp.face_id = (uchar)face.id;
+                dp.px = (float)x;
+                dp.py = (float)y;
+                dp.pz = (float)z;
+                dp.base_u = p.base_u;
+                dp.sigma = sigma_local;
+
+                // Debug safety check: ensure global->local mapping is exact.
+                const uint dom_x = domain % Dx;
+                const uint dom_y = (domain / Dx) % Dy;
+                const uint dom_z = domain / (Dx * Dy);
+                const uint rx = (uint)(lx - (ulong)Hx) + dom_x * nx_inner;
+                const uint ry = (uint)(ly - (ulong)Hy) + dom_y * ny_inner;
+                const uint rz = (uint)(lz - (ulong)Hz) + dom_z * nz_inner;
+                if (rx != x || ry != y || rz != z) {
+                    map_mismatch_count++;
+                    if (map_mismatch_count <= 3ull) {
+                        println("| VK inlet warn   | map mismatch: g=(" + to_string((ulong)x) + "," + to_string((ulong)y) + "," + to_string((ulong)z) +
+                                "), r=(" + to_string((ulong)rx) + "," + to_string((ulong)ry) + "," + to_string((ulong)rz) + ")         |");
+                    }
+                }
+                const bool on_face =
+                    (face.id == WEST  && rx == 0u) ||
+                    (face.id == EAST  && rx + 1u == lbm.get_Nx()) ||
+                    (face.id == SOUTH && ry == 0u) ||
+                    (face.id == NORTH && ry + 1u == lbm.get_Ny());
+                if (!on_face) {
+                    face_mismatch_count++;
+                    if (face_mismatch_count <= 3ull) {
+                        println("| VK inlet warn   | face mismatch: face=" + string(face_name_(face.id)) +
+                                ", g=(" + to_string((ulong)x) + "," + to_string((ulong)y) + "," + to_string((ulong)z) + ")             |");
+                    }
+                }
+                const uchar lf = lbm.lbm_domain[domain]->flags[dp.local_n];
+                if (((lf & TYPE_E) == 0u) || ((lf & TYPE_S) != 0u)) {
+                    local_flag_mismatch_count++;
+                    if (local_flag_mismatch_count <= 3ull) {
+                        println("| VK inlet warn   | local flag mismatch: flag=" + to_string((ulong)lf) +
+                                ", face=" + string(face_name_(face.id)) + "                          |");
+                    }
+                }
+                domain_points[domain].push_back(dp);
+
+                sigma_sum_global += (double)sigma_local;
+                sigma_count_global++;
+                sigma_min_global = fminf(sigma_min_global, sigma_local);
+                sigma_max_global = fmaxf(sigma_max_global, sigma_local);
+                if (face.id >= 0 && face.id <= 3) {
+                    const size_t fid = (size_t)face.id;
+                    sigma_sum_face[fid] += (double)sigma_local;
+                    sigma_count_face[fid]++;
+                    sigma_min_face[fid] = fminf(sigma_min_face[fid], sigma_local);
+                    sigma_max_face[fid] = fmaxf(sigma_max_face[fid], sigma_local);
+                }
+            }
+        }
+
+        domains_.clear();
+        domains_.resize(D);
+        uint active_domains = 0u;
+        for (uint d = 0u; d < D; ++d) {
+            if (domain_points[d].empty()) continue;
+
+            Device& device = const_cast<Device&>(lbm.lbm_domain[d]->get_device());
+            auto rt = std::make_unique<DomainRuntime>();
+            rt->active = true;
+            rt->point_count = (ulong)domain_points[d].size();
+            rt->mode_count = mode_count;
+            rt->mode_stride = mode_stride;
+
+            rt->point_cell = Memory<ulong>(device, rt->point_count, 1u, true, true, 0ull, false);
+            rt->point_face = Memory<uchar>(device, rt->point_count, 1u, true, true, (uchar)0u, false);
+            rt->point_data = Memory<float>(device, rt->point_count, 7u, true, true, 0.0f, false);
+            rt->mode_data = Memory<float>(device, rt->mode_stride, 10u, true, true, 0.0f, false);
+
+            for (ulong i = 0ull; i < rt->point_count; ++i) {
+                const DomainPoint& dp = domain_points[d][(size_t)i];
+                rt->point_cell[i] = dp.local_n;
+                rt->point_face[i] = dp.face_id;
+                rt->point_data[i] = dp.px;
+                rt->point_data[rt->point_count + i] = dp.py;
+                rt->point_data[2ull * rt->point_count + i] = dp.pz;
+                rt->point_data[3ull * rt->point_count + i] = dp.base_u.x;
+                rt->point_data[4ull * rt->point_count + i] = dp.base_u.y;
+                rt->point_data[5ull * rt->point_count + i] = dp.base_u.z;
+                rt->point_data[6ull * rt->point_count + i] = dp.sigma;
+            }
+            rt->point_cell.write_to_device();
+            rt->point_face.write_to_device();
+            rt->point_data.write_to_device();
+
+            for (ulong m = 0ull; m < rt->mode_stride; ++m) {
+                rt->mode_data[m] = mode_data[(size_t)m];
+                rt->mode_data[rt->mode_stride + m] = mode_data[(size_t)(mode_stride + m)];
+                rt->mode_data[2ull * rt->mode_stride + m] = mode_data[(size_t)(2ull * mode_stride + m)];
+                rt->mode_data[3ull * rt->mode_stride + m] = mode_data[(size_t)(3ull * mode_stride + m)];
+                rt->mode_data[4ull * rt->mode_stride + m] = mode_data[(size_t)(4ull * mode_stride + m)];
+                rt->mode_data[5ull * rt->mode_stride + m] = mode_data[(size_t)(5ull * mode_stride + m)];
+                rt->mode_data[6ull * rt->mode_stride + m] = mode_data[(size_t)(6ull * mode_stride + m)];
+                rt->mode_data[7ull * rt->mode_stride + m] = mode_data[(size_t)(7ull * mode_stride + m)];
+                rt->mode_data[8ull * rt->mode_stride + m] = mode_data[(size_t)(8ull * mode_stride + m)];
+                rt->mode_data[9ull * rt->mode_stride + m] = mode_data[(size_t)(9ull * mode_stride + m)];
+            }
+            rt->mode_data.write_to_device();
+
+            rt->kernel_apply = Kernel(
+                device,
+                rt->point_count,
+                "vk_inlet_apply",
+                (uint)0u, 0.0f, 0.0f, 0.0f,
+                rt->point_count,
+                rt->mode_count,
+                rt->mode_stride,
+                rt->point_cell, rt->point_face, rt->point_data, rt->mode_data,
+                lbm.lbm_domain[d]->u
+            );
+
+            domains_[d] = std::move(rt);
+            active_domains++;
+        }
+
+        if (active_domains == 0u) return false;
+        println("| VK inlet backend| GPU on-the-fly kernels on " + to_string((ulong)active_domains) + " domain(s)            |");
+        if (map_mismatch_count > 0ull || face_mismatch_count > 0ull || local_flag_mismatch_count > 0ull) {
+            println("| VK inlet warn   | mapping checks: map=" + to_string(map_mismatch_count) +
+                    ", face=" + to_string(face_mismatch_count) +
+                    ", local_flag=" + to_string(local_flag_mismatch_count) + "                        |");
+        }
+        if (sigma_count_global > 0ull) {
+            const float sigma_mean = (float)(sigma_sum_global / (double)sigma_count_global);
+            println("| VK inlet sigma  | global min/mean/max = " +
+                    to_string(sigma_min_global, 6u) + " / " +
+                    to_string(sigma_mean, 6u) + " / " +
+                    to_string(sigma_max_global, 6u) + " (LBM)                    |");
+            for (int fid = 0; fid <= 3; ++fid) {
+                const ulong cnt = sigma_count_face[(size_t)fid];
+                if (cnt == 0ull) continue;
+                const float mean_f = (float)(sigma_sum_face[(size_t)fid] / (double)cnt);
+                println("| VK sigma face   | " + string(face_name_(fid)) + ": n=" + to_string(cnt) +
+                        ", min/mean/max=" + to_string(sigma_min_face[(size_t)fid], 6u) + "/" +
+                        to_string(mean_f, 6u) + "/" +
+                        to_string(sigma_max_face[(size_t)fid], 6u) + "          |");
+            }
+        }
+        return true;
+    }
+
+    void compute_time_params_(const ulong t, uint& use_interp, float& t0, float& t1, float& alpha) const {
+        const ulong stride = cfg_.update_stride > 1 ? (ulong)cfg_.update_stride : 1ull;
+        if (stride <= 1ull) {
+            use_interp = 0u;
+            t0 = (float)t;
+            t1 = t0;
+            alpha = 0.0f;
+            return;
+        }
+        if (cfg_.stride_interpolation) {
+            const ulong anchor = (t / stride) * stride;
+            use_interp = 1u;
+            t0 = (float)anchor;
+            t1 = (float)(anchor + stride);
+            alpha = (float)(t - anchor) / (float)stride;
+        } else {
+            const ulong hold_t = (t / stride) * stride;
+            use_interp = 0u;
+            t0 = (float)hold_t;
+            t1 = t0;
+            alpha = 0.0f;
+        }
+    }
+
+private:
+    VkInletRuntimeConfig cfg_;
+    std::array<VkFaceData, 4u> faces_;
+    std::array<std::vector<VkMode>, 4u> face_modes_;
+    std::vector<std::unique_ptr<DomainRuntime>> domains_;
+    bool active_ = false;
+    ulong last_applied_t_ = max_ulong;
+};
 
 struct SamplePoint {
     float3 p;
@@ -1023,24 +1743,84 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
         write_field("T_avg", T_avg, 1u, T_factor, T_offset);
     }
     std::vector<float> fluid(points, 1.0f);
-    if (flags) {
-        parallel_for(points, [&](ulong n) {
-            fluid[n] = (flags[n] & TYPE_S) ? 0.0f : 1.0f;
-        });
-    }
-    write_field("fluid", fluid.data(), 1u, 1.0f);
-
     std::vector<float> tke(points, 0.0f);
-    if (avg_count > 1ull && M2_u && M2_v && M2_w) {
-        const float inv_n = 1.0f / (float)avg_count;
-        parallel_for(points, [&](ulong n) {
-            const float var_u = M2_u[n] * inv_n;
-            const float var_v = M2_v[n] * inv_n;
-            const float var_w = M2_w[n] * inv_n;
-            tke[n] = 0.5f * (var_u + var_v + var_w);
-        });
-    }
+    std::vector<float> ti(points, 0.0f);
+    std::vector<float> tls(points, 0.0f);
+    const bool has_m2 = (avg_count > 1ull && M2_u && M2_v && M2_w);
+    const float inv_n = has_m2 ? (1.0f / (float)avg_count) : 0.0f;
+    const float grid_dx = fmaxf(spacing, 1.0e-12f);
+    const ulong Nxul = (ulong)Nx;
+    const ulong Nyul = (ulong)Ny;
+    const ulong Nzul = (ulong)Nz;
+    const ulong plane = Nxul * Nyul;
+    const float tls_cap = (float)std::max(std::max(Nx, Ny), Nz) * grid_dx;
+    const auto sample_u = [&](const ulong idx, const uint comp) -> float {
+        return u_avg[3ull * idx + (ulong)comp] * u_factor;
+    };
+    parallel_for(points, [&](ulong n) {
+        const bool solid = flags && ((flags[n] & TYPE_S) != 0u);
+        fluid[n] = solid ? 0.0f : 1.0f;
+        if (!has_m2 || solid) return;
+        const float var_u = fmaxf(M2_u[n] * inv_n, 0.0f);
+        const float var_v = fmaxf(M2_v[n] * inv_n, 0.0f);
+        const float var_w = fmaxf(M2_w[n] * inv_n, 0.0f);
+        const float var_sum = var_u + var_v + var_w;
+        tke[n] = 0.5f * var_sum;
+        const ulong i3 = 3ull * n;
+        const float umag = sqrtf(sq(u_avg[i3]) + sq(u_avg[i3 + 1ull]) + sq(u_avg[i3 + 2ull]));
+        if (umag > 1.0e-9f && var_sum > 0.0f) {
+            const float urms = sqrtf(var_sum * (1.0f / 3.0f));
+            ti[n] = urms / umag;
+        }
+
+        // Local turbulence length scale estimate from local k and mean strain:
+        // TLS = sqrt(k) / |S|, where |S| = sqrt(2*Sij*Sij).
+        const ulong z = n / plane;
+        const ulong rem = n - z * plane;
+        const ulong y = rem / Nxul;
+        const ulong x = rem - y * Nxul;
+        const ulong xm = (x > 0ull) ? (x - 1ull) : x;
+        const ulong xp = (x + 1ull < Nxul) ? (x + 1ull) : x;
+        const ulong ym = (y > 0ull) ? (y - 1ull) : y;
+        const ulong yp = (y + 1ull < Nyul) ? (y + 1ull) : y;
+        const ulong zm = (z > 0ull) ? (z - 1ull) : z;
+        const ulong zp = (z + 1ull < Nzul) ? (z + 1ull) : z;
+        const ulong idx_xm = xm + (y + z * Nyul) * Nxul;
+        const ulong idx_xp = xp + (y + z * Nyul) * Nxul;
+        const ulong idx_ym = x + (ym + z * Nyul) * Nxul;
+        const ulong idx_yp = x + (yp + z * Nyul) * Nxul;
+        const ulong idx_zm = x + (y + zm * Nyul) * Nxul;
+        const ulong idx_zp = x + (y + zp * Nyul) * Nxul;
+        const float inv_dx = (xp > xm) ? (1.0f / ((float)(xp - xm) * grid_dx)) : 0.0f;
+        const float inv_dy = (yp > ym) ? (1.0f / ((float)(yp - ym) * grid_dx)) : 0.0f;
+        const float inv_dz = (zp > zm) ? (1.0f / ((float)(zp - zm) * grid_dx)) : 0.0f;
+
+        const float duxdx = (sample_u(idx_xp, 0u) - sample_u(idx_xm, 0u)) * inv_dx;
+        const float duydx = (sample_u(idx_xp, 1u) - sample_u(idx_xm, 1u)) * inv_dx;
+        const float duzdx = (sample_u(idx_xp, 2u) - sample_u(idx_xm, 2u)) * inv_dx;
+        const float duxdy = (sample_u(idx_yp, 0u) - sample_u(idx_ym, 0u)) * inv_dy;
+        const float duydy = (sample_u(idx_yp, 1u) - sample_u(idx_ym, 1u)) * inv_dy;
+        const float duzdy = (sample_u(idx_yp, 2u) - sample_u(idx_ym, 2u)) * inv_dy;
+        const float duxdz = (sample_u(idx_zp, 0u) - sample_u(idx_zm, 0u)) * inv_dz;
+        const float duydz = (sample_u(idx_zp, 1u) - sample_u(idx_zm, 1u)) * inv_dz;
+        const float duzdz = (sample_u(idx_zp, 2u) - sample_u(idx_zm, 2u)) * inv_dz;
+
+        const float Sxx = duxdx;
+        const float Syy = duydy;
+        const float Szz = duzdz;
+        const float Sxy = 0.5f * (duxdy + duydx);
+        const float Sxz = 0.5f * (duxdz + duzdx);
+        const float Syz = 0.5f * (duydz + duzdy);
+        const float S_mag = sqrtf(fmaxf(0.0f, 2.0f * (sq(Sxx) + sq(Syy) + sq(Szz) + 2.0f * (sq(Sxy) + sq(Sxz) + sq(Syz)))));
+
+        const float k_local = 0.5f * var_sum * (u_factor * u_factor);
+        const float tls_local = (S_mag > 1.0e-10f && k_local > 0.0f) ? (sqrtf(k_local) / S_mag) : 0.0f;
+        tls[n] = fminf(fmaxf(tls_local, 0.0f), tls_cap);
+    });
+    write_field("fluid", fluid.data(), 1u, 1.0f);
     write_field("tke", tke.data(), 1u, u_factor * u_factor);
+    write_field("TI", ti.data(), 1u, 1.0f);
+    write_field("TLS", tls.data(), 1u, 1.0f);
 
     file.close();
     if (print_saved_message) {
@@ -1219,6 +1999,19 @@ void main_setup() {
         else {
             std::string line;
             std::string mesh_control_val, gpu_memory_val, cell_size_val;
+            auto parse_bool_setting = [&](const std::string& txt, bool& out) -> bool {
+                std::string v = txt;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                if (v == "true" || v == "1") {
+                    out = true;
+                    return true;
+                }
+                if (v == "false" || v == "0") {
+                    out = false;
+                    return true;
+                }
+                return false;
+            };
             while (std::getline(fin, line)) {
                 size_t cmt = line.find("//"); if (cmt != std::string::npos) line.erase(cmt);
                 size_t eq = line.find('=');  if (eq == std::string::npos) continue;
@@ -1271,6 +2064,10 @@ void main_setup() {
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "unsteady_output") {
+                    const int v = atoi(unquote(val).c_str());
+                    unsteady_output_interval = v > 0 ? static_cast<uint>(v) : 0u;
+                }
                 else if (key == "run_nstep") {
                     const long long v = atoll(unquote(val).c_str());
                     run_nstep_override = v > 0ll ? static_cast<ulong>(v) : 0ull;
@@ -1284,6 +2081,77 @@ void main_setup() {
                     std::string v = unquote(val);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     if (v == "true" || v == "1") enable_coriolis = true;
+                }
+                else if (key == "vk_inlet_enable") {
+                    bool parsed = false;
+                    if (!parse_bool_setting(unquote(val), parsed)) {
+                        println("| WARNING: vk_inlet_enable expects true/false/1/0. Keep default false.         |");
+                    }
+                    else {
+                        vk_inlet_settings.enable = parsed;
+                    }
+                }
+                else if (key == "vk_inlet_ti") {
+                    vk_inlet_settings.ti = (float)atof(unquote(val).c_str());
+                }
+                else if (key == "vk_inlet_sigma") {
+                    vk_inlet_settings.sigma_si = (float)atof(unquote(val).c_str());
+                }
+                else if (key == "vk_inlet_l") {
+                    vk_inlet_settings.L_si = (float)atof(unquote(val).c_str());
+                }
+                else if (key == "vk_inlet_nmodes") {
+                    vk_inlet_settings.nmodes = atoi(unquote(val).c_str());
+                }
+                else if (key == "vk_inlet_seed") {
+                    const std::string raw = unquote(val);
+                    char* endptr = nullptr;
+                    const unsigned long long parsed = std::strtoull(raw.c_str(), &endptr, 10);
+                    if (endptr == raw.c_str()) {
+                        println("| WARNING: vk_inlet_seed parse failed. Keep previous/default seed.             |");
+                    }
+                    else {
+                        vk_inlet_settings.seed = (ulong)parsed;
+                    }
+                }
+                else if (key == "vk_inlet_update_stride") {
+                    vk_inlet_settings.update_stride = atoi(unquote(val).c_str());
+                }
+                else if (key == "vk_inlet_uc_mode") {
+                    std::string v = unquote(val);
+                    std::transform(v.begin(), v.end(), v.begin(), ::toupper);
+                    if (v == "NORM_MEAN") vk_inlet_settings.uc_mode = VkInletUcMode::NORM_MEAN;
+                    else if (v == "NORMAL_COMPONENT") vk_inlet_settings.uc_mode = VkInletUcMode::NORMAL_COMPONENT;
+                    else {
+                        println("| WARNING: vk_inlet_uc_mode invalid. Use NORMAL_COMPONENT or NORM_MEAN.        |");
+                    }
+                }
+                else if (key == "vk_inlet_same_realization_all_faces") {
+                    bool parsed = false;
+                    if (!parse_bool_setting(unquote(val), parsed)) {
+                        println("| WARNING: vk_inlet_same_realization_all_faces expects true/false/1/0.         |");
+                    }
+                    else {
+                        vk_inlet_settings.same_realization_all_faces = parsed;
+                    }
+                }
+                else if (key == "vk_inlet_stride_interpolation") {
+                    bool parsed = false;
+                    if (!parse_bool_setting(unquote(val), parsed)) {
+                        println("| WARNING: vk_inlet_stride_interpolation expects true/false/1/0.               |");
+                    }
+                    else {
+                        vk_inlet_settings.stride_interpolation = parsed;
+                    }
+                }
+                else if (key == "vk_inlet_inflow_only") {
+                    bool parsed = false;
+                    if (!parse_bool_setting(unquote(val), parsed)) {
+                        println("| WARNING: vk_inlet_inflow_only expects true/false/1/0.                        |");
+                    }
+                    else {
+                        vk_inlet_settings.inflow_only = parsed;
+                    }
                 }
 
                 else if (key == "cut_lon_manual") {
@@ -1304,6 +2172,43 @@ void main_setup() {
             if (Dx == 0u) Dx = 1u;
             if (Dy == 0u) Dy = 1u;
             if (Dz == 0u) Dz = 1u;
+
+            if (vk_inlet_settings.ti < 0.0f) {
+                println("| WARNING: vk_inlet_ti is negative. It is clamped to 0.                       |");
+                vk_inlet_settings.ti = 0.0f;
+            }
+            if (vk_inlet_settings.ti > 1.0f && vk_inlet_settings.ti <= 100.0f) {
+                println("| WARNING: vk_inlet_ti > 1 detected. Interpret as percent and divide by 100.  |");
+                vk_inlet_settings.ti *= 0.01f;
+            }
+            if (vk_inlet_settings.sigma_si < 0.0f) {
+                println("| WARNING: vk_inlet_sigma is negative. It is clamped to 0.                    |");
+                vk_inlet_settings.sigma_si = 0.0f;
+            }
+            if (vk_inlet_settings.L_si < 0.0f) {
+                println("| WARNING: vk_inlet_L is negative. It is clamped to 0.                        |");
+                vk_inlet_settings.L_si = 0.0f;
+            }
+            if (vk_inlet_settings.nmodes <= 0) {
+                println("| WARNING: vk_inlet_nmodes <= 0. Fallback to default 128.                     |");
+                vk_inlet_settings.nmodes = k_vk_nmodes_default;
+            }
+            if (vk_inlet_settings.nmodes > k_vk_nmodes_max) {
+                println("| WARNING: vk_inlet_nmodes is too large. Clamped to " + to_string((ulong)k_vk_nmodes_max) + ".          |");
+                vk_inlet_settings.nmodes = k_vk_nmodes_max;
+            }
+            if (vk_inlet_settings.update_stride <= 0) {
+                println("| WARNING: vk_inlet_update_stride <= 0. Fallback to 1.                         |");
+                vk_inlet_settings.update_stride = 1;
+            }
+            if (vk_inlet_settings.enable && !(vk_inlet_settings.L_si > 0.0f)) {
+                println("| WARNING: vk_inlet_enable=true but L is invalid. VK inlet disabled.           |");
+                vk_inlet_settings.enable = false;
+            }
+            if (vk_inlet_settings.enable && !(vk_inlet_settings.ti > 0.0f || vk_inlet_settings.sigma_si > 0.0f)) {
+                println("| WARNING: vk_inlet_enable=true but TI/sigma is invalid. VK inlet disabled.    |");
+                vk_inlet_settings.enable = false;
+            }
 
             // mesh_control
             auto is_nonempty = [&](const std::string& s) {
@@ -1407,7 +2312,19 @@ void main_setup() {
     println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
     println("| Run Steps       | " + alignr(57u, run_nstep_override > 0ull ? to_string(run_nstep_override) + " (run_nstep)" : string("20001 (default)")) + " |");
     println("| Purge Avg Steps | " + alignr(57u, purge_avg_steps > 0u ? to_string(purge_avg_steps) : string("off")) + " |");
+    println("| Unsteady U VTK | " + alignr(57u, unsteady_output_interval > 0u ? ("every " + to_string((ulong)unsteady_output_interval) + " step(s)") : string("off")) + " |");
     println("| Buoyancy Switch | " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
+    println("| VK inlet switch | " + alignr(57u, vk_inlet_settings.enable ? string("true") : string("false")) + " |");
+    if (vk_inlet_settings.enable) {
+        println("| VK TI (frac)    | " + alignr(57u, to_string(fmtf(vk_inlet_settings.ti))) + " |");
+        println("| VK sigma (SI)   | " + alignr(57u, to_string(fmtf(vk_inlet_settings.sigma_si))) + " m/s |");
+        println("| VK L (SI)       | " + alignr(57u, to_string(fmtf(vk_inlet_settings.L_si))) + " m |");
+        println("| VK modes        | " + alignr(57u, to_string((ulong)vk_inlet_settings.nmodes)) + " |");
+        println("| VK stride       | " + alignr(57u, to_string((ulong)vk_inlet_settings.update_stride)) + " |");
+        println("| VK Uc mode      | " + alignr(57u, string(vk_uc_mode_name(vk_inlet_settings.uc_mode))) + " |");
+        println("| VK same realiz. | " + alignr(57u, vk_inlet_settings.same_realization_all_faces ? string("true") : string("false")) + " |");
+        println("| VK inflow only  | " + alignr(57u, vk_inlet_settings.inflow_only ? string("true") : string("false")) + " |");
+    }
 
     const float lbm_ref_u = 0.10f; // 0.1731 is Ma=0.3
     float si_ref_u = 10.0f;
@@ -1601,6 +2518,40 @@ void main_setup() {
     const float si_beta_air = 1.0f / temperature_ref_kelvin; // volumetric thermal expansion [1/K]
     float lbm_alpha = units.alpha(si_alpha_air);
     float lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
+    auto make_vk_runtime_config = [&]() {
+        VkInletRuntimeConfig cfg;
+        cfg.enable = vk_inlet_settings.enable;
+        cfg.ti = vk_inlet_settings.ti;
+        cfg.sigma_lbm = units.u(vk_inlet_settings.sigma_si);
+        cfg.L_lbm = units.x(vk_inlet_settings.L_si);
+        cfg.nmodes = vk_inlet_settings.nmodes;
+        cfg.seed = vk_inlet_settings.seed;
+        cfg.update_stride = vk_inlet_settings.update_stride;
+        cfg.uc_mode = vk_inlet_settings.uc_mode;
+        cfg.same_realization_all_faces = vk_inlet_settings.same_realization_all_faces;
+        cfg.stride_interpolation = vk_inlet_settings.stride_interpolation;
+        cfg.inflow_only = vk_inlet_settings.inflow_only;
+        // Keep VK forcing on true inflow side boundaries only; never inject on configured downstream face.
+        if (downstream_bc == "-x") cfg.downstream_face_id = 0;
+        else if (downstream_bc == "+x") cfg.downstream_face_id = 1;
+        else if (downstream_bc == "-y") cfg.downstream_face_id = 2;
+        else if (downstream_bc == "+y") cfg.downstream_face_id = 3;
+        if (cfg.enable && !(cfg.L_lbm > 0.0f)) {
+            println("| WARNING: vk_inlet_L converts to non-positive LBM value. Disabled.            |");
+            cfg.enable = false;
+        }
+        if (cfg.enable && !(cfg.ti > 0.0f || cfg.sigma_lbm > 0.0f)) {
+            println("| WARNING: vk_inlet_ti/sigma converts to non-positive LBM value. Disabled.     |");
+            cfg.enable = false;
+        }
+        if (cfg.enable && cfg.ti > 0.0f && cfg.sigma_lbm > 0.0f) {
+            println("| VK inlet note   | TI mode is active; vk_inlet_sigma acts only as fallback.   |");
+        }
+        if (cfg.nmodes > k_vk_nmodes_max) cfg.nmodes = k_vk_nmodes_max;
+        if (cfg.nmodes <= 0) cfg.nmodes = k_vk_nmodes_default;
+        if (cfg.update_stride <= 0) cfg.update_stride = 1;
+        return cfg;
+    };
     auto update_coriolis = [&](const bool show_info) {
         if (enable_coriolis) {
             // 1. center in degrees
@@ -1846,7 +2797,10 @@ void main_setup() {
         }
     }
 
-    auto run_lbm = [&](LBM& lbm, const std::string& vtk_prefix, const bool extra_spacing) {
+    auto run_lbm = [&](LBM& lbm,
+                       const std::string& vtk_prefix,
+                       const bool extra_spacing,
+                       const std::function<void(LBM&, ulong)>& pre_step_update = std::function<void(LBM&, ulong)>()) {
         print_section_title("LBM SOLVER INFORMATION");
 
         lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
@@ -1854,6 +2808,8 @@ void main_setup() {
         const ulong default_run_steps = 20001ull;
         const ulong base_run_steps = run_nstep_override > 0ull ? run_nstep_override : default_run_steps;
         const ulong extra_run_steps = research_output_steps > 0u ? (ulong)research_output_steps : 0ull;
+        const ulong unsteady_interval = unsteady_output_interval > 0u ? (ulong)unsteady_output_interval : 0ull;
+        const bool enable_unsteady_u_output = unsteady_interval > 0ull;
         const ulong total_steps = base_run_steps + extra_run_steps;
         auto print_task_finished = [&]() {
             print_kv_row("Task finished", "[" + now_str() + "]");
@@ -1891,6 +2847,9 @@ void main_setup() {
         print_kv_row("Run steps", to_string(total_steps) + (run_nstep_override > 0ull ? " (run_nstep override)" : " (default)"));
         if (extra_run_steps > 0ull) {
             print_kv_row("Extra steps", to_string(extra_run_steps) + " (legacy research_output)");
+        }
+        if (enable_unsteady_u_output) {
+            print_kv_row("Unsteady u VTK", "every " + to_string(unsteady_interval) + " steps");
         }
 
         const bool do_avg = purge_avg_steps > 0u;
@@ -1993,6 +2952,17 @@ void main_setup() {
             accumulate_from_buffers();
         };
 
+        ulong last_unsteady_u_vtk_t = max_ulong;
+        auto maybe_write_unsteady_u = [&]() {
+            if (!enable_unsteady_u_output) return;
+            const ulong t = lbm.get_t();
+            if (t == 0ull || (t % unsteady_interval) != 0ull) return;
+            push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", t));
+            lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            last_unsteady_u_vtk_t = t;
+            flush_vtk_saved_files();
+        };
+
         auto finalize_avg = [&]() {
             if (avg_count == 0ull) {
                 flush_vtk_saved_files();
@@ -2021,8 +2991,10 @@ void main_setup() {
 
         auto write_final_transient = [&]() {
             const ulong vtk_t = lbm.get_t();
-            push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
-            lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            if (last_unsteady_u_vtk_t != vtk_t) {
+                push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
+                lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            }
             push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
             lbm.rho.write_device_to_vtk(vtk_dir, true, false);
 #ifdef TEMPERATURE
@@ -2069,7 +3041,9 @@ void main_setup() {
                     std::filesystem::current_path(__old_cwd);
                 }
             }
+            if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
+            maybe_write_unsteady_u();
             maybe_accumulate_avg();
         }
         write_final_transient();
@@ -2078,8 +3052,11 @@ void main_setup() {
         print_task_finished();
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
+        lbm.run(0u, total_steps); // initialize fields once before first pre-step callback
         while (lbm.get_t() < total_steps) {
+            if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
+            maybe_write_unsteady_u();
             maybe_accumulate_avg();
         }
         write_final_transient();
@@ -2695,7 +3672,24 @@ void main_setup() {
             }
         }
 
-        run_lbm(lbm, "", false);
+        std::unique_ptr<VonKarmanInletUpdater> vk_updater;
+        if (vk_inlet_settings.enable) {
+            VkInletRuntimeConfig vk_runtime = make_vk_runtime_config();
+            vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
+            if (!vk_updater->initialize(lbm)) {
+                vk_updater.reset();
+                println("| VK inlet        | requested but not activated for this case                  |");
+            }
+        }
+
+        run_lbm(
+            lbm,
+            "",
+            false,
+            [&](LBM& lbm_ref, const ulong t_now) {
+                if (vk_updater) vk_updater->update(lbm_ref, t_now);
+            }
+        );
     }
     else if (dataset_generation) {
         if (angle_list.empty()) {
@@ -2774,8 +3768,25 @@ void main_setup() {
                 apply_velocity_boundaries(lbm, inflow_lbmu);
                 print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
+                std::unique_ptr<VonKarmanInletUpdater> vk_updater;
+                if (vk_inlet_settings.enable) {
+                    VkInletRuntimeConfig vk_runtime = make_vk_runtime_config();
+                    vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
+                    if (!vk_updater->initialize(lbm)) {
+                        vk_updater.reset();
+                        println("| VK inlet        | dataset case: no valid side inflow faces.                  |");
+                    }
+                }
+
                 const std::string vtk_prefix = "DG_" + format_tag(inflow_si) + "_" + format_tag(angle_deg) + "_";
-                run_lbm(lbm, vtk_prefix, true);
+                run_lbm(
+                    lbm,
+                    vtk_prefix,
+                    true,
+                    [&](LBM& lbm_ref, const ulong t_now) {
+                        if (vk_updater) vk_updater->update(lbm_ref, t_now);
+                    }
+                );
             }
         }
     }
@@ -3054,7 +4065,24 @@ void main_setup() {
             const std::string vtk_prefix = profile_single_case_standard_output
                 ? std::string("")
                 : ("ANG_" + format_tag(angle_deg) + "_");
-            run_lbm(lbm, vtk_prefix, true);
+            std::unique_ptr<VonKarmanInletUpdater> vk_updater;
+            if (vk_inlet_settings.enable) {
+                VkInletRuntimeConfig vk_runtime = make_vk_runtime_config();
+                vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
+                if (!vk_updater->initialize(lbm)) {
+                    vk_updater.reset();
+                    println("| VK inlet        | profile case: no valid side inflow faces.                  |");
+                }
+            }
+
+            run_lbm(
+                lbm,
+                vtk_prefix,
+                true,
+                [&](LBM& lbm_ref, const ulong t_now) {
+                    if (vk_updater) vk_updater->update(lbm_ref, t_now);
+                }
+            );
         }
     }
 }

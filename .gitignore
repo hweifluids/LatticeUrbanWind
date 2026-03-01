@@ -14,7 +14,7 @@
 *.log
 *.vtk
 *.tif
-
+*.pyc
 # Ignore all files under /example, including files in subfolders
 /example/**
 /run/**
