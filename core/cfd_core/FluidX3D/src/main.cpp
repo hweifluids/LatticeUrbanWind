@@ -74,7 +74,7 @@ void main_label(const double frametime) {
 			draw_label(ox, oy+i, (info.steps==max_ulong ? "Elapsed Time   " : "Remaining Time ")+alignr(22u, /************************************************************************/ print_time(info.time())), c); i+=FONT_HEIGHT;
 			draw_label(ox, oy+i, "Simulation Time "+alignr(21u, /**************************************/ (units.si_t(1ull)==1.0f?to_string(info.lbm->get_t()):to_string(units.si_t(info.lbm->get_t()), 6u))+"s"), c); i+=FONT_HEIGHT;
 			draw_label(ox, oy+i, "MLUPs "          +alignr(31u, alignr(5u, to_uint(pn*1E-6/info.runtime_lbm_timestep_smooth))+" ("+alignr(5u, to_uint(pn*mt*1E-9/info.runtime_lbm_timestep_smooth))+"    GB/s)"), c); i+=FONT_HEIGHT;
-			draw_label(ox, oy+i, "Steps "          +alignr(31u, /************************************/ alignr(10u, info.lbm->get_t())+" ("+alignr(5, to_uint(1.0/info.runtime_lbm_timestep_smooth))+" Steps/s)"), c); i+=FONT_HEIGHT;
+			draw_label(ox, oy+i, "Steps "          +alignr(31u, /************************************/ alignr(10u, info.lbm->get_t())+" ("+alignr(5, to_uint(info.steps_per_second()))+" Steps/s)"), c); i+=FONT_HEIGHT;
 			draw_label(ox, oy+i, "FPS "            +alignr(33u, /************************************************************/ alignr(4u, to_uint(1.0/frametime))+" ("+alignr(5u, camera.fps_limit)+" fps max)"), c);
 		}
 		draw_label(2, camera.height-1*(FONT_HEIGHT)-1, "FluidX3D v3.3 Copyright (c) Dr. Moritz Lehmann", c);

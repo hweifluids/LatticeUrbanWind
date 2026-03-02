@@ -2402,8 +2402,7 @@ string opencl_c_container() {
 	const ulong N = point_count;
 	const ulong M = mode_count;
 	const ulong V = mode_stride;
-	const ulong fid = (ulong)(point_face[i] & (uchar)0x03u);
-	const ulong fbase = fid * M;
+	const ulong fid = (ulong)(point_face[i] & (uchar)0x07u);
 
 	const float px = point_data[i];
 	const float py = point_data[N + i];
@@ -2412,6 +2411,13 @@ string opencl_c_container() {
 	const float uby = point_data[4ul * N + i];
 	const float ubz = point_data[5ul * N + i];
 	const float sigma = point_data[6ul * N + i];
+	if(fid >= 5ull) {
+		u[                 n] = ubx;
+		u[    def_N + n] = uby;
+		u[2ul * def_N + n] = ubz;
+		return;
+	}
+	const ulong fbase = fid * M;
 	if(!(sigma > 0.0f)) {
 		u[                 n] = ubx;
 		u[    def_N + n] = uby;

@@ -7,6 +7,24 @@ constexpr uint k_progress_col_bandwidth = 13u;
 constexpr uint k_progress_col_steps = 11u;
 constexpr uint k_progress_col_current = 19u;
 constexpr uint k_progress_col_time = 36u;
+constexpr double k_min_step_seconds = 1.0E-9;
+
+inline double sanitize_step_seconds(const double step_seconds) {
+	return step_seconds>k_min_step_seconds ? step_seconds : k_min_step_seconds;
+}
+inline void update_step_estimate(const double sample_seconds, double& estimate_seconds, ulong& samples) {
+	if(!(sample_seconds>0.0)) return;
+	if(samples==0ull) {
+		estimate_seconds = sample_seconds;
+	} else {
+		const double alpha = samples<8ull ? (1.0/(double)(samples+1ull)) : 0.2;
+		estimate_seconds += alpha*(sample_seconds-estimate_seconds);
+	}
+	samples++;
+}
+inline double to_steps_per_second(const double step_seconds) {
+	return step_seconds>0.0 ? 1.0/step_seconds : 0.0;
+}
 
 inline string progress_separator_top() {
 	return "|---------.-------'-----.-----------.-------------------.------------------------------------|";
@@ -36,13 +54,66 @@ inline string progress_value_row(const Info& info) {
 	return
 		"|"+alignc(k_progress_col_mlups, to_uint((double)info.lbm->get_N()*1E-6/dt_smooth))+"|"+
 		alignc(k_progress_col_bandwidth, to_string(to_uint((double)info.lbm->get_N()*(double)bandwidth_bytes_per_cell_device()*1E-9/dt_smooth))+" GB/s")+"|"+
-		alignc(k_progress_col_steps, to_uint(1.0/dt_smooth))+"|"+
+		alignc(k_progress_col_steps, to_uint(info.steps_per_second()))+"|"+
 		alignc(k_progress_col_current, current)+"|"+
 		alignc(k_progress_col_time, print_time(info.time()))+"|";
 }
 }
 
 Info info;
+
+void Info::clear_two_phase_eta() {
+	phase_eta_enabled = false;
+	phase_total_steps = 0ull;
+	phase_avg_start_t = max_ulong;
+	phase_avg_steps = 0ull;
+	phase_normal_step_s = 0.0;
+	phase_avg_step_s = 0.0;
+	phase_normal_runtime_sum = 0.0;
+	phase_avg_runtime_sum = 0.0;
+	phase_normal_samples = 0ull;
+	phase_avg_samples = 0ull;
+}
+void Info::configure_two_phase_eta(const ulong total_steps, const ulong avg_start_t, const ulong avg_steps, const double normal_steps_per_s_hint, const double avg_steps_per_s_hint) {
+	phase_eta_enabled = total_steps!=max_ulong;
+	phase_total_steps = total_steps;
+	phase_avg_steps = avg_steps;
+	phase_avg_start_t = avg_steps>0ull ? avg_start_t : max_ulong;
+	phase_normal_step_s = normal_steps_per_s_hint>0.0 ? 1.0/normal_steps_per_s_hint : 0.0;
+	phase_avg_step_s = avg_steps_per_s_hint>0.0 ? 1.0/avg_steps_per_s_hint : 0.0;
+	if(!(phase_avg_step_s>0.0)) phase_avg_step_s = phase_normal_step_s;
+	phase_normal_runtime_sum = phase_normal_step_s>0.0 ? phase_normal_step_s : 0.0;
+	phase_avg_runtime_sum = phase_avg_step_s>0.0 ? phase_avg_step_s : 0.0;
+	phase_normal_samples = phase_normal_step_s>0.0 ? 1ull : 0ull;
+	phase_avg_samples = phase_avg_step_s>0.0 ? 1ull : 0ull;
+}
+void Info::update_two_phase_eta_step(const bool avg_phase, const double step_seconds) {
+	if(!phase_eta_enabled) return;
+	if(!(step_seconds>0.0)) return;
+	if(avg_phase) {
+		phase_avg_runtime_sum += step_seconds;
+		phase_avg_samples++;
+		phase_avg_step_s = phase_avg_runtime_sum/(double)phase_avg_samples;
+	} else {
+		phase_normal_runtime_sum += step_seconds;
+		phase_normal_samples++;
+		phase_normal_step_s = phase_normal_runtime_sum/(double)phase_normal_samples;
+	}
+}
+double Info::normal_steps_per_second() const {
+	if(phase_normal_step_s>0.0) return to_steps_per_second(phase_normal_step_s);
+	return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+}
+double Info::avg_steps_per_second() const {
+	if(phase_avg_step_s>0.0) return to_steps_per_second(phase_avg_step_s);
+	if(phase_normal_step_s>0.0) return to_steps_per_second(phase_normal_step_s);
+	return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+}
+double Info::steps_per_second() const {
+	if(!phase_eta_enabled||lbm==nullptr) return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+	const bool in_avg_phase = phase_avg_steps>0ull&&phase_avg_start_t!=max_ulong&&lbm->get_t()>=phase_avg_start_t;
+	return in_avg_phase ? avg_steps_per_second() : normal_steps_per_second();
+}
 
 void Info::append(const ulong steps, const ulong total_steps, const ulong t) {
 	if(total_steps==max_ulong) { // total_steps is not provided/used
@@ -56,12 +127,31 @@ void Info::append(const ulong steps, const ulong total_steps, const ulong t) {
 }
 void Info::update(const double dt) {
 	this->runtime_lbm_timestep_last = dt; // exact dt
-	this->runtime_lbm_timestep_smooth = (dt+0.3)/(0.3/runtime_lbm_timestep_smooth+1.0); // smoothed dt
-	this->runtime_lbm += dt; // skip first step since it is likely slower than average
+	update_step_estimate(dt, runtime_lbm_timestep_smooth, runtime_lbm_samples);
+	this->runtime_lbm += dt; // accumulated pure LBM kernel runtime
 	this->runtime_total = clock.stop();
 }
 double Info::time() const { // returns either elapsed time or remaining time
 	if(lbm==nullptr) return 0.0;
+	if(phase_eta_enabled&&phase_total_steps!=max_ulong) { // stage-aware ETA: normal solver stage + mean-field stage
+		const ulong t = min(lbm->get_t(), phase_total_steps);
+		ulong remaining_normal = 0ull;
+		ulong remaining_avg = 0ull;
+		if(phase_avg_steps>0ull&&phase_avg_start_t!=max_ulong) {
+			if(t<phase_avg_start_t) {
+				const ulong normal_end = phase_avg_start_t>0ull ? phase_avg_start_t-1ull : 0ull;
+				remaining_normal = normal_end>t ? normal_end-t : 0ull;
+				remaining_avg = phase_total_steps>normal_end ? phase_total_steps-normal_end : 0ull;
+			} else {
+				remaining_avg = phase_total_steps>t ? phase_total_steps-t : 0ull;
+			}
+		} else {
+			remaining_normal = phase_total_steps>t ? phase_total_steps-t : 0ull;
+		}
+		const double normal_step_s = phase_normal_step_s>0.0 ? phase_normal_step_s : sanitize_step_seconds(runtime_lbm_timestep_smooth);
+		const double avg_step_s = phase_avg_step_s>0.0 ? phase_avg_step_s : normal_step_s;
+		return (double)remaining_normal*normal_step_s + (double)remaining_avg*avg_step_s;
+	}
 	return steps==max_ulong ? runtime_total : ((double)steps/(double)max(lbm->get_t()-steps_last, 1ull)-1.0)*(runtime_total-runtime_total_last); // time estimation on average so far
 	//return steps==max_ulong ? runtime_lbm : ((double)steps-(double)(lbm->get_t()-steps_last))*runtime_lbm_timestep_smooth; // instantaneous time estimation
 }
@@ -94,6 +184,13 @@ void Info::print_logo() const {
 void Info::print_initialize(LBM* lbm) {
 	info.allow_printing.lock(); // disable print_update() until print_initialize() has finished
 	this->lbm = lbm;
+	runtime_lbm = 0.0;
+	runtime_total = 0.0;
+	runtime_total_last = 0.0;
+	runtime_lbm_timestep_last = 1.0;
+	runtime_lbm_timestep_smooth = 1.0;
+	runtime_lbm_samples = 0ull;
+	clear_two_phase_eta();
 #if defined(SRT)
 	collision = "SRT";
 #elif defined(TRT)

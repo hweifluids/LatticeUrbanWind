@@ -84,7 +84,7 @@ struct VkInletSettings {
     VkInletUcMode uc_mode = VkInletUcMode::NORMAL_COMPONENT;
     bool same_realization_all_faces = false;
     bool stride_interpolation = false; // optional double-buffer interpolation for stride > 1
-    bool inflow_only = true; // true: only U·n>0 cells, false: all non-downstream side boundary cells
+    bool inflow_only = true; // true: only U·n>0 cells, false: all selected boundary-face cells
 };
 VkInletSettings vk_inlet_settings;
 
@@ -122,15 +122,12 @@ public:
         const uint Nx = lbm.get_Nx();
         const uint Ny = lbm.get_Ny();
         const uint Nz = lbm.get_Nz();
-        if (Nx < 2u || Ny < 2u || Nz < 3u) {
-            println("| VK inlet        | disabled: grid too small for side-only turbulent inlet     |");
+        if (Nx < 2u || Ny < 2u || Nz < 2u) {
+            println("| VK inlet        | disabled: grid too small for turbulent inlet faces         |");
             return false;
         }
 
         setup_face_geometry_();
-        if (cfg_.downstream_face_id >= 0 && cfg_.downstream_face_id <= 3) {
-            println("| VK inlet        | downstream face excluded: " + string(face_name_(cfg_.downstream_face_id)) + "                 |");
-        }
         collect_face_points_(lbm);
 
         uint face_enabled_count = 0u;
@@ -152,7 +149,7 @@ public:
         }
 
         if (face_enabled_count == 0u) {
-            println("| VK inlet        | enabled in config, but no valid side inflow faces found    |");
+            println("| VK inlet        | enabled in config, but no valid inflow faces found         |");
             return false;
         }
 
@@ -165,20 +162,20 @@ public:
         else conv_dir = float3(1.0f, 0.0f, 0.0f);
 
         if (cfg_.same_realization_all_faces) {
-            println("| VK inlet        | same realization on all active side faces                   |");
+            println("| VK inlet        | same realization on all active faces                        |");
         } else {
-            println("| VK inlet        | independent realization per active side face                |");
+            println("| VK inlet        | independent realization per active face                     |");
         }
         println("| VK inlet filter | " + string(cfg_.inflow_only
             ? "inflow-only by face-normal velocity"
-            : "all non-downstream side boundary cells") + "            |");
+            : "all selected boundary face cells") + "                  |");
         if (!build_face_modes_(u_ref, conv_dir, cfg_.seed)) {
             println("| VK inlet        | failed to build VK spectrum modes                           |");
             return false;
         }
 
         if (!build_gpu_runtime_(lbm)) {
-            println("| VK inlet        | no valid GPU runtime mapping for side inflow faces         |");
+            println("| VK inlet        | no valid GPU runtime mapping for inflow faces              |");
             return false;
         }
 
@@ -223,8 +220,10 @@ private:
         WEST = 0,
         EAST = 1,
         SOUTH = 2,
-        NORTH = 3
+        NORTH = 3,
+        TOP = 4
     };
+    static constexpr int VK_FACE_COUNT = 5;
 
     struct VkMode {
         float kx = 0.0f;
@@ -284,6 +283,7 @@ private:
         if (id == EAST) return "east";
         if (id == SOUTH) return "south";
         if (id == NORTH) return "north";
+        if (id == TOP) return "top";
         return "unknown";
     }
 
@@ -307,12 +307,17 @@ private:
         faces_[3].n = float3(0.0f, -1.0f, 0.0f);
         faces_[3].t1 = float3(+1.0f, 0.0f, 0.0f);
         faces_[3].t2 = float3(0.0f, 0.0f, +1.0f);
+
+        faces_[4].id = TOP;
+        faces_[4].n = float3(0.0f, 0.0f, -1.0f);
+        faces_[4].t1 = float3(+1.0f, 0.0f, 0.0f);
+        faces_[4].t2 = float3(0.0f, +1.0f, 0.0f);
     }
 
-    bool cell_is_valid_side_inlet_(LBM& lbm, const ulong n, const VkFaceData& face, const uint x, const uint y, const uint z) {
+    bool cell_is_valid_inlet_(LBM& lbm, const ulong n, const VkFaceData& face, const uint x, const uint y, const uint z) {
         (void)x;
         (void)y;
-        if (z == 0u || z + 1u >= lbm.get_Nz()) return false; // exclude bottom and top
+        if (z == 0u) return false; // keep bottom excluded
         if ((lbm.flags[n] & TYPE_S) != 0u) return false;
         if ((lbm.flags[n] & TYPE_E) == 0u) return false;
 
@@ -342,43 +347,41 @@ private:
         const uint Nx = lbm.get_Nx();
         const uint Ny = lbm.get_Ny();
         const uint Nz = lbm.get_Nz();
-        if (Nx < 2u || Ny < 2u || Nz < 3u) return;
-
-        const bool use_west  = (cfg_.downstream_face_id != WEST);
-        const bool use_east  = (cfg_.downstream_face_id != EAST);
-        const bool use_south = (cfg_.downstream_face_id != SOUTH);
-        const bool use_north = (cfg_.downstream_face_id != NORTH);
+        if (Nx < 2u || Ny < 2u || Nz < 2u) return;
 
         // West and east include corners; south and north skip x corners to keep a deterministic exclusive ownership.
         for (uint z = 1u; z + 1u < Nz; ++z) {
             for (uint y = 0u; y < Ny; ++y) {
-                if (use_west) {
-                    const ulong n_w = lbm.index(0u, y, z);
-                    if (cell_is_valid_side_inlet_(lbm, n_w, faces_[WEST], 0u, y, z)) {
-                        add_point_(faces_[WEST], n_w, 0u, y, z, lbm);
-                    }
+                const ulong n_w = lbm.index(0u, y, z);
+                if (cell_is_valid_inlet_(lbm, n_w, faces_[WEST], 0u, y, z)) {
+                    add_point_(faces_[WEST], n_w, 0u, y, z, lbm);
                 }
-                if (use_east) {
-                    const ulong n_e = lbm.index(Nx - 1u, y, z);
-                    if (cell_is_valid_side_inlet_(lbm, n_e, faces_[EAST], Nx - 1u, y, z)) {
-                        add_point_(faces_[EAST], n_e, Nx - 1u, y, z, lbm);
-                    }
+                const ulong n_e = lbm.index(Nx - 1u, y, z);
+                if (cell_is_valid_inlet_(lbm, n_e, faces_[EAST], Nx - 1u, y, z)) {
+                    add_point_(faces_[EAST], n_e, Nx - 1u, y, z, lbm);
                 }
             }
             if (Nx > 2u) {
                 for (uint x = 1u; x + 1u < Nx; ++x) {
-                    if (use_south) {
-                        const ulong n_s = lbm.index(x, 0u, z);
-                        if (cell_is_valid_side_inlet_(lbm, n_s, faces_[SOUTH], x, 0u, z)) {
-                            add_point_(faces_[SOUTH], n_s, x, 0u, z, lbm);
-                        }
+                    const ulong n_s = lbm.index(x, 0u, z);
+                    if (cell_is_valid_inlet_(lbm, n_s, faces_[SOUTH], x, 0u, z)) {
+                        add_point_(faces_[SOUTH], n_s, x, 0u, z, lbm);
                     }
-                    if (use_north) {
-                        const ulong n_n = lbm.index(x, Ny - 1u, z);
-                        if (cell_is_valid_side_inlet_(lbm, n_n, faces_[NORTH], x, Ny - 1u, z)) {
-                            add_point_(faces_[NORTH], n_n, x, Ny - 1u, z, lbm);
-                        }
+                    const ulong n_n = lbm.index(x, Ny - 1u, z);
+                    if (cell_is_valid_inlet_(lbm, n_n, faces_[NORTH], x, Ny - 1u, z)) {
+                        add_point_(faces_[NORTH], n_n, x, Ny - 1u, z, lbm);
                     }
+                }
+            }
+        }
+
+        // Top face includes full plane (z = Nz-1). No overlap with side loops above.
+        const uint z_top = Nz - 1u;
+        for (uint y = 0u; y < Ny; ++y) {
+            for (uint x = 0u; x < Nx; ++x) {
+                const ulong n_t = lbm.index(x, y, z_top);
+                if (cell_is_valid_inlet_(lbm, n_t, faces_[TOP], x, y, z_top)) {
+                    add_point_(faces_[TOP], n_t, x, y, z_top, lbm);
                 }
             }
         }
@@ -497,7 +500,7 @@ private:
         if (cfg_.same_realization_all_faces) {
             std::vector<VkMode> shared;
             if (!build_modes_for_seed_(u_ref, conv_dir, seed, shared)) return false;
-            for (int fid = 0; fid <= 3; ++fid) {
+            for (int fid = 0; fid < VK_FACE_COUNT; ++fid) {
                 if (faces_[(size_t)fid].enabled && !faces_[(size_t)fid].points.empty()) {
                     face_modes_[(size_t)fid] = shared;
                 }
@@ -506,7 +509,7 @@ private:
         }
 
         bool built_any = false;
-        for (int fid = 0; fid <= 3; ++fid) {
+        for (int fid = 0; fid < VK_FACE_COUNT; ++fid) {
             if (!faces_[(size_t)fid].enabled || faces_[(size_t)fid].points.empty()) continue;
             if (!build_modes_for_seed_(u_ref, conv_dir, mix_seed_(seed, (uint)fid), face_modes_[(size_t)fid])) {
                 return false;
@@ -519,12 +522,12 @@ private:
     bool build_gpu_runtime_(LBM& lbm) {
         const ulong mode_count = (ulong)cfg_.nmodes;
         if (mode_count == 0ull) return false;
-        for (int fid = 0; fid <= 3; ++fid) {
+        for (int fid = 0; fid < VK_FACE_COUNT; ++fid) {
             if (!faces_[(size_t)fid].enabled || faces_[(size_t)fid].points.empty()) continue;
             if (face_modes_[(size_t)fid].size() != (size_t)mode_count) return false;
         }
 
-        const ulong mode_stride = 4ull * mode_count; // fixed 4 side faces
+        const ulong mode_stride = (ulong)VK_FACE_COUNT * mode_count;
         std::vector<float> mode_data((size_t)(10ull * mode_stride), 0.0f);
         auto set_mode = [&](const ulong face_id, const ulong m, const VkMode& mode) {
             const ulong idx = face_id * mode_count + m;
@@ -539,7 +542,7 @@ private:
             mode_data[(size_t)(8ull * mode_stride + idx)] = mode.phiy;
             mode_data[(size_t)(9ull * mode_stride + idx)] = mode.phiz;
         };
-        for (int fid = 0; fid <= 3; ++fid) {
+        for (int fid = 0; fid < VK_FACE_COUNT; ++fid) {
             const auto& modes = face_modes_[(size_t)fid];
             for (ulong m = 0ull; m < (ulong)modes.size(); ++m) {
                 set_mode((ulong)fid, m, modes[(size_t)m]);
@@ -562,10 +565,12 @@ private:
         ulong sigma_count_global = 0ull;
         float sigma_min_global = FLT_MAX;
         float sigma_max_global = 0.0f;
-        std::array<double, 4u> sigma_sum_face = { 0.0, 0.0, 0.0, 0.0 };
-        std::array<ulong, 4u> sigma_count_face = { 0ull, 0ull, 0ull, 0ull };
-        std::array<float, 4u> sigma_min_face = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
-        std::array<float, 4u> sigma_max_face = { 0.0f, 0.0f, 0.0f, 0.0f };
+        std::array<double, VK_FACE_COUNT> sigma_sum_face = {};
+        std::array<ulong, VK_FACE_COUNT> sigma_count_face = {};
+        std::array<float, VK_FACE_COUNT> sigma_min_face = {};
+        std::array<float, VK_FACE_COUNT> sigma_max_face = {};
+        sigma_min_face.fill(FLT_MAX);
+        sigma_max_face.fill(0.0f);
         ulong map_mismatch_count = 0ull;
         ulong face_mismatch_count = 0ull;
         ulong local_flag_mismatch_count = 0ull;
@@ -623,7 +628,8 @@ private:
                     (face.id == WEST  && rx == 0u) ||
                     (face.id == EAST  && rx + 1u == lbm.get_Nx()) ||
                     (face.id == SOUTH && ry == 0u) ||
-                    (face.id == NORTH && ry + 1u == lbm.get_Ny());
+                    (face.id == NORTH && ry + 1u == lbm.get_Ny()) ||
+                    (face.id == TOP   && rz + 1u == lbm.get_Nz());
                 if (!on_face) {
                     face_mismatch_count++;
                     if (face_mismatch_count <= 3ull) {
@@ -645,7 +651,7 @@ private:
                 sigma_count_global++;
                 sigma_min_global = fminf(sigma_min_global, sigma_local);
                 sigma_max_global = fmaxf(sigma_max_global, sigma_local);
-                if (face.id >= 0 && face.id <= 3) {
+                if (face.id >= 0 && face.id < VK_FACE_COUNT) {
                     const size_t fid = (size_t)face.id;
                     sigma_sum_face[fid] += (double)sigma_local;
                     sigma_count_face[fid]++;
@@ -732,7 +738,7 @@ private:
                     to_string(sigma_min_global, 6u) + " / " +
                     to_string(sigma_mean, 6u) + " / " +
                     to_string(sigma_max_global, 6u) + " (LBM)                    |");
-            for (int fid = 0; fid <= 3; ++fid) {
+            for (int fid = 0; fid < VK_FACE_COUNT; ++fid) {
                 const ulong cnt = sigma_count_face[(size_t)fid];
                 if (cnt == 0ull) continue;
                 const float mean_f = (float)(sigma_sum_face[(size_t)fid] / (double)cnt);
@@ -771,8 +777,8 @@ private:
 
 private:
     VkInletRuntimeConfig cfg_;
-    std::array<VkFaceData, 4u> faces_;
-    std::array<std::vector<VkMode>, 4u> face_modes_;
+    std::array<VkFaceData, VK_FACE_COUNT> faces_;
+    std::array<std::vector<VkMode>, VK_FACE_COUNT> face_modes_;
     std::vector<std::unique_ptr<DomainRuntime>> domains_;
     bool active_ = false;
     ulong last_applied_t_ = max_ulong;
@@ -1841,11 +1847,13 @@ static string hr_plain() {
     return "|"+string((uint)CONSOLE_WIDTH-2u, '-')+"|";
 }
 static void print_section_title(const string& title) {
+    print("\r");
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, title)+"|");
     println(hr_plain());
 }
 static void print_kv_row(const string& key, const string& value) {
+    print("\r");
     println("| "+key+" | "+value+" |");
 }
 static std::string read_line_console() {
@@ -2531,7 +2539,7 @@ void main_setup() {
         cfg.same_realization_all_faces = vk_inlet_settings.same_realization_all_faces;
         cfg.stride_interpolation = vk_inlet_settings.stride_interpolation;
         cfg.inflow_only = vk_inlet_settings.inflow_only;
-        // Keep VK forcing on true inflow side boundaries only; never inject on configured downstream face.
+        // Keep parsed for compatibility with existing config/deck fields.
         if (downstream_bc == "-x") cfg.downstream_face_id = 0;
         else if (downstream_bc == "+x") cfg.downstream_face_id = 1;
         else if (downstream_bc == "-y") cfg.downstream_face_id = 2;
@@ -2834,14 +2842,16 @@ void main_setup() {
 
         auto flush_vtk_saved_files = [&]() {
             if (vtk_saved_files.empty()) return;
-            std::lock_guard<std::mutex> lock(info.allow_printing);
-            print("\r");
-            bool first = true;
-            for (const string& filename : vtk_saved_files) {
-                print_kv_row(first ? "VTK file" : "", filename + " saved");
-                first = false;
+            {
+                std::lock_guard<std::mutex> lock(info.allow_printing);
+                bool first = true;
+                for (const string& filename : vtk_saved_files) {
+                    print_kv_row(first ? "VTK file" : "", filename + " saved");
+                    first = false;
+                }
             }
             vtk_saved_files.clear();
+            info.print_update();
         };
 
         print_kv_row("Run steps", to_string(total_steps) + (run_nstep_override > 0ull ? " (run_nstep override)" : " (default)"));
@@ -2879,6 +2889,20 @@ void main_setup() {
             M2_v.assign((size_t)Ncells, 0.0f);
             M2_w.assign((size_t)Ncells, 0.0f);
         }
+        auto print_runtime_kv = [&](const string& key, const string& value) {
+            {
+                std::lock_guard<std::mutex> lock(info.allow_printing);
+                print_kv_row(key, value);
+            }
+            info.print_update();
+        };
+        auto print_runtime_section = [&](const string& title) {
+            {
+                std::lock_guard<std::mutex> lock(info.allow_printing);
+                print_section_title(title);
+            }
+            info.print_update();
+        };
 
         auto enqueue_read_u_rho = [&]() {
 #ifndef UPDATE_FIELDS
@@ -2950,6 +2974,69 @@ void main_setup() {
             if (lbm.get_t() < avg_start_t) return;
             enqueue_read_u_rho();
             accumulate_from_buffers();
+        };
+        auto is_avg_phase = [&]() -> bool {
+            return avg_window > 0ull && lbm.get_t() >= avg_start_t;
+        };
+        auto run_avg_phase_benchmark = [&]() -> double {
+            if (avg_window == 0ull) return 0.0;
+            constexpr uint k_avg_benchmark_iterations = 10u;
+            print_runtime_kv("Avg benchmark", "run " + to_string((ulong)k_avg_benchmark_iterations) + " iterations before solve");
+
+            avg_count = 0ull;
+            std::fill(avg_u.begin(), avg_u.end(), 0.0f);
+            std::fill(avg_rho.begin(), avg_rho.end(), 0.0f);
+            std::fill(M2_u.begin(), M2_u.end(), 0.0f);
+            std::fill(M2_v.begin(), M2_v.end(), 0.0f);
+            std::fill(M2_w.begin(), M2_w.end(), 0.0f);
+#ifdef TEMPERATURE
+            if (include_temperature_avg) std::fill(avg_T.begin(), avg_T.end(), 0.0f);
+#endif
+
+            Clock bench_clock;
+            double total_seconds = 0.0;
+            for (uint i = 0u; i < k_avg_benchmark_iterations; ++i) {
+                bench_clock.start();
+                enqueue_read_u_rho();
+                accumulate_from_buffers();
+                total_seconds += bench_clock.stop();
+            }
+            const double mean_step_seconds = total_seconds / (double)k_avg_benchmark_iterations;
+            const double mean_steps_per_second = mean_step_seconds > 1.0E-12 ? (1.0 / mean_step_seconds) : 0.0;
+            print_runtime_kv("Avg benchmark", "mean-field Steps/s = " + to_string(mean_steps_per_second, 3u));
+
+            avg_count = 0ull;
+            std::fill(avg_u.begin(), avg_u.end(), 0.0f);
+            std::fill(avg_rho.begin(), avg_rho.end(), 0.0f);
+            std::fill(M2_u.begin(), M2_u.end(), 0.0f);
+            std::fill(M2_v.begin(), M2_v.end(), 0.0f);
+            std::fill(M2_w.begin(), M2_w.end(), 0.0f);
+#ifdef TEMPERATURE
+            if (include_temperature_avg) std::fill(avg_T.begin(), avg_T.end(), 0.0f);
+#endif
+            return mean_steps_per_second;
+        };
+        auto configure_eta_model = [&](const double avg_steps_per_second_hint) {
+            info.configure_two_phase_eta(total_steps, avg_start_t, avg_window, 0.0, avg_steps_per_second_hint);
+            if (avg_window > 0ull) {
+                const string avg_sps_text = avg_steps_per_second_hint > 0.0
+                    ? to_string(avg_steps_per_second_hint, 3u)
+                    : string("n/a");
+                print_runtime_kv("ETA model", "normal Steps/s = dynamic, mean-field Steps/s = " + avg_sps_text);
+            } else {
+                print_runtime_kv("ETA model", "single-stage dynamic Steps/s");
+            }
+        };
+        bool avg_phase_entry_reported = false;
+        auto update_runtime_eta = [&](const double iteration_seconds) {
+            const bool avg_phase = is_avg_phase();
+            info.update_two_phase_eta_step(avg_phase, iteration_seconds);
+            if (avg_phase && !avg_phase_entry_reported) {
+                avg_phase_entry_reported = true;
+                print_runtime_kv("Mean-field stage",
+                    "entered. normal Steps/s = " + to_string(info.normal_steps_per_second(), 3u) +
+                    ", mean-field Steps/s = " + to_string(info.avg_steps_per_second(), 3u));
+            }
         };
 
         ulong last_unsteady_u_vtk_t = max_ulong;
@@ -3031,7 +3118,12 @@ void main_setup() {
             80.0f);                               // FOV
 
         lbm.run(0u, total_steps); // initialize fields and graphics buffers
+        const double avg_steps_per_second_hint = run_avg_phase_benchmark();
+        configure_eta_model(avg_steps_per_second_hint);
+        print_runtime_section("SOLVER START");
+        Clock iteration_clock;
         while (lbm.get_t() < total_steps) {
+            iteration_clock.start();
             // ------------------ off-screen PNG rendering (optional video) ------------------
             if (lbm.graphics.next_frame(total_steps, 1.0f)) {
                 {
@@ -3045,6 +3137,7 @@ void main_setup() {
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
             maybe_accumulate_avg();
+            update_runtime_eta(iteration_clock.stop());
         }
         write_final_transient();
         maybe_write_transform_info();
@@ -3053,11 +3146,17 @@ void main_setup() {
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
         lbm.run(0u, total_steps); // initialize fields once before first pre-step callback
+        const double avg_steps_per_second_hint = run_avg_phase_benchmark();
+        configure_eta_model(avg_steps_per_second_hint);
+        print_runtime_section("SOLVER START");
+        Clock iteration_clock;
         while (lbm.get_t() < total_steps) {
+            iteration_clock.start();
             if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
             maybe_accumulate_avg();
+            update_runtime_eta(iteration_clock.stop());
         }
         write_final_transient();
         maybe_write_transform_info();
@@ -3774,7 +3873,7 @@ void main_setup() {
                     vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
                     if (!vk_updater->initialize(lbm)) {
                         vk_updater.reset();
-                        println("| VK inlet        | dataset case: no valid side inflow faces.                  |");
+                        println("| VK inlet        | dataset case: no valid inflow faces.                       |");
                     }
                 }
 
@@ -4071,7 +4170,7 @@ void main_setup() {
                 vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
                 if (!vk_updater->initialize(lbm)) {
                     vk_updater.reset();
-                    println("| VK inlet        | profile case: no valid side inflow faces.                  |");
+                    println("| VK inlet        | profile case: no valid inflow faces.                       |");
                 }
             }
 

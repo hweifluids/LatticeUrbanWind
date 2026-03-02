@@ -78,6 +78,7 @@ This executes the numbered scripts in `installer/`:
 python -m venv .venv
 python -m pip install -r installer/requirements.txt
 ```
+- Ensure `OpenCL` is already there.
 
 ## Quick Start
 
