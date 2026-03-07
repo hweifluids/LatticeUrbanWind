@@ -50,9 +50,28 @@ bool flux_correction = false;
 uint research_output_steps = 0u; 
 uint unsteady_output_interval = 0u;
 uint purge_avg_steps = 0u;
+uint purge_avg_stride = 1u;
 ulong run_nstep_override = 0ull;
 std::string validation_status = "fail"; 
-bool enable_coriolis = false;       
+bool output_tke_in_avg_vtk = true;
+bool output_ti_in_avg_vtk = true;
+bool output_tls_in_avg_vtk = true;
+bool enable_coriolis = false;
+bool enable_buffer_nudging = false;
+float buffer_thickness_m = 0.0f;
+float buffer_tau_s = 1.0f;
+int buffer_nudge_vertical = 0;
+bool buffer_nudging_active = false;
+int buffer_n_cells = 1;
+int buffer_downstream_face_id = 0;
+float buffer_inv_tau_lbmu = 0.0f;
+bool enable_top_sponge = false;
+float sponge_thickness_m = 0.0f;
+float sponge_tau_s = 1.0f;
+int sponge_ref_mode = 0;
+bool top_sponge_active = false;
+int sponge_n_cells = 1;
+float sponge_inv_tau_lbmu = 0.0f;
 
 constexpr float k_temperature_ref_kelvin = 293.15f; // 20 C -> T_lbm = 1.0
 constexpr float k_temperature_min_kelvin = 223.15f; // -50 C
@@ -85,6 +104,7 @@ struct VkInletSettings {
     bool same_realization_all_faces = false;
     bool stride_interpolation = false; // optional double-buffer interpolation for stride > 1
     bool inflow_only = true; // true: only U·n>0 cells, false: all selected boundary-face cells
+    float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f); // per-component perturbation gain [ax, ay, az]
 };
 VkInletSettings vk_inlet_settings;
 
@@ -100,6 +120,7 @@ struct VkInletRuntimeConfig {
     bool same_realization_all_faces = false;
     bool stride_interpolation = false;
     bool inflow_only = true;
+    float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f);
     int downstream_face_id = -1; // {0:west,1:east,2:south,3:north}, -1 means unknown/none
 };
 
@@ -185,6 +206,9 @@ public:
                 ", sigma_lbm(fallback)=" + to_string(cfg_.sigma_lbm, 6u) +
                 ", stride=" + to_string((ulong)cfg_.update_stride) +
                 ", uc_mode=" + string(vk_uc_mode_name(cfg_.uc_mode)) +
+                ", aniso=[" + to_string(cfg_.anisotropy_scale.x, 3u) + "," +
+                             to_string(cfg_.anisotropy_scale.y, 3u) + "," +
+                             to_string(cfg_.anisotropy_scale.z, 3u) + "]" +
                 ", inflow_only=" + string(cfg_.inflow_only ? "true" : "false") +
                 ", interp=" + string(cfg_.stride_interpolation ? "true" : "false") + " |");
         println("| VK inlet modes  | per-face modes=" + to_string((ulong)cfg_.nmodes) + "                                  |");
@@ -476,11 +500,14 @@ private:
             return false;
         }
         const float scale = 1.0f / (float)sqrt(variance_raw); // unit-RMS basis, point-wise sigma applies later
+        const float ax = cfg_.anisotropy_scale.x;
+        const float ay = cfg_.anisotropy_scale.y;
+        const float az = cfg_.anisotropy_scale.z;
         for (size_t m = 0u; m < out_modes.size(); ++m) {
             const float A = a_raw[m] * scale;
-            out_modes[m].Ax = A;
-            out_modes[m].Ay = A;
-            out_modes[m].Az = A;
+            out_modes[m].Ax = A * ax;
+            out_modes[m].Ay = A * ay;
+            out_modes[m].Az = A * az;
         }
         return true;
     }
@@ -1748,10 +1775,16 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     if (T_avg) {
         write_field("T_avg", T_avg, 1u, T_factor, T_offset);
     }
+    const bool write_tke = output_tke_in_avg_vtk;
+    const bool write_ti = output_ti_in_avg_vtk;
+    const bool write_tls = output_tls_in_avg_vtk;
     std::vector<float> fluid(points, 1.0f);
-    std::vector<float> tke(points, 0.0f);
-    std::vector<float> ti(points, 0.0f);
-    std::vector<float> tls(points, 0.0f);
+    std::vector<float> tke;
+    std::vector<float> ti;
+    std::vector<float> tls;
+    if (write_tke) tke.assign((size_t)points, 0.0f);
+    if (write_ti) ti.assign((size_t)points, 0.0f);
+    if (write_tls) tls.assign((size_t)points, 0.0f);
     const bool has_m2 = (avg_count > 1ull && M2_u && M2_v && M2_w);
     const float inv_n = has_m2 ? (1.0f / (float)avg_count) : 0.0f;
     const float grid_dx = fmaxf(spacing, 1.0e-12f);
@@ -1767,17 +1800,23 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
         const bool solid = flags && ((flags[n] & TYPE_S) != 0u);
         fluid[n] = solid ? 0.0f : 1.0f;
         if (!has_m2 || solid) return;
+        if (!(write_tke || write_ti || write_tls)) return;
         const float var_u = fmaxf(M2_u[n] * inv_n, 0.0f);
         const float var_v = fmaxf(M2_v[n] * inv_n, 0.0f);
         const float var_w = fmaxf(M2_w[n] * inv_n, 0.0f);
         const float var_sum = var_u + var_v + var_w;
-        tke[n] = 0.5f * var_sum;
-        const ulong i3 = 3ull * n;
-        const float umag = sqrtf(sq(u_avg[i3]) + sq(u_avg[i3 + 1ull]) + sq(u_avg[i3 + 2ull]));
-        if (umag > 1.0e-9f && var_sum > 0.0f) {
-            const float urms = sqrtf(var_sum * (1.0f / 3.0f));
-            ti[n] = urms / umag;
+        if (write_tke) {
+            tke[n] = 0.5f * var_sum;
         }
+        if (write_ti) {
+            const ulong i3 = 3ull * n;
+            const float umag = sqrtf(sq(u_avg[i3]) + sq(u_avg[i3 + 1ull]) + sq(u_avg[i3 + 2ull]));
+            if (umag > 1.0e-9f && var_sum > 0.0f) {
+                const float urms = sqrtf(var_sum * (1.0f / 3.0f));
+                ti[n] = urms / umag;
+            }
+        }
+        if (!write_tls) return;
 
         // Local turbulence length scale estimate from local k and mean strain:
         // TLS = sqrt(k) / |S|, where |S| = sqrt(2*Sij*Sij).
@@ -1824,9 +1863,9 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
         tls[n] = fminf(fmaxf(tls_local, 0.0f), tls_cap);
     });
     write_field("fluid", fluid.data(), 1u, 1.0f);
-    write_field("tke", tke.data(), 1u, u_factor * u_factor);
-    write_field("TI", ti.data(), 1u, 1.0f);
-    write_field("TLS", tls.data(), 1u, 1.0f);
+    if (write_tke) write_field("tke", tke.data(), 1u, u_factor * u_factor);
+    if (write_ti) write_field("TI", ti.data(), 1u, 1.0f);
+    if (write_tls) write_field("TLS", tls.data(), 1u, 1.0f);
 
     file.close();
     if (print_saved_message) {
@@ -1855,6 +1894,20 @@ static void print_section_title(const string& title) {
 static void print_kv_row(const string& key, const string& value) {
     print("\r");
     println("| "+key+" | "+value+" |");
+}
+static string avg_turbulence_output_desc() {
+    string out = "[";
+    bool first = true;
+    auto append_item = [&](const char* name) {
+        if (!first) out += ",";
+        out += name;
+        first = false;
+    };
+    if (output_tke_in_avg_vtk) append_item("tke");
+    if (output_ti_in_avg_vtk) append_item("ti");
+    if (output_tls_in_avg_vtk) append_item("tls");
+    out += "]";
+    return out;
 }
 static std::string read_line_console() {
     std::string out;
@@ -1982,6 +2035,31 @@ void main_setup() {
             }
             if (i == 3) { a = vals[0]; b = vals[1]; c = vals[2]; }
             };
+        auto parse_triplet_float = [&](const std::string& rng, float& a, float& b, float& c) -> bool {
+            std::string s = trim(rng);
+            size_t lb = s.find('[');
+            size_t rb = s.find(']', lb);
+            std::string inside = (lb != std::string::npos && rb != std::string::npos && rb > lb)
+                ? s.substr(lb + 1, rb - lb - 1)
+                : s;
+            std::stringstream ss(inside);
+            std::string token;
+            float vals[3] = { a, b, c };
+            int i = 0;
+            while (std::getline(ss, token, ',') && i < 3) {
+                const std::string t = trim(token);
+                if (t.empty()) return false;
+                char* endptr = nullptr;
+                const float parsed = std::strtof(t.c_str(), &endptr);
+                if (endptr == t.c_str()) return false;
+                vals[i++] = parsed;
+            }
+            if (i != 3) return false;
+            a = vals[0];
+            b = vals[1];
+            c = vals[2];
+            return true;
+            };
         auto parse_float_list = [&](const std::string& rng, std::vector<float>& out) {
             out.clear();
             std::string s = trim(rng);
@@ -2067,6 +2145,35 @@ void main_setup() {
                 else if (key == "si_x_cfd")    si_size.x = second_val(val);
                 else if (key == "si_y_cfd")    si_size.y = second_val(val);
                 else if (key == "si_z_cfd")    si_size.z = second_val(val);
+                else if (key == "enable_buffer_nudging") enable_buffer_nudging = atoi(unquote(val).c_str()) != 0;
+                else if (key == "buffer_thickness_m") buffer_thickness_m = (float)atof(unquote(val).c_str());
+                else if (key == "buffer_tau_s") buffer_tau_s = (float)atof(unquote(val).c_str());
+                else if (key == "buffer_nudge_vertical") buffer_nudge_vertical = atoi(unquote(val).c_str()) != 0 ? 1 : 0;
+                else if (key == "enable_top_sponge") enable_top_sponge = atoi(unquote(val).c_str()) != 0;
+                else if (key == "sponge_thickness_m") sponge_thickness_m = (float)atof(unquote(val).c_str());
+                else if (key == "sponge_tau_s") sponge_tau_s = (float)atof(unquote(val).c_str());
+                else if (key == "sponge_ref_mode") {
+                    std::string raw = unquote(val);
+                    std::string v = raw;
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    if (v == "0" || v == "mode0" || v == "mode_0") {
+                        sponge_ref_mode = 0;
+                    }
+                    else if (v == "1" || v == "mode1" || v == "mode_1" || v == "geostrophic") {
+                        sponge_ref_mode = 1;
+                    }
+                    else {
+                        char* endptr = nullptr;
+                        const long parsed = std::strtol(raw.c_str(), &endptr, 10);
+                        if (endptr != raw.c_str() && *endptr == '\0') {
+                            sponge_ref_mode = (int)parsed;
+                        }
+                        else {
+                            println("| WARNING: sponge_ref_mode parse failed. Fallback to mode 0.                  |");
+                            sponge_ref_mode = 0;
+                        }
+                    }
+                }
                 else if (key == "mesh_control") mesh_control_val = unquote(val);
                 else if (key == "gpu_memory")   gpu_memory_val = unquote(val);
                 else if (key == "cell_size")    cell_size_val = unquote(val);
@@ -2083,6 +2190,41 @@ void main_setup() {
                 else if (key == "purge_avg") {
                     const int v = atoi(val.c_str());
                     purge_avg_steps = v > 0 ? static_cast<uint>(v) : 0u;
+                }
+                else if (key == "purge_avg_stride") {
+                    const int v = atoi(unquote(val).c_str());
+                    if (v > 0) {
+                        purge_avg_stride = static_cast<uint>(v);
+                    }
+                    else {
+                        purge_avg_stride = 1u;
+                        println("| WARNING: purge_avg_stride must be > 0. Fallback to 1 (every step).          |");
+                    }
+                }
+                else if (key == "output_tke_ti_tls") {
+                    const std::string list_text = trim(unquote(val));
+                    const size_t lb = list_text.find('[');
+                    const size_t rb = list_text.find(']', lb);
+                    if (lb == std::string::npos || rb == std::string::npos || rb <= lb) {
+                        println("| WARNING: output_tke_ti_tls expects [tke,ti,tls]. Keep default output set.   |");
+                    }
+                    else {
+                        output_tke_in_avg_vtk = false;
+                        output_ti_in_avg_vtk = false;
+                        output_tls_in_avg_vtk = false;
+                        const std::string inside = list_text.substr(lb + 1u, rb - lb - 1u);
+                        std::stringstream ss(inside);
+                        std::string token;
+                        while (std::getline(ss, token, ',')) {
+                            std::string item = trim(token);
+                            std::transform(item.begin(), item.end(), item.begin(), ::tolower);
+                            if (item.empty()) continue;
+                            if (item == "tke") output_tke_in_avg_vtk = true;
+                            else if (item == "ti") output_ti_in_avg_vtk = true;
+                            else if (item == "tls") output_tls_in_avg_vtk = true;
+                            else println("| WARNING: output_tke_ti_tls token '" + item + "' is unknown and ignored.      |");
+                        }
+                    }
                 }
                 else if (key == "validation") validation_status = unquote(val);
                 else if (key == "coriolis_term") {
@@ -2161,6 +2303,18 @@ void main_setup() {
                         vk_inlet_settings.inflow_only = parsed;
                     }
                 }
+                else if (key == "vk_inlet_anisotropy" ||
+                         key == "vk_inlet_anisotropy_scale" ||
+                         key == "vk_inlet_aniso_scale") {
+                    float ax = vk_inlet_settings.anisotropy_scale.x;
+                    float ay = vk_inlet_settings.anisotropy_scale.y;
+                    float az = vk_inlet_settings.anisotropy_scale.z;
+                    if (!parse_triplet_float(unquote(val), ax, ay, az)) {
+                        println("| WARNING: vk_inlet_anisotropy expects [a,b,c]. Keep previous/default.         |");
+                    } else {
+                        vk_inlet_settings.anisotropy_scale = float3(ax, ay, az);
+                    }
+                }
 
                 else if (key == "cut_lon_manual") {
                     parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
@@ -2209,6 +2363,18 @@ void main_setup() {
                 println("| WARNING: vk_inlet_update_stride <= 0. Fallback to 1.                         |");
                 vk_inlet_settings.update_stride = 1;
             }
+            auto sanitize_vk_aniso_component = [&](float& v, const char* axis_name) {
+                if (!std::isfinite(v)) {
+                    println("| WARNING: vk_inlet_anisotropy " + string(axis_name) + " is non-finite. Reset to 1.0.           |");
+                    v = 1.0f;
+                } else if (v < 0.0f) {
+                    println("| WARNING: vk_inlet_anisotropy " + string(axis_name) + " is negative. Reset to 1.0.             |");
+                    v = 1.0f;
+                }
+            };
+            sanitize_vk_aniso_component(vk_inlet_settings.anisotropy_scale.x, "x");
+            sanitize_vk_aniso_component(vk_inlet_settings.anisotropy_scale.y, "y");
+            sanitize_vk_aniso_component(vk_inlet_settings.anisotropy_scale.z, "z");
             if (vk_inlet_settings.enable && !(vk_inlet_settings.L_si > 0.0f)) {
                 println("| WARNING: vk_inlet_enable=true but L is invalid. VK inlet disabled.           |");
                 vk_inlet_settings.enable = false;
@@ -2320,6 +2486,8 @@ void main_setup() {
     println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
     println("| Run Steps       | " + alignr(57u, run_nstep_override > 0ull ? to_string(run_nstep_override) + " (run_nstep)" : string("20001 (default)")) + " |");
     println("| Purge Avg Steps | " + alignr(57u, purge_avg_steps > 0u ? to_string(purge_avg_steps) : string("off")) + " |");
+    println("| Purge Avg Stride | " + alignr(57u, purge_avg_steps > 0u ? ("every " + to_string((ulong)purge_avg_stride) + " step(s)") : string("n/a")) + " |");
+    println("| Avg Turb Output | " + alignr(57u, avg_turbulence_output_desc()) + " |");
     println("| Unsteady U VTK | " + alignr(57u, unsteady_output_interval > 0u ? ("every " + to_string((ulong)unsteady_output_interval) + " step(s)") : string("off")) + " |");
     println("| Buoyancy Switch | " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
     println("| VK inlet switch | " + alignr(57u, vk_inlet_settings.enable ? string("true") : string("false")) + " |");
@@ -2330,6 +2498,10 @@ void main_setup() {
         println("| VK modes        | " + alignr(57u, to_string((ulong)vk_inlet_settings.nmodes)) + " |");
         println("| VK stride       | " + alignr(57u, to_string((ulong)vk_inlet_settings.update_stride)) + " |");
         println("| VK Uc mode      | " + alignr(57u, string(vk_uc_mode_name(vk_inlet_settings.uc_mode))) + " |");
+        println("| VK aniso scale  | " + alignr(38u, "[") +
+                alignr(6u, to_string(fmtf(vk_inlet_settings.anisotropy_scale.x))) + ", " +
+                alignr(6u, to_string(fmtf(vk_inlet_settings.anisotropy_scale.y))) + ", " +
+                alignr(6u, to_string(fmtf(vk_inlet_settings.anisotropy_scale.z))) + "] |");
         println("| VK same realiz. | " + alignr(57u, vk_inlet_settings.same_realization_all_faces ? string("true") : string("false")) + " |");
         println("| VK inflow only  | " + alignr(57u, vk_inlet_settings.inflow_only ? string("true") : string("false")) + " |");
     }
@@ -2341,16 +2513,30 @@ void main_setup() {
     //const uint3 lbm_N = resolution(si_size, memory);
     const uint Nx_cells = std::max(1, (int)(si_size.x / cell_m + 0.5f));
     const uint Ny_cells = std::max(1, (int)(si_size.y / cell_m + 0.5f));
-    #ifndef D2Q9
-    const uint Nz_cells = std::max(1, (int)(si_size.z / cell_m + 0.5f));
-    #else
-    const uint Nz_cells = 1u;   
-    #endif
+    int sponge_cells_cfg = std::max(1, (int)std::lround(sponge_thickness_m / cell_m));
+    bool top_sponge_grid_extend = false;
+    int top_sponge_side_ref_z_cap = -1;
+#ifndef D2Q9
+    const uint Nz_cells_core = std::max(1, (int)(si_size.z / cell_m + 0.5f));
+    const bool sponge_mode_supported_pre = (sponge_ref_mode == 0);
+    const bool sponge_has_vertical_room_pre = (Nz_cells_core > 2u);
+    top_sponge_grid_extend = enable_top_sponge && sponge_tau_s > 0.0f && sponge_mode_supported_pre && sponge_has_vertical_room_pre;
+    const uint Nz_cells = Nz_cells_core + (top_sponge_grid_extend ? (uint)sponge_cells_cfg : 0u);
+    top_sponge_side_ref_z_cap = top_sponge_grid_extend ? (int)Nz_cells_core - 1 : -1;
+#else
+    const uint Nz_cells_core = 1u;
+    const uint Nz_cells = 1u;
+#endif
     const uint3 lbm_N = uint3(Nx_cells, Ny_cells, Nz_cells);
 
     print_section_title("DOMAIN AND TRANSFORMATION");
     const ulong n_cells_total = (ulong)lbm_N.x*(ulong)lbm_N.y*(ulong)lbm_N.z;
     println("| Grid Resolution | " + alignr(45u, to_string(lbm_N.x)) + "," + alignr(5u, to_string(lbm_N.y)) + "," + alignr(5u, to_string(lbm_N.z)) + " (nCell = " + to_string(n_cells_total) + ") |");
+    if (top_sponge_grid_extend) {
+        println("| Top sponge grid | " + alignr(57u, "core Nz=" + to_string((ulong)Nz_cells_core) +
+                ", ext=" + to_string((ulong)sponge_cells_cfg) +
+                ", total Nz=" + to_string((ulong)lbm_N.z)) + " |");
+    }
 
     const uint mem_per_dev_mb = vram_required_mb_per_device(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
     const uint mem_total_mb = vram_required_mb_total(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);
@@ -2539,6 +2725,7 @@ void main_setup() {
         cfg.same_realization_all_faces = vk_inlet_settings.same_realization_all_faces;
         cfg.stride_interpolation = vk_inlet_settings.stride_interpolation;
         cfg.inflow_only = vk_inlet_settings.inflow_only;
+        cfg.anisotropy_scale = vk_inlet_settings.anisotropy_scale;
         // Keep parsed for compatibility with existing config/deck fields.
         if (downstream_bc == "-x") cfg.downstream_face_id = 0;
         else if (downstream_bc == "+x") cfg.downstream_face_id = 1;
@@ -2554,6 +2741,11 @@ void main_setup() {
         }
         if (cfg.enable && cfg.ti > 0.0f && cfg.sigma_lbm > 0.0f) {
             println("| VK inlet note   | TI mode is active; vk_inlet_sigma acts only as fallback.   |");
+        }
+        if (!(std::isfinite(cfg.anisotropy_scale.x) && std::isfinite(cfg.anisotropy_scale.y) && std::isfinite(cfg.anisotropy_scale.z) &&
+              cfg.anisotropy_scale.x >= 0.0f && cfg.anisotropy_scale.y >= 0.0f && cfg.anisotropy_scale.z >= 0.0f)) {
+            println("| WARNING: vk_inlet_anisotropy has invalid component(s). Reset to [1,1,1].     |");
+            cfg.anisotropy_scale = float3(1.0f, 1.0f, 1.0f);
         }
         if (cfg.nmodes > k_vk_nmodes_max) cfg.nmodes = k_vk_nmodes_max;
         if (cfg.nmodes <= 0) cfg.nmodes = k_vk_nmodes_default;
@@ -2604,6 +2796,70 @@ void main_setup() {
             print_kv_row("Coriolis", "disabled by 'coriolis_term' setting in .luw");
         }
     };
+    auto update_buffer_nudging = [&](const bool show_info) {
+        if (downstream_bc == "-x") buffer_downstream_face_id = 1;      // west (x=0)
+        else if (downstream_bc == "+x") buffer_downstream_face_id = 2; // east (x=Nx-1)
+        else if (downstream_bc == "-y") buffer_downstream_face_id = 3; // south (y=0)
+        else if (downstream_bc == "+y") buffer_downstream_face_id = 4; // north (y=Ny-1)
+        else buffer_downstream_face_id = 0; // none/unknown
+
+        const uint min_dim = std::min(lbm_N.x, std::min(lbm_N.y, lbm_N.z));
+        const uint max_nbuf = std::max(1u, min_dim / 4u);
+        int nbuf = (int)std::lround(buffer_thickness_m / cell_m);
+        if (nbuf < 1) nbuf = 1;
+        if ((uint)nbuf > max_nbuf) nbuf = (int)max_nbuf;
+        buffer_n_cells = nbuf;
+
+        const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+        buffer_inv_tau_lbmu = (buffer_tau_s > 0.0f) ? (dt_si / buffer_tau_s) : 0.0f;
+        buffer_nudging_active = enable_buffer_nudging && buffer_tau_s > 0.0f;
+
+        if (show_info) {
+            if (enable_buffer_nudging && buffer_tau_s <= 0.0f) {
+                println("| WARNING: enable_buffer_nudging=1 but buffer_tau_s<=0. Buffer nudging disabled. |");
+            }
+            print_kv_row("Buffer nudging", buffer_nudging_active ? "enabled" : "disabled");
+            print_kv_row("", "Nbuf=" + to_string((ulong)buffer_n_cells) + " cells, tau_s=" + to_string(buffer_tau_s, 6u) + " s");
+            print_kv_row("", "inv_tau_lbmu=" + to_string(buffer_inv_tau_lbmu, 8u) + ", downstream_face_id=" + to_string((ulong)buffer_downstream_face_id) + ", nudge_vertical=" + to_string((ulong)buffer_nudge_vertical));
+        }
+    };
+    auto update_top_sponge = [&](const bool show_info) {
+        int ns = sponge_cells_cfg;
+        if (ns < 1) ns = 1;
+        if (lbm_N.z > 2u) {
+            const int ns_max = (int)lbm_N.z - 2;
+            if (ns > ns_max) ns = ns_max;
+        }
+        sponge_n_cells = ns;
+
+        const float dt_si = cell_m * (lbm_ref_u / si_ref_u);
+        sponge_inv_tau_lbmu = (sponge_tau_s > 0.0f) ? (dt_si / sponge_tau_s) : 0.0f;
+
+        const bool mode_supported = (sponge_ref_mode == 0);
+        const bool has_vertical_room = (Nz_cells_core > 2u);
+        top_sponge_active = top_sponge_grid_extend && sponge_tau_s > 0.0f && mode_supported && has_vertical_room;
+
+        if (show_info) {
+            if (enable_top_sponge && sponge_tau_s <= 0.0f) {
+                println("| WARNING: enable_top_sponge=1 but sponge_tau_s<=0. Top sponge disabled.      |");
+            }
+            if (enable_top_sponge && !has_vertical_room) {
+                println("| WARNING: enable_top_sponge=1 but Nz<=2. Top sponge disabled.                 |");
+            }
+            if (enable_top_sponge && !mode_supported) {
+                println("| WARNING: sponge_ref_mode!=0 is not implemented yet. Top sponge disabled.    |");
+            }
+            if (enable_top_sponge && !top_sponge_grid_extend && mode_supported && has_vertical_room && sponge_tau_s > 0.0f) {
+                println("| WARNING: top sponge grid extension is disabled by current settings.          |");
+            }
+            print_kv_row("Top sponge", top_sponge_active ? "enabled" : "disabled");
+            print_kv_row("", "Nsponge=" + to_string((ulong)sponge_n_cells) + " cells, tau_s=" + to_string(sponge_tau_s, 6u) + " s");
+            print_kv_row("", "inv_tau_lbmu=" + to_string(sponge_inv_tau_lbmu, 8u) + ", ref_mode=" + to_string(sponge_ref_mode));
+            if (top_sponge_active) {
+                print_kv_row("", "core_top_z=" + to_string((ulong)(Nz_cells_core - 1u)) + ", side_ref_cap_z=" + to_string(top_sponge_side_ref_z_cap));
+            }
+        }
+    };
 
     if (!dataset_generation && !profile_generation) {
         println("| SI Reference U  | " + alignl(7u, to_string(fmtf(si_ref_u))) + alignl(50u, "m/s") + " |");
@@ -2629,6 +2885,8 @@ void main_setup() {
     }
 
     update_coriolis(!dataset_generation && !profile_generation);
+    update_buffer_nudging(true);
+    update_top_sponge(true);
  
     std::vector<SamplePoint> samples;
     bool use_temperature_bc = false;
@@ -2864,7 +3122,11 @@ void main_setup() {
 
         const bool do_avg = purge_avg_steps > 0u;
         const ulong avg_window = do_avg ? std::min((ulong)purge_avg_steps, total_steps) : 0ull;
+        const ulong avg_stride = std::max((ulong)1u, (ulong)purge_avg_stride);
         const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + 1ull) : max_ulong;
+        if (avg_window > 0ull) {
+            print_kv_row("Avg stride", "sample every " + to_string(avg_stride) + " step(s) in purge_avg window");
+        }
         const ulong Ncells = lbm.get_N();
 #ifdef TEMPERATURE
         const bool include_temperature_avg = use_temperature_bc;
@@ -2972,6 +3234,7 @@ void main_setup() {
         auto maybe_accumulate_avg = [&]() {
             if (avg_window == 0ull) return;
             if (lbm.get_t() < avg_start_t) return;
+            if (((lbm.get_t() - avg_start_t) % avg_stride) != 0ull) return;
             enqueue_read_u_rho();
             accumulate_from_buffers();
         };
@@ -3458,17 +3721,20 @@ void main_setup() {
                     return;
                 }
 
-                const float3 pos = lbm.position(x, y, z);
+                float3 pos = lbm.position(x, y, z);
                 float a = 0.0f;
                 float b = 0.0f;
+                const bool is_side_patch =
+                    (patch == k_patch_west || patch == k_patch_east ||
+                     patch == k_patch_south || patch == k_patch_north);
+                if (is_side_patch && top_sponge_side_ref_z_cap >= 0 && (int)z > top_sponge_side_ref_z_cap) {
+                    pos.z = lbm.position(x, y, (uint)top_sponge_side_ref_z_cap).z;
+                }
                 if (!patch_surface_coordinates(patch, pos, a, b)) {
                     velocity_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
                     return;
                 }
 
-                const bool is_side_patch =
-                    (patch == k_patch_west || patch == k_patch_east ||
-                     patch == k_patch_south || patch == k_patch_north);
                 if (is_side_patch && face_field.below_sample_support(a, b)) {
                     lbm.flags[n] = TYPE_S;
                     set_zero_velocity(n);
@@ -3573,7 +3839,7 @@ void main_setup() {
             // Calculate z base threshold in LBM units
             const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu;
             InletVelocityFieldHD inlet_hd(knn_hd, z_base_threshold_lbmu);
-            apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd);
+            apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd, 500000ull, true, top_sponge_side_ref_z_cap);
 
 #ifdef TEMPERATURE
             if (use_temperature_bc) {
@@ -3717,7 +3983,7 @@ void main_setup() {
         else {
             NearestNeighborInterpolator nn(std::move(P), std::move(Uv));
             InletVelocityField inlet(nn, z0_lbmu, z_off);
-            apply_inlet_outlet(lbm, downstream_bc, inlet);
+            apply_inlet_outlet(lbm, downstream_bc, inlet, 500000ull, true, top_sponge_side_ref_z_cap);
 
 #ifdef TEMPERATURE
             if (use_temperature_bc) {
@@ -3846,6 +4112,8 @@ void main_setup() {
                 lbm_alpha = units.alpha(si_alpha_air);
                 lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
                 update_coriolis(false);
+                update_buffer_nudging(false);
+                update_top_sponge(false);
 
                 const std::string case_label = to_string(case_index) + "/" + to_string(total_cases) +
                     " (remaining " + to_string(remaining) + ")";
@@ -4057,7 +4325,12 @@ void main_setup() {
                     return;
                 }
                 lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_E);
-                const float u_mag = profile_speed_lbmu(pos_z, ground_z);
+                float pos_z_eval = pos_z;
+                const bool is_side_boundary = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u);
+                if (is_side_boundary && top_sponge_side_ref_z_cap >= 0 && (int)z > top_sponge_side_ref_z_cap) {
+                    pos_z_eval = lbm.position(x, y, (uint)top_sponge_side_ref_z_cap).z;
+                }
+                const float u_mag = profile_speed_lbmu(pos_z_eval, ground_z);
                 lbm.u.x[n] = dir_x * u_mag;
                 lbm.u.y[n] = dir_y * u_mag;
                 lbm.u.z[n] = 0.0f;

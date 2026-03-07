@@ -431,7 +431,8 @@ void apply_inlet_outlet_hd(LBM& lbm,
                            const std::string& downstream_bc,
                            const InletVelocityFieldHD& inlet,
                            unsigned long /*min_work_per_thread*/,
-                           bool show_progress) {
+                           bool show_progress,
+                           int side_ref_z_cap_index) {
     const uint Nx = lbm.get_Nx();
     const uint Ny = lbm.get_Ny();
     const uint Nz = lbm.get_Nz();
@@ -639,7 +640,7 @@ void apply_inlet_outlet_hd(LBM& lbm,
             workers.clear();
             workers.reserve(num_threads);
             for (unsigned t = 0u; t < num_threads; ++t) {
-                workers.emplace_back([Nface, heavy_chunk, &fi, &next_heavy, &processed, &lbm, &inlet]() {
+                workers.emplace_back([Nface, heavy_chunk, &fi, &next_heavy, &processed, &lbm, &inlet, Nx, Ny, Nz, side_ref_z_cap_index]() {
                     unsigned long long local_incr = 0ull;
                     for (;;) {
                         const unsigned long long start_idx_h =
@@ -652,8 +653,12 @@ void apply_inlet_outlet_hd(LBM& lbm,
                             const unsigned long long n = fi[idx];
                             uint x = 0u, y = 0u, z = 0u;
                             lbm.coordinates(n, x, y, z);
-                            const float3 pos = lbm.position(x, y, z);
-                            const float3 u = inlet(pos);
+                            float3 pos_eval = lbm.position(x, y, z);
+                            const bool is_side = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u);
+                            if (side_ref_z_cap_index >= 0 && is_side && z != Nz - 1u && (int)z > side_ref_z_cap_index) {
+                                pos_eval.z = lbm.position(x, y, (uint)side_ref_z_cap_index).z;
+                            }
+                            const float3 u = inlet(pos_eval);
                             lbm.u.x[n] = u.x;
                             lbm.u.y[n] = u.y;
                             lbm.u.z[n] = u.z;

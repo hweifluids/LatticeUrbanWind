@@ -49,4 +49,5 @@ void apply_inlet_outlet(LBM& lbm,
     const std::string& downstream_bc,
     const InletVelocityField& inlet,
     unsigned long min_work_per_thread = 500000ull,
-    bool show_progress = true);
+    bool show_progress = true,
+    int side_ref_z_cap_index = -1);

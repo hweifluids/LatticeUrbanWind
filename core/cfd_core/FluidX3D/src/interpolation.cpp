@@ -69,7 +69,8 @@ void apply_inlet_outlet(LBM& lbm,
     const std::string& downstream_bc,
     const InletVelocityField& inlet,
     unsigned long min_work_per_thread,
-    bool show_progress) {
+    bool show_progress,
+    int side_ref_z_cap_index) {
     const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
     const unsigned hw = detect_available_worker_threads();
 
@@ -154,7 +155,12 @@ void apply_inlet_outlet(LBM& lbm,
 
                         if (inlet_face) {
                             lbm.flags[n] = TYPE_E;
-                            const float3 u = inlet(pos);
+                            float3 pos_eval = pos;
+                            const bool is_side = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u);
+                            if (side_ref_z_cap_index >= 0 && is_side && z != Nz - 1u && (int)z > side_ref_z_cap_index) {
+                                pos_eval.z = lbm.position(x, y, (uint)side_ref_z_cap_index).z;
+                            }
+                            const float3 u = inlet(pos_eval);
                             lbm.u.x[n] = u.x;
                             lbm.u.y[n] = u.y;
                             lbm.u.z[n] = u.z;

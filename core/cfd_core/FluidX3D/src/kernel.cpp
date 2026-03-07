@@ -1520,6 +1520,98 @@ string opencl_c_container() {
 	fxn += cor_x;
 	fyn += cor_y;
 	fzn += cor_z;
+		) + "#ifdef BUFFER_NUDGING" + R(
+	if(flagsn_bo!=TYPE_E) { // keep TYPE_E hard BC untouched
+		const uint3 xyz = coordinates(n);
+		const uint x = xyz.x, y = xyz.y, z = xyz.z;
+		const int xg = (int)x+def_Ox;
+		const int yg = (int)y+def_Oy;
+		const int zg = (int)z+def_Oz;
+		const int Nbuf_i = (int)def_buffer_N;
+		const int d_w_i = xg;
+		const int d_e_i = (int)(def_Nx_global-1u)-xg;
+		const int d_s_i = yg;
+		const int d_n_i = (int)(def_Ny_global-1u)-yg;
+		const int d_t_i = (int)(def_Nz_global-1u)-zg;
+
+		const bool in_w = def_downstream_face!=1&&def_has_west_face==1&&d_w_i>=0&&d_w_i<=Nbuf_i;
+		const bool in_e = def_downstream_face!=2&&def_has_east_face==1&&d_e_i>=0&&d_e_i<=Nbuf_i;
+		const bool in_s = def_downstream_face!=3&&def_has_south_face==1&&d_s_i>=0&&d_s_i<=Nbuf_i;
+		const bool in_n = def_downstream_face!=4&&def_has_north_face==1&&d_n_i>=0&&d_n_i<=Nbuf_i;
+		const bool in_t = def_has_top_face==1&&d_t_i>=0&&d_t_i<=Nbuf_i;
+		if(in_w||in_e||in_s||in_n||in_t) {
+			uint d_min = (uint)def_buffer_N+1u;
+			uxx n_ref = n;
+			if(in_w) {
+				const uint d_w = (uint)d_w_i;
+				if(d_w<d_min) {
+					d_min = d_w;
+					n_ref = index((uint3)((uint)def_west_local_x, y, z));
+				}
+			}
+			if(in_e) {
+				const uint d_e = (uint)d_e_i;
+				if(d_e<d_min) {
+					d_min = d_e;
+					n_ref = index((uint3)((uint)def_east_local_x, y, z));
+				}
+			}
+			if(in_s) {
+				const uint d_s = (uint)d_s_i;
+				if(d_s<d_min) {
+					d_min = d_s;
+					n_ref = index((uint3)(x, (uint)def_south_local_y, z));
+				}
+			}
+			if(in_n) {
+				const uint d_n = (uint)d_n_i;
+				if(d_n<d_min) {
+					d_min = d_n;
+					n_ref = index((uint3)(x, (uint)def_north_local_y, z));
+				}
+			}
+			if(in_t) {
+				const uint d_t = (uint)d_t_i;
+				if(d_t<d_min) {
+					d_min = d_t;
+					n_ref = index((uint3)(x, y, (uint)def_top_local_z));
+				}
+			}
+
+			const float xi = 1.0f-(float)d_min/(float)def_buffer_N;
+			float w_buf = sin(1.5707963267948966f*xi);
+			w_buf *= w_buf;
+			const float u_target_x = u[n_ref];
+			const float u_target_y = u[def_N+(ulong)n_ref];
+			const float u_target_z = u[2ul*def_N+(ulong)n_ref];
+			const float a_x = w_buf*def_buffer_inv_tau*(u_target_x-uxn);
+			const float a_y = w_buf*def_buffer_inv_tau*(u_target_y-uyn);
+			const float a_z = def_buffer_nudge_vertical==1 ? w_buf*def_buffer_inv_tau*(u_target_z-uzn) : 0.0f;
+			fxn += rhon*a_x;
+			fyn += rhon*a_y;
+			fzn += rhon*a_z;
+		}
+	}
+		) + "#endif" + R( // BUFFER_NUDGING
+		) + "#ifdef TOP_SPONGE" + R(
+#if def_sponge_ref_mode==0
+	if(flagsn_bo!=TYPE_E&&def_has_top_face==1) { // keep TYPE_E hard BC untouched
+		const uint3 xyz = coordinates(n);
+		// Anchor sponge at first fluid cell below top TYPE_E boundary (outward-expanded profile).
+		const int d_t_i = (int)(def_Nz_global-2u)-((int)xyz.z+def_Oz);
+		const int Nsponge_i = (int)def_sponge_N;
+		if(d_t_i>=0&&d_t_i<Nsponge_i) {
+			const float xi = Nsponge_i>1 ? 1.0f-(float)d_t_i/(float)(Nsponge_i-1) : 1.0f;
+			float sigma = sin(1.5707963267948966f*xi);
+			sigma = def_sponge_inv_tau*sigma*sigma;
+			const uxx n_ref = index((uint3)(xyz.x, xyz.y, (uint)def_top_local_z));
+			fxn += rhon*sigma*(u[                 n_ref]-uxn);
+			fyn += rhon*sigma*(u[    def_N+(ulong)n_ref]-uyn);
+			fzn += rhon*sigma*(u[2ul*def_N+(ulong)n_ref]-uzn);
+		}
+	}
+#endif
+		) + "#endif" + R( // TOP_SPONGE
 
 	float Fin[def_velocity_set]; // forcing terms
 		) + "#ifdef FORCE_FIELD" + R(
@@ -1558,6 +1650,22 @@ string opencl_c_container() {
 			for(uint i=0u; i<7u; i++) Tn += ghn[i]; // calculate temperature from g
 			Tn += 1.0f; // add 1.0f last to avoid digit extinction effects when summing up gi (perturbation method / DDF-shifting)
 		}
+)+"#ifdef TOP_SPONGE"+R(
+#if def_sponge_ref_mode==0
+		if(!(flagsn&TYPE_T)&&flagsn_bo!=TYPE_E&&def_has_top_face==1) {
+			const uint3 xyz = coordinates(n);
+			const int d_t_i = (int)(def_Nz_global-2u)-((int)xyz.z+def_Oz);
+			const int Nsponge_i = (int)def_sponge_N;
+			if(d_t_i>=0&&d_t_i<Nsponge_i) {
+				const float xi = Nsponge_i>1 ? 1.0f-(float)d_t_i/(float)(Nsponge_i-1) : 1.0f;
+				float sigma_T = sin(1.5707963267948966f*xi);
+				sigma_T = def_sponge_inv_tau*sigma_T*sigma_T;
+				const uxx n_ref = index((uint3)(xyz.x, xyz.y, (uint)def_top_local_z));
+				Tn = fma(sigma_T, T[n_ref]-Tn, Tn);
+			}
+		}
+#endif
+)+"#endif"+R( // TOP_SPONGE
 		float geq[7]; // cache f_equilibrium[n]
 		calculate_g_eq(Tn, uxn, uyn, uzn, geq); // calculate equilibrium DDFs
 		if(flagsn&TYPE_T) {

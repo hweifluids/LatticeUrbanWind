@@ -3,6 +3,15 @@
 extern float coriolis_Omegax_lbmu;
 extern float coriolis_Omegay_lbmu;
 extern float coriolis_Omegaz_lbmu;
+extern bool buffer_nudging_active;
+extern int buffer_n_cells;
+extern float buffer_inv_tau_lbmu;
+extern int buffer_nudge_vertical;
+extern int buffer_downstream_face_id;
+extern bool top_sponge_active;
+extern int sponge_n_cells;
+extern float sponge_inv_tau_lbmu;
+extern int sponge_ref_mode;
 
 
 
@@ -518,7 +527,21 @@ void LBM_Domain::enqueue_unvoxelize_mesh_on_device(const Mesh* mesh, const uchar
 	kernel_unvoxelize_mesh.run();
 }
 
-string LBM_Domain::device_defines() const { return
+string LBM_Domain::device_defines() const {
+	const uint Nx_global = (Nx-2u*(Dx>1u))*Dx;
+	const uint Ny_global = (Ny-2u*(Dy>1u))*Dy;
+	const uint Nz_global = (Nz-2u*(Dz>1u))*Dz;
+	const int west_local_x = -Ox;
+	const int east_local_x = (int)Nx_global-1-Ox;
+	const int south_local_y = -Oy;
+	const int north_local_y = (int)Ny_global-1-Oy;
+	const int top_local_z = (int)Nz_global-1-Oz;
+	const int has_west_face = west_local_x>=0&&west_local_x<(int)Nx ? 1 : 0;
+	const int has_east_face = east_local_x>=0&&east_local_x<(int)Nx ? 1 : 0;
+	const int has_south_face = south_local_y>=0&&south_local_y<(int)Ny ? 1 : 0;
+	const int has_north_face = north_local_y>=0&&north_local_y<(int)Ny ? 1 : 0;
+	const int has_top_face = top_local_z>=0&&top_local_z<(int)Nz ? 1 : 0;
+	return
 	"\n	#define def_Nx "+to_string(Nx)+"u"
 	"\n	#define def_Ny "+to_string(Ny)+"u"
 	"\n	#define def_Nz "+to_string(Nz)+"u"
@@ -532,6 +555,19 @@ string LBM_Domain::device_defines() const { return
 	"\n	#define def_Ox "+to_string(Ox)+""
 	"\n	#define def_Oy "+to_string(Oy)+""
 	"\n	#define def_Oz "+to_string(Oz)+""
+	"\n	#define def_Nx_global "+to_string(Nx_global)+"u"
+	"\n	#define def_Ny_global "+to_string(Ny_global)+"u"
+	"\n	#define def_Nz_global "+to_string(Nz_global)+"u"
+	"\n	#define def_west_local_x "+to_string(west_local_x)+""
+	"\n	#define def_east_local_x "+to_string(east_local_x)+""
+	"\n	#define def_south_local_y "+to_string(south_local_y)+""
+	"\n	#define def_north_local_y "+to_string(north_local_y)+""
+	"\n	#define def_top_local_z "+to_string(top_local_z)+""
+	"\n	#define def_has_west_face "+to_string(has_west_face)+""
+	"\n	#define def_has_east_face "+to_string(has_east_face)+""
+	"\n	#define def_has_south_face "+to_string(has_south_face)+""
+	"\n	#define def_has_north_face "+to_string(has_north_face)+""
+	"\n	#define def_has_top_face "+to_string(has_top_face)+""
 
 	"\n	#define def_Ax "+to_string(Ny*Nz)+"u"
 	"\n	#define def_Ay "+to_string(Nz*Nx)+"u"
@@ -649,6 +685,19 @@ string LBM_Domain::device_defines() const { return
 	"\n\t#define def_Omegay " + to_string(coriolis_Omegay_lbmu) + "f"
 	"\n\t#define def_Omegaz " + to_string(coriolis_Omegaz_lbmu) + "f"
 	"\n\t#define def_coriolis_f " + to_string(coriolis_f_lbmu) + "f"
+	"\n\t#define def_downstream_face " + to_string(buffer_downstream_face_id) + ""
+	+ (buffer_nudging_active
+		? "\n\t#define BUFFER_NUDGING"
+		  "\n\t#define def_buffer_N " + to_string(buffer_n_cells) + "u"
+		  "\n\t#define def_buffer_inv_tau " + to_string(buffer_inv_tau_lbmu) + "f"
+		  "\n\t#define def_buffer_nudge_vertical " + to_string(buffer_nudge_vertical) + ""
+		: string(""))
+	+ (top_sponge_active
+		? "\n\t#define TOP_SPONGE"
+		  "\n\t#define def_sponge_N " + to_string(sponge_n_cells) + "u"
+		  "\n\t#define def_sponge_inv_tau " + to_string(sponge_inv_tau_lbmu) + "f"
+		  "\n\t#define def_sponge_ref_mode " + to_string(sponge_ref_mode) + ""
+		: string(""))
 ;}
 
 string LBM_Domain::full_opencl_c_code() const {
