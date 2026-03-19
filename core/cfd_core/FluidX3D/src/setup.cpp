@@ -820,6 +820,463 @@ struct SamplePoint {
 struct ProfileSample { float z; float u; };
 struct DemCsvPoint { float x; float y; float elevation; };
 
+enum class ProbeOffsetMode {
+    NONE = 0,
+    GRID_CELLS = 1,
+    METERS = 2
+};
+
+struct ProbeOffset {
+    ProbeOffsetMode mode = ProbeOffsetMode::NONE;
+    int north_cells = 0;
+    int east_cells = 0;
+    double north_m = 0.0;
+    double east_m = 0.0;
+    std::string label;
+};
+
+struct ProbeRequest {
+    std::string raw_token;
+    double lon_deg = 0.0;
+    double lat_deg = 0.0;
+    bool uses_center = false;
+    ProbeOffset offset;
+};
+
+struct ProbeGeoMapping {
+    bool valid = false;
+    int utm_zone = 0;
+    bool utm_north = true;
+    double rotate_deg = 0.0;
+    double pivot_x = 0.0;
+    double pivot_y = 0.0;
+    double x_min_rot = 0.0;
+    double y_min_rot = 0.0;
+    double center_lon_deg = 0.0;
+    double center_lat_deg = 0.0;
+    double east_dx = 1.0;
+    double east_dy = 0.0;
+    double north_dx = 0.0;
+    double north_dy = 1.0;
+};
+
+struct ResolvedProbe {
+    ProbeRequest request;
+    std::string file_stem;
+    std::string label;
+    uint x = 0u;
+    uint y = 0u;
+    double snapped_x_si = 0.0;
+    double snapped_y_si = 0.0;
+    std::vector<uint> z_indices;
+    std::vector<float> heights_si;
+    std::vector<double> times_si;
+    std::vector<float> velocity_series_si; // [time][level][uvw]
+};
+
+static std::string to_lower_ascii(std::string s) {
+    for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+    return s;
+}
+
+static std::string to_upper_ascii(std::string s) {
+    for (char& ch : s) ch = (char)std::toupper((unsigned char)ch);
+    return s;
+}
+
+static std::string strip_all_whitespace(std::string s) {
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), s.end());
+    return s;
+}
+
+static std::string trim_trailing_decimal_zeros(std::string s) {
+    const size_t dot = s.find('.');
+    if (dot == std::string::npos) return s;
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    if (s.empty()) return std::string("0");
+    return s;
+}
+
+static std::string format_decimal_trimmed(const double value, const int precision = 6) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    return trim_trailing_decimal_zeros(oss.str());
+}
+
+static std::string sanitize_filename_component(std::string s) {
+    for (char& ch : s) {
+        const bool ok =
+            (ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            ch == '_' || ch == '-' || ch == '.';
+        if (!ok) ch = '_';
+    }
+    while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+    return s.empty() ? std::string("probe") : s;
+}
+
+static int auto_utm_zone_from_lon(const double lon_deg) {
+    int zone = (int)std::floor((lon_deg + 180.0) / 6.0) + 1;
+    if (zone < 1) zone = 1;
+    if (zone > 60) zone = 60;
+    return zone;
+}
+
+static bool parse_utm_zone_from_crs(const std::string& utm_crs, int& zone, bool& north) {
+    std::string s = trim(utm_crs);
+    if (s.empty()) return false;
+    std::string digits;
+    for (char ch : s) {
+        if (ch >= '0' && ch <= '9') digits.push_back(ch);
+    }
+    if (digits.empty()) return false;
+    const int code = atoi(digits.c_str());
+    if (code >= 32601 && code <= 32660) {
+        zone = code - 32600;
+        north = true;
+        return true;
+    }
+    if (code >= 32701 && code <= 32760) {
+        zone = code - 32700;
+        north = false;
+        return true;
+    }
+    return false;
+}
+
+static bool lonlat_to_utm_wgs84(const double lon_deg, const double lat_deg,
+                                const int zone, const bool north_hemisphere,
+                                double& x_utm, double& y_utm) {
+    if (!(zone >= 1 && zone <= 60)) return false;
+    if (!std::isfinite(lon_deg) || !std::isfinite(lat_deg)) return false;
+    if (lat_deg <= -90.0 || lat_deg >= 90.0) return false;
+
+    constexpr double kPi = 3.1415926535897932384626433832795;
+    constexpr double a = 6378137.0;
+    constexpr double f = 1.0 / 298.257223563;
+    constexpr double k0 = 0.9996;
+    constexpr double false_easting = 500000.0;
+    constexpr double false_northing = 10000000.0;
+    const double e2 = f * (2.0 - f);
+    const double ep2 = e2 / (1.0 - e2);
+
+    const double phi = lat_deg * (kPi / 180.0);
+    const double lambda = lon_deg * (kPi / 180.0);
+    const double lambda0 = ((double)zone * 6.0 - 183.0) * (kPi / 180.0);
+
+    const double sin_phi = std::sin(phi);
+    const double cos_phi = std::cos(phi);
+    const double tan_phi = std::tan(phi);
+
+    const double N = a / std::sqrt(1.0 - e2 * sin_phi * sin_phi);
+    const double T = tan_phi * tan_phi;
+    const double C = ep2 * cos_phi * cos_phi;
+    const double A = cos_phi * (lambda - lambda0);
+
+    const double M =
+        a * ((1.0 - e2 / 4.0 - 3.0 * e2 * e2 / 64.0 - 5.0 * e2 * e2 * e2 / 256.0) * phi
+           - (3.0 * e2 / 8.0 + 3.0 * e2 * e2 / 32.0 + 45.0 * e2 * e2 * e2 / 1024.0) * std::sin(2.0 * phi)
+           + (15.0 * e2 * e2 / 256.0 + 45.0 * e2 * e2 * e2 / 1024.0) * std::sin(4.0 * phi)
+           - (35.0 * e2 * e2 * e2 / 3072.0) * std::sin(6.0 * phi));
+
+    x_utm = false_easting + k0 * N * (
+        A
+        + (1.0 - T + C) * A * A * A / 6.0
+        + (5.0 - 18.0 * T + T * T + 72.0 * C - 58.0 * ep2) * A * A * A * A * A / 120.0);
+
+    y_utm = k0 * (
+        M
+        + N * tan_phi * (
+            A * A / 2.0
+            + (5.0 - T + 9.0 * C + 4.0 * C * C) * A * A * A * A / 24.0
+            + (61.0 - 58.0 * T + T * T + 600.0 * C - 330.0 * ep2) * A * A * A * A * A * A / 720.0));
+
+    if (!north_hemisphere) y_utm += false_northing;
+    return std::isfinite(x_utm) && std::isfinite(y_utm);
+}
+
+static void rotate_xy(const double x, const double y, const double deg,
+                      const double cx, const double cy,
+                      double& xr, double& yr) {
+    const double th = deg * (3.1415926535897932384626433832795 / 180.0);
+    const double c = std::cos(th);
+    const double s = std::sin(th);
+    const double dx = x - cx;
+    const double dy = y - cy;
+    xr = c * dx - s * dy + cx;
+    yr = s * dx + c * dy + cy;
+}
+
+static ProbeGeoMapping build_probe_geo_mapping(const float cut_lon_min_deg,
+                                               const float cut_lon_max_deg,
+                                               const float cut_lat_min_deg,
+                                               const float cut_lat_max_deg,
+                                               const std::string& utm_crs,
+                                               const bool has_rotate_deg,
+                                               const double rotate_deg_override) {
+    ProbeGeoMapping mapping;
+    if (!std::isfinite(cut_lon_min_deg) || !std::isfinite(cut_lon_max_deg) ||
+        !std::isfinite(cut_lat_min_deg) || !std::isfinite(cut_lat_max_deg)) {
+        return mapping;
+    }
+    const double lon_lo = std::min((double)cut_lon_min_deg, (double)cut_lon_max_deg);
+    const double lon_hi = std::max((double)cut_lon_min_deg, (double)cut_lon_max_deg);
+    const double lat_lo = std::min((double)cut_lat_min_deg, (double)cut_lat_max_deg);
+    const double lat_hi = std::max((double)cut_lat_min_deg, (double)cut_lat_max_deg);
+    if (!(lon_hi > lon_lo) || !(lat_hi > lat_lo)) return mapping;
+
+    int utm_zone = 0;
+    bool utm_north = true;
+    if (!parse_utm_zone_from_crs(utm_crs, utm_zone, utm_north)) {
+        utm_zone = auto_utm_zone_from_lon(0.5 * (lon_lo + lon_hi));
+        utm_north = (0.5 * (lat_lo + lat_hi)) >= 0.0;
+    }
+
+    double x00 = 0.0, y00 = 0.0;
+    double x10 = 0.0, y10 = 0.0;
+    double x11 = 0.0, y11 = 0.0;
+    double x01 = 0.0, y01 = 0.0;
+    if (!lonlat_to_utm_wgs84(lon_lo, lat_lo, utm_zone, utm_north, x00, y00) ||
+        !lonlat_to_utm_wgs84(lon_hi, lat_lo, utm_zone, utm_north, x10, y10) ||
+        !lonlat_to_utm_wgs84(lon_hi, lat_hi, utm_zone, utm_north, x11, y11) ||
+        !lonlat_to_utm_wgs84(lon_lo, lat_hi, utm_zone, utm_north, x01, y01)) {
+        return mapping;
+    }
+
+    const double cx = 0.25 * (x00 + x10 + x11 + x01);
+    const double cy = 0.25 * (y00 + y10 + y11 + y01);
+    const double rotate_deg = has_rotate_deg
+        ? rotate_deg_override
+        : (-std::atan2(y10 - y00, x10 - x00) * 180.0 / 3.1415926535897932384626433832795);
+
+    double xr00 = 0.0, yr00 = 0.0;
+    double xr10 = 0.0, yr10 = 0.0;
+    double xr11 = 0.0, yr11 = 0.0;
+    double xr01 = 0.0, yr01 = 0.0;
+    rotate_xy(x00, y00, rotate_deg, cx, cy, xr00, yr00);
+    rotate_xy(x10, y10, rotate_deg, cx, cy, xr10, yr10);
+    rotate_xy(x11, y11, rotate_deg, cx, cy, xr11, yr11);
+    rotate_xy(x01, y01, rotate_deg, cx, cy, xr01, yr01);
+
+    const double th = rotate_deg * (3.1415926535897932384626433832795 / 180.0);
+    mapping.valid = true;
+    mapping.utm_zone = utm_zone;
+    mapping.utm_north = utm_north;
+    mapping.rotate_deg = rotate_deg;
+    mapping.pivot_x = cx;
+    mapping.pivot_y = cy;
+    mapping.x_min_rot = std::min(std::min(xr00, xr10), std::min(xr11, xr01));
+    mapping.y_min_rot = std::min(std::min(yr00, yr10), std::min(yr11, yr01));
+    mapping.center_lon_deg = 0.5 * (lon_lo + lon_hi);
+    mapping.center_lat_deg = 0.5 * (lat_lo + lat_hi);
+    mapping.east_dx = std::cos(th);
+    mapping.east_dy = std::sin(th);
+    mapping.north_dx = -std::sin(th);
+    mapping.north_dy = std::cos(th);
+    return mapping;
+}
+
+static bool project_probe_local_xy(const double lon_deg, const double lat_deg,
+                                   const ProbeGeoMapping& mapping,
+                                   double& x_local_si, double& y_local_si) {
+    if (!mapping.valid) return false;
+    double x_utm = 0.0, y_utm = 0.0;
+    if (!lonlat_to_utm_wgs84(lon_deg, lat_deg, mapping.utm_zone, mapping.utm_north, x_utm, y_utm)) {
+        return false;
+    }
+    double x_rot = 0.0, y_rot = 0.0;
+    rotate_xy(x_utm, y_utm, mapping.rotate_deg, mapping.pivot_x, mapping.pivot_y, x_rot, y_rot);
+    x_local_si = x_rot - mapping.x_min_rot;
+    y_local_si = y_rot - mapping.y_min_rot;
+    return std::isfinite(x_local_si) && std::isfinite(y_local_si);
+}
+
+static std::vector<std::string> split_probe_tokens(const std::string& raw) {
+    std::string s = trim(raw);
+    const size_t lb = s.find('[');
+    const size_t rb = s.rfind(']');
+    if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+        s = s.substr(lb + 1u, rb - lb - 1u);
+    }
+
+    std::vector<std::string> out;
+    std::string token;
+    char quote = '\0';
+    for (char ch : s) {
+        if (quote != '\0') {
+            token.push_back(ch);
+            if (ch == quote) quote = '\0';
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+            token.push_back(ch);
+            continue;
+        }
+        if (ch == ',') {
+            const std::string t = trim(token);
+            if (!t.empty()) out.push_back(t);
+            token.clear();
+            continue;
+        }
+        token.push_back(ch);
+    }
+    const std::string tail = trim(token);
+    if (!tail.empty()) out.push_back(tail);
+    return out;
+}
+
+static bool parse_probe_offset(const std::string& raw_offset, ProbeOffset& offset, std::string& error) {
+    offset = ProbeOffset{};
+    std::string s = strip_all_whitespace(raw_offset);
+    if (s.empty()) return true;
+    s = to_upper_ascii(s);
+    const bool has_digit = std::any_of(s.begin(), s.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+    offset.label = s;
+    if (!has_digit) {
+        offset.mode = ProbeOffsetMode::GRID_CELLS;
+        for (char ch : s) {
+            if (ch == 'N') offset.north_cells += 1;
+            else if (ch == 'S') offset.north_cells -= 1;
+            else if (ch == 'E') offset.east_cells += 1;
+            else if (ch == 'W') offset.east_cells -= 1;
+            else {
+                error = "grid offset can only contain N/S/E/W";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    offset.mode = ProbeOffsetMode::METERS;
+    size_t i = 0u;
+    while (i < s.size()) {
+        const char dir = s[i];
+        if (!(dir == 'N' || dir == 'S' || dir == 'E' || dir == 'W')) {
+            error = "meter offset must use N/S/E/W followed by a number";
+            return false;
+        }
+        i++;
+        char* endptr = nullptr;
+        const double value = std::strtod(s.c_str() + i, &endptr);
+        if (endptr == s.c_str() + i || !std::isfinite(value)) {
+            error = "meter offset is missing a numeric value after direction";
+            return false;
+        }
+        if (value < 0.0) {
+            error = "meter offset cannot be negative";
+            return false;
+        }
+        if (dir == 'N') offset.north_m += value;
+        else if (dir == 'S') offset.north_m -= value;
+        else if (dir == 'E') offset.east_m += value;
+        else if (dir == 'W') offset.east_m -= value;
+        i = (size_t)(endptr - s.c_str());
+    }
+    return true;
+}
+
+static bool parse_probe_request(const std::string& raw_token, ProbeRequest& request, std::string& error) {
+    request = ProbeRequest{};
+    request.raw_token = trim(raw_token);
+    std::string token = request.raw_token;
+    if (token.empty()) {
+        error = "empty probe token";
+        return false;
+    }
+
+    auto parse_center_token = [&](const std::string& word, const std::string& raw_offset) -> bool {
+        const std::string key = to_lower_ascii(trim(word));
+        if (key != "center" && key != "centre") return false;
+        request.uses_center = true;
+        return parse_probe_offset(raw_offset, request.offset, error);
+    };
+
+    if (token.front() == '"' || token.front() == '\'') {
+        const char quote = token.front();
+        const size_t close = token.find(quote, 1u);
+        if (close == std::string::npos) {
+            error = "quoted probe token is missing the closing quote";
+            return false;
+        }
+        const std::string inner = token.substr(1u, close - 1u);
+        const std::string rest = trim(token.substr(close + 1u));
+        if (!parse_center_token(inner, rest)) {
+            if (error.empty()) error = "quoted probe token only supports center/centre";
+            return false;
+        }
+        return true;
+    }
+
+    {
+        const std::string token_lc = to_lower_ascii(token);
+        const std::string k_center = "center";
+        const std::string k_centre = "centre";
+        if (begins_with(token_lc, k_center)) {
+            const std::string rest = trim(token.substr(k_center.size()));
+            return parse_center_token(k_center, rest);
+        }
+        if (begins_with(token_lc, k_centre)) {
+            const std::string rest = trim(token.substr(k_centre.size()));
+            return parse_center_token(k_centre, rest);
+        }
+    }
+
+    const size_t colon = token.find(':');
+    if (colon == std::string::npos) {
+        error = "probe must be lon:lat, center, or centre";
+        return false;
+    }
+
+    const std::string lon_text = trim(token.substr(0u, colon));
+    const std::string lat_and_offset = trim(token.substr(colon + 1u));
+    if (lon_text.empty() || lat_and_offset.empty()) {
+        error = "probe lon:lat is incomplete";
+        return false;
+    }
+
+    char* lon_end = nullptr;
+    const double lon_deg = std::strtod(lon_text.c_str(), &lon_end);
+    if (lon_end == lon_text.c_str() || *lon_end != '\0' || !std::isfinite(lon_deg)) {
+        error = "invalid probe longitude";
+        return false;
+    }
+
+    char* lat_end = nullptr;
+    const double lat_deg = std::strtod(lat_and_offset.c_str(), &lat_end);
+    if (lat_end == lat_and_offset.c_str() || !std::isfinite(lat_deg)) {
+        error = "invalid probe latitude";
+        return false;
+    }
+
+    request.lon_deg = lon_deg;
+    request.lat_deg = lat_deg;
+    return parse_probe_offset(trim(lat_and_offset.substr((size_t)(lat_end - lat_and_offset.c_str()))), request.offset, error);
+}
+
+static uint snap_probe_index(const double coord_si, const uint n_cells, const float cell_m) {
+    if (n_cells == 0u || !(cell_m > 0.0f)) return 0u;
+    const long idx = (long)std::llround(coord_si / (double)cell_m);
+    if (idx <= 0l) return 0u;
+    if ((ulong)idx >= (ulong)n_cells) return n_cells - 1u;
+    return (uint)idx;
+}
+
+static std::string make_probe_file_stem(const ProbeRequest& request,
+                                        const ProbeGeoMapping& mapping,
+                                        const std::string& prefix) {
+    const double lon_deg = request.uses_center ? mapping.center_lon_deg : request.lon_deg;
+    const double lat_deg = request.uses_center ? mapping.center_lat_deg : request.lat_deg;
+    std::string stem = format_decimal_trimmed(lon_deg) + "_" + format_decimal_trimmed(lat_deg);
+    if (!request.offset.label.empty()) stem += "_" + sanitize_filename_component(request.offset.label);
+    if (!prefix.empty()) stem = sanitize_filename_component(prefix) + stem;
+    return sanitize_filename_component(stem);
+}
+
 class GroundTemperaturePlane2D {
 public:
     void build_from_patch0_samples(const std::vector<SamplePoint>& samples, const float default_T) {
@@ -1937,6 +2394,13 @@ void main_setup() {
     bool datetime_from_config = false;
     bool has_cut_lon_manual = false;
     bool has_cut_lat_manual = false;
+    bool has_rotate_deg = false;
+    double rotate_deg_from_config = 0.0;
+    std::string utm_crs_from_config;
+    bool probes_defined = false;
+    std::string probes_raw_text;
+    bool probes_output_defined = false;
+    uint probes_output_steps = 0u;
 
     // ---------------------- read *.luw / *.luwdg ------------------------------
     std::string parent; // project directory that contains the configure file
@@ -2179,6 +2643,15 @@ void main_setup() {
                 else if (key == "cell_size")    cell_size_val = unquote(val);
                 else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
                 else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "probes_output") {
+                    const int v = atoi(unquote(val).c_str());
+                    probes_output_defined = true;
+                    if (v > 0) probes_output_steps = (uint)v;
+                    else {
+                        probes_output_steps = 0u;
+                        println("| WARNING: probes_output must be > 0 to take effect. Fallback to legacy window.|");
+                    }
+                }
                 else if (key == "unsteady_output") {
                     const int v = atoi(unquote(val).c_str());
                     unsteady_output_interval = v > 0 ? static_cast<uint>(v) : 0u;
@@ -2227,6 +2700,10 @@ void main_setup() {
                     }
                 }
                 else if (key == "validation") validation_status = unquote(val);
+                else if (key == "probes") {
+                    probes_defined = true;
+                    probes_raw_text = trim(val);
+                }
                 else if (key == "coriolis_term") {
                     std::string v = unquote(val);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
@@ -2324,6 +2801,18 @@ void main_setup() {
                     parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
                     has_cut_lat_manual = true;
                 }
+                else if (key == "utm_crs") {
+                    utm_crs_from_config = unquote(val);
+                }
+                else if (key == "rotate_deg") {
+                    const std::string raw = unquote(val);
+                    char* endptr = nullptr;
+                    const double parsed = std::strtod(raw.c_str(), &endptr);
+                    if (endptr != raw.c_str() && std::isfinite(parsed)) {
+                        rotate_deg_from_config = parsed;
+                        has_rotate_deg = true;
+                    }
+                }
                 else if (key == "inflow") parse_float_list(val, inflow_list);
                 else if (key == "angle") parse_float_list(val, angle_list);
 
@@ -2417,6 +2906,38 @@ void main_setup() {
         }
     }
 
+    std::vector<ProbeRequest> probe_requests;
+    ProbeGeoMapping probe_geo_mapping;
+    if (probes_defined) {
+        const std::vector<std::string> probe_tokens = split_probe_tokens(probes_raw_text);
+        for (const std::string& token : probe_tokens) {
+            ProbeRequest request;
+            std::string error;
+            if (!parse_probe_request(token, request, error)) {
+                println("| WARNING: ignore probe token '" + token + "': " + error + "                        |");
+                continue;
+            }
+            probe_requests.push_back(request);
+        }
+        if (probe_requests.empty()) {
+            println("| WARNING: probes is defined but no valid probe token was parsed.                |");
+        }
+        else if (!(has_cut_lon_manual && has_cut_lat_manual)) {
+            println("| WARNING: probes requires cut_lon_manual/cut_lat_manual for lon-lat mapping.    |");
+        }
+        else {
+            probe_geo_mapping = build_probe_geo_mapping(
+                cut_lon_min_deg, cut_lon_max_deg,
+                cut_lat_min_deg, cut_lat_max_deg,
+                utm_crs_from_config,
+                has_rotate_deg,
+                rotate_deg_from_config);
+            if (!probe_geo_mapping.valid) {
+                println("| WARNING: failed to build probes geographic mapping. Probes are disabled.       |");
+            }
+        }
+    }
+
     if (profile_generation && !datetime_from_config) {
         println("| Profile mode    | datetime not set in *.luwpf, use fallback " + datetime + " |");
     }
@@ -2489,6 +3010,28 @@ void main_setup() {
     println("| Purge Avg Stride | " + alignr(57u, purge_avg_steps > 0u ? ("every " + to_string((ulong)purge_avg_stride) + " step(s)") : string("n/a")) + " |");
     println("| Avg Turb Output | " + alignr(57u, avg_turbulence_output_desc()) + " |");
     println("| Unsteady U VTK | " + alignr(57u, unsteady_output_interval > 0u ? ("every " + to_string((ulong)unsteady_output_interval) + " step(s)") : string("off")) + " |");
+    {
+        std::string probes_desc = "off";
+        if (!probe_requests.empty()) {
+            probes_desc = to_string((ulong)probe_requests.size()) + " request(s)";
+            if (!probe_geo_mapping.valid) probes_desc += " (mapping unavailable)";
+        }
+        println("| Probes         | " + alignr(57u, probes_desc) + " |");
+        std::string probe_window_desc = "n/a";
+        if (!probe_requests.empty()) {
+            if (probes_output_defined && probes_output_steps > 0u) {
+                probe_window_desc = "last " + to_string((ulong)probes_output_steps) + " step(s) via probes_output";
+            }
+            else if (purge_avg_steps > 0u || research_output_steps > 0u) {
+                const ulong fallback_steps = (ulong)std::max(purge_avg_steps, research_output_steps);
+                probe_window_desc = "fallback last " + to_string(fallback_steps) + " step(s)";
+            }
+            else {
+                probe_window_desc = "entire simulation";
+            }
+        }
+        println("| Probes Window  | " + alignr(57u, probe_window_desc) + " |");
+    }
     println("| Buoyancy Switch | " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
     println("| VK inlet switch | " + alignr(57u, vk_inlet_settings.enable ? string("true") : string("false")) + " |");
     if (vk_inlet_settings.enable) {
@@ -3084,7 +3627,8 @@ void main_setup() {
             }
         };
 
-        const std::string vtk_dir = parent + "/proj_temp/vtk/" + vtk_prefix + datetime + "_raw_";
+        const std::string results_vtk_dir = parent + "/RESULTS/vtk/";
+        const std::string vtk_dir = results_vtk_dir + vtk_prefix + datetime + "_raw_";
         const std::string snapshots_dir = parent + "/proj_temp/snapshots";
         std::filesystem::create_directories(std::filesystem::path(vtk_dir).parent_path());
         std::filesystem::create_directories(snapshots_dir);
@@ -3151,6 +3695,133 @@ void main_setup() {
             M2_v.assign((size_t)Ncells, 0.0f);
             M2_w.assign((size_t)Ncells, 0.0f);
         }
+        const double dt_si = (double)cell_m * ((double)lbm_ref_u / (double)si_ref_u);
+        const ulong probe_window = probe_requests.empty()
+            ? 0ull
+            : (probes_output_defined && probes_output_steps > 0u
+                ? std::min((ulong)probes_output_steps, total_steps)
+                : ((purge_avg_steps > 0u || research_output_steps > 0u)
+                    ? std::min((ulong)std::max(purge_avg_steps, research_output_steps), total_steps)
+                    : total_steps));
+        const ulong probe_start_t = probe_window > 0ull ? (total_steps - probe_window + 1ull) : max_ulong;
+        std::vector<ResolvedProbe> resolved_probes;
+        if (!probe_requests.empty()) {
+            if (!probe_geo_mapping.valid) {
+                print_kv_row("Probes", "disabled: geographic mapping is unavailable");
+            }
+            else {
+                const auto is_inside_domain = [&](const double x_si, const double y_si) -> bool {
+                    return std::isfinite(x_si) && std::isfinite(y_si) &&
+                        x_si >= 0.0 && x_si <= (double)si_size.x &&
+                        y_si >= 0.0 && y_si <= (double)si_size.y;
+                };
+                const auto resolve_probe = [&](const ProbeRequest& request, ResolvedProbe& probe, std::string& warning) -> bool {
+                    const double base_lon = request.uses_center ? probe_geo_mapping.center_lon_deg : request.lon_deg;
+                    const double base_lat = request.uses_center ? probe_geo_mapping.center_lat_deg : request.lat_deg;
+                    double base_x_si = 0.0, base_y_si = 0.0;
+                    if (!project_probe_local_xy(base_lon, base_lat, probe_geo_mapping, base_x_si, base_y_si)) {
+                        warning = "projection failed";
+                        return false;
+                    }
+                    if (!is_inside_domain(base_x_si, base_y_si)) {
+                        warning = "base point is outside CFD domain";
+                        return false;
+                    }
+
+                    double final_x_si = base_x_si;
+                    double final_y_si = base_y_si;
+                    if (request.offset.mode == ProbeOffsetMode::GRID_CELLS) {
+                        const uint base_x = snap_probe_index(base_x_si, lbm.get_Nx(), cell_m);
+                        const uint base_y = snap_probe_index(base_y_si, lbm.get_Ny(), cell_m);
+                        final_x_si = (double)base_x * (double)cell_m
+                            + (double)request.offset.east_cells * (double)cell_m * probe_geo_mapping.east_dx
+                            + (double)request.offset.north_cells * (double)cell_m * probe_geo_mapping.north_dx;
+                        final_y_si = (double)base_y * (double)cell_m
+                            + (double)request.offset.east_cells * (double)cell_m * probe_geo_mapping.east_dy
+                            + (double)request.offset.north_cells * (double)cell_m * probe_geo_mapping.north_dy;
+                    }
+                    else if (request.offset.mode == ProbeOffsetMode::METERS) {
+                        final_x_si = base_x_si
+                            + request.offset.east_m * probe_geo_mapping.east_dx
+                            + request.offset.north_m * probe_geo_mapping.north_dx;
+                        final_y_si = base_y_si
+                            + request.offset.east_m * probe_geo_mapping.east_dy
+                            + request.offset.north_m * probe_geo_mapping.north_dy;
+                    }
+
+                    if (!is_inside_domain(final_x_si, final_y_si)) {
+                        warning = "offset point is outside CFD domain";
+                        return false;
+                    }
+
+                    probe = ResolvedProbe{};
+                    probe.request = request;
+                    probe.x = snap_probe_index(final_x_si, lbm.get_Nx(), cell_m);
+                    probe.y = snap_probe_index(final_y_si, lbm.get_Ny(), cell_m);
+                    probe.snapped_x_si = (double)probe.x * (double)cell_m;
+                    probe.snapped_y_si = (double)probe.y * (double)cell_m;
+                    probe.label = request.raw_token;
+
+                    for (uint z = 0u; z < lbm.get_Nz(); ++z) {
+                        const ulong n = lbm.index(probe.x, probe.y, z);
+                        if ((lbm.flags[n] & TYPE_S) != 0u) continue;
+                        probe.z_indices.push_back(z);
+                    }
+                    if (probe.z_indices.empty()) {
+                        warning = "resolved column has no fluid cell";
+                        return false;
+                    }
+
+                    const uint z0 = probe.z_indices.front();
+                    probe.heights_si.reserve(probe.z_indices.size());
+                    for (const uint z : probe.z_indices) {
+                        probe.heights_si.push_back((float)(((double)z - (double)z0 + 0.5) * (double)cell_m));
+                    }
+                    probe.times_si.reserve((size_t)probe_window);
+                    probe.velocity_series_si.reserve((size_t)probe_window * probe.z_indices.size() * 3ull);
+                    return true;
+                };
+
+                std::vector<std::string> used_stems;
+                for (const ProbeRequest& request : probe_requests) {
+                    ResolvedProbe probe;
+                    std::string warning;
+                    if (!resolve_probe(request, probe, warning)) {
+                        println("| WARNING: probe '" + request.raw_token + "' ignored: " + warning + "                |");
+                        continue;
+                    }
+                    std::string stem = make_probe_file_stem(request, probe_geo_mapping, vtk_prefix);
+                    if (contains(used_stems, stem)) {
+                        uint suffix = 2u;
+                        std::string unique_stem = stem;
+                        while (contains(used_stems, unique_stem)) {
+                            unique_stem = stem + "_" + to_string((ulong)suffix++);
+                        }
+                        stem = unique_stem;
+                    }
+                    used_stems.push_back(stem);
+                    probe.file_stem = stem;
+                    resolved_probes.push_back(std::move(probe));
+                }
+
+                if (resolved_probes.empty()) {
+                    print_kv_row("Probes", "0 valid probe column after geometry/domain checks");
+                }
+                else {
+                    const std::string window_desc = probe_window >= total_steps
+                        ? "entire run"
+                        : ("last " + to_string(probe_window) + " step(s)");
+                    print_kv_row("Probes", to_string((ulong)resolved_probes.size()) + " active, " + window_desc);
+                    bool first_probe_row = true;
+                    for (const ResolvedProbe& probe : resolved_probes) {
+                        print_kv_row(first_probe_row ? "Probe cell" : "",
+                            probe.file_stem + " -> (" + to_string((ulong)probe.x) + "," + to_string((ulong)probe.y) +
+                            "), levels=" + to_string((ulong)probe.z_indices.size()));
+                        first_probe_row = false;
+                    }
+                }
+            }
+        }
         auto print_runtime_kv = [&](const string& key, const string& value) {
             {
                 std::lock_guard<std::mutex> lock(info.allow_printing);
@@ -3181,6 +3852,20 @@ void main_setup() {
             }
             for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->finish_queue();
         };
+        auto enqueue_read_u_only = [&]() {
+#ifndef UPDATE_FIELDS
+            for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->enqueue_update_fields();
+#endif
+            for (uint d = 0u; d < lbm.get_D(); ++d) {
+                lbm.lbm_domain[d]->u.enqueue_read_from_device();
+            }
+            for (uint d = 0u; d < lbm.get_D(); ++d) lbm.lbm_domain[d]->finish_queue();
+        };
+        ulong last_u_host_t = max_ulong;
+        ulong last_rho_host_t = max_ulong;
+#ifdef TEMPERATURE
+        ulong last_T_host_t = max_ulong;
+#endif
 
         auto accumulate_from_buffers = [&]() {
             ++avg_count;
@@ -3231,12 +3916,57 @@ void main_setup() {
             });
         };
 
-        auto maybe_accumulate_avg = [&]() {
-            if (avg_window == 0ull) return;
-            if (lbm.get_t() < avg_start_t) return;
-            if (((lbm.get_t() - avg_start_t) % avg_stride) != 0ull) return;
-            enqueue_read_u_rho();
-            accumulate_from_buffers();
+        auto should_accumulate_avg = [&]() -> bool {
+            if (avg_window == 0ull) return false;
+            if (lbm.get_t() < avg_start_t) return false;
+            return ((lbm.get_t() - avg_start_t) % avg_stride) == 0ull;
+        };
+        auto should_sample_probes = [&]() -> bool {
+            return !resolved_probes.empty() && lbm.get_t() >= probe_start_t;
+        };
+        auto capture_probe_sample = [&]() {
+            const double time_si = (double)lbm.get_t() * dt_si;
+            for (ResolvedProbe& probe : resolved_probes) {
+                probe.times_si.push_back(time_si);
+                for (const uint z : probe.z_indices) {
+                    const ulong n = lbm.index(probe.x, probe.y, z);
+                    probe.velocity_series_si.push_back(units.si_u(lbm.u.x[n]));
+                    probe.velocity_series_si.push_back(units.si_u(lbm.u.y[n]));
+                    probe.velocity_series_si.push_back(units.si_u(lbm.u.z[n]));
+                }
+            }
+        };
+        auto process_post_step_samples = [&]() {
+            const bool want_avg = should_accumulate_avg();
+            const bool want_probe = should_sample_probes();
+            if (!want_avg && !want_probe) return;
+            const ulong t_now = lbm.get_t();
+
+            if (want_avg) {
+                const bool need_T = include_temperature_avg;
+                const bool have_rho = (last_rho_host_t == t_now);
+#ifdef TEMPERATURE
+                const bool have_T = !need_T || (last_T_host_t == t_now);
+#else
+                const bool have_T = true;
+#endif
+                if (last_u_host_t != t_now || !have_rho || !have_T) {
+                    enqueue_read_u_rho();
+                    last_u_host_t = t_now;
+                    last_rho_host_t = t_now;
+#ifdef TEMPERATURE
+                    if (need_T) last_T_host_t = t_now;
+#endif
+                }
+                accumulate_from_buffers();
+            }
+            if (want_probe) {
+                if (last_u_host_t != t_now) {
+                    enqueue_read_u_only();
+                    last_u_host_t = t_now;
+                }
+                capture_probe_sample();
+            }
         };
         auto is_avg_phase = [&]() -> bool {
             return avg_window > 0ull && lbm.get_t() >= avg_start_t;
@@ -3309,6 +4039,7 @@ void main_setup() {
             if (t == 0ull || (t % unsteady_interval) != 0ull) return;
             push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", t));
             lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            last_u_host_t = t;
             last_unsteady_u_vtk_t = t;
             flush_vtk_saved_files();
         };
@@ -3324,7 +4055,7 @@ void main_setup() {
                 flags_host[(size_t)n] = lbm.flags[n];
             });
             const std::string avg_name = vtk_prefix + datetime + "_avg";
-            const std::string avg_file = default_filename(parent + "/proj_temp/vtk/", avg_name, ".vtk", lbm.get_t());
+            const std::string avg_file = default_filename(results_vtk_dir, avg_name, ".vtk", lbm.get_t());
 #ifdef TEMPERATURE
             const float* T_avg_ptr = include_temperature_avg ? avg_T.data() : nullptr;
 #else
@@ -3337,6 +4068,43 @@ void main_setup() {
             push_vtk_saved_file(avg_file);
             flush_vtk_saved_files();
             print_kv_row("Avg samples", to_string(avg_count));
+        };
+        auto finalize_probes = [&]() {
+            if (resolved_probes.empty()) return;
+            const std::filesystem::path results_dir = std::filesystem::path(parent) / "RESULTS";
+            std::filesystem::create_directories(results_dir);
+            ulong written_files = 0ull;
+            for (const ResolvedProbe& probe : resolved_probes) {
+                const std::filesystem::path out_path = results_dir / (probe.file_stem + ".csv");
+                std::ofstream fout(out_path.string(), std::ios::out | std::ios::trunc);
+                if (!fout.is_open()) {
+                    print_runtime_kv("Probe output", "failed to open " + out_path.string());
+                    continue;
+                }
+
+                fout << "height (m)";
+                for (const double time_si : probe.times_si) {
+                    fout << "," << format_decimal_trimmed(time_si, 6);
+                }
+                fout << "\n";
+
+                const size_t level_count = probe.z_indices.size();
+                const size_t time_count = probe.times_si.size();
+                for (size_t level = 0u; level < level_count; ++level) {
+                    fout << format_decimal_trimmed((double)probe.heights_si[level], 6);
+                    for (size_t ti = 0u; ti < time_count; ++ti) {
+                        const size_t base = (ti * level_count + level) * 3u;
+                        fout << ","
+                             << format_decimal_trimmed((double)probe.velocity_series_si[base], 6) << ":"
+                             << format_decimal_trimmed((double)probe.velocity_series_si[base + 1u], 6) << ":"
+                             << format_decimal_trimmed((double)probe.velocity_series_si[base + 2u], 6);
+                    }
+                    fout << "\n";
+                }
+                fout.close();
+                written_files++;
+            }
+            print_runtime_kv("Probe files", to_string(written_files) + " CSV saved to RESULTS");
         };
 
         auto write_final_transient = [&]() {
@@ -3399,12 +4167,13 @@ void main_setup() {
             if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
-            maybe_accumulate_avg();
+            process_post_step_samples();
             update_runtime_eta(iteration_clock.stop());
         }
         write_final_transient();
         maybe_write_transform_info();
         finalize_avg();
+        finalize_probes();
         print_task_finished();
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
@@ -3418,12 +4187,13 @@ void main_setup() {
             if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
-            maybe_accumulate_avg();
+            process_post_step_samples();
             update_runtime_eta(iteration_clock.stop());
         }
         write_final_transient();
         maybe_write_transform_info();
         finalize_avg();
+        finalize_probes();
         print_task_finished();
 #endif
     };

@@ -1,0 +1,3 @@
+C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio.dir
+C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/ALL_BUILD.dir
+C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/ZERO_CHECK.dir

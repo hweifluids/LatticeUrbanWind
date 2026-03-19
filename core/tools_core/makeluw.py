@@ -20,6 +20,15 @@ print("|  License:   Customized License.                                   |")
 print("|-------------------------------------------------------------------|")
 
 
+def safe_stream_write(stream, msg: str) -> None:
+    if not msg:
+        return
+
+    encoding = getattr(stream, "encoding", None) or locale.getpreferredencoding(False) or "utf-8"
+    safe_msg = msg.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    stream.write(safe_msg)
+
+
 # ──── LOGGER ─────────────────────────────────────────────────
 class Logger:
     BUFFER_SIZE = 1  # Flush after every line
@@ -42,6 +51,7 @@ class Logger:
             'a',
             buffering=self.BUFFER_SIZE,
             encoding=sys.getdefaultencoding(),
+            errors="replace",
         )
 
         self.terminal = sys.__stdout__
@@ -60,7 +70,7 @@ class Logger:
             ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             out = f'[{ts}] {cleaned}'
             # \r backspace the last line
-            self.terminal.write('\r' + out)
+            safe_stream_write(self.terminal, '\r' + out)
             self.log_file.write(out)
             self.last_tqdm = None
             return
@@ -78,7 +88,7 @@ class Logger:
                     cleaned += '\n'  
                 ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                 out = f'[{ts}] {cleaned}'
-                self.terminal.write(out)  # continue to terminal
+                safe_stream_write(self.terminal, out)  # continue to terminal
                 self.log_file.write(out)
                 self.last_tqdm = None
                 return
@@ -86,7 +96,7 @@ class Logger:
             if msg == self.last_tqdm:
                 return
             self.last_tqdm = msg
-            self.terminal.write(msg)      # write to console only
+            safe_stream_write(self.terminal, msg)      # write to console only
             return
         # generic message handling
         self._linebuf.append(msg)
@@ -96,14 +106,14 @@ class Logger:
 
             # only blank
             if line.strip() == '':
-                self.terminal.write('\n')
+                safe_stream_write(self.terminal, '\n')
                 self.log_file.write('\n')
                 return
 
             # add timecode to normal line
             ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             out = f'[{ts}] {line}'
-            self.terminal.write(out)
+            safe_stream_write(self.terminal, out)
             self.log_file.write(out)
 
 
@@ -123,7 +133,7 @@ class Logger:
                      f'{int(datetime.datetime.now().microsecond / 1000):03}')
         error_message = (f'[{timestamp}] EXCEPTION: '
                          f'{"".join(traceback.format_exception(exc_type, exc_value, exc_tb))}')
-        self.terminal.write(error_message)
+        safe_stream_write(self.terminal, error_message)
         self.log_file.write(error_message)
         
 # -------- replace stdout / stderr -------- #
@@ -179,7 +189,7 @@ def _forward_output(proc, terminal, log):
             break
         text = decoder.decode(data, final=False)
         if text:
-            terminal.write(text)
+            safe_stream_write(terminal, text)
             terminal.flush()
             log.write(text)
             log.flush()
@@ -187,7 +197,7 @@ def _forward_output(proc, terminal, log):
     # Flush any remaining decoder state (in case the stream ends mid-codepoint)
     tail = decoder.decode(b"", final=True)
     if tail:
-        terminal.write(tail)
+        safe_stream_write(terminal, tail)
         terminal.flush()
         log.write(tail)
         log.flush()
@@ -257,18 +267,18 @@ def main():
                 continue
 
             print() 
-            print(f"──────────────────────────────────────────────────────────────────────────────────── Running {script_path.name} ")
+            print(f"------------------------------------------------------------------------------------ Running {script_path.name} ")
 
             rc = run_script(script_path, log)
 
-            print(f"──────────────────────────────────────────────────────────────────────────────────── {script_path.name} exited with code {rc} ")
+            print(f"------------------------------------------------------------------------------------ {script_path.name} exited with code {rc} ")
             footer = f"\n--- {script_path.name} exited with code {rc} ---\n"
             log.write(footer)
 
             if rc != 0:
                 sys.stderr.write(f"[ERROR] {script_path.name} failed (exit {rc}).\n")
         print() 
-        print(f"──────────────────────────────────────────────────────────────────────────────────── All task finished as expected! ")
+        print(f"------------------------------------------------------------------------------------ All task finished as expected! ")
         print() 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\CMakeFiles\731084fca396d7ff213b6725de01461b\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{5BDCED36-BB5E-389F-8B4B-97FF04D89343}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

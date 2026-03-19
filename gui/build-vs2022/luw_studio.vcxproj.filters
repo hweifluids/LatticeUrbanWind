@@ -1,0 +1,114 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_Debug.cpp">
+      <Filter>Source Files\Generated</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\Theme.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\Preferences.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ConfigSchema.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ConfigDocument.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\CommandRunner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ConsolePanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\BatchBoundaryPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\BoundaryCsvPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\PlotWidgets.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\VtkViewWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\WavenumberPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\BuildingScalePanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\MainWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_Release.cpp">
+      <Filter>Source Files\Generated</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_MinSizeRel.cpp">
+      <Filter>Source Files\Generated</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_RelWithDebInfo.cpp">
+      <Filter>Source Files\Generated</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\Theme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\Preferences.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ConfigSchema.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ConfigDocument.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\CommandRunner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ConsolePanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\BatchBoundaryPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\BoundaryCsvPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\PlotWidgets.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\VtkViewWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\WavenumberPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\BuildingScalePanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\MainWindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\1_Development\LatticeUrbanWind\gui\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{616AE519-C772-3E1F-AB18-CC36B0187015}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{876A58B5-A3ED-3C5C-8150-209C80B1ED23}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Generated">
+      <UniqueIdentifier>{0E06C577-1871-3130-B6D8-F8DFDDE215D0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
