@@ -40,6 +40,7 @@ std::string datetime = "20990101120000";
 float        z_si_offset = 50.0f;
 std::string downstream_bc = "+y";
 std::string downstream_bc_yaw = "INTERNAL ERROR";
+bool downstream_open_face = false;
 uint         memory = 20000u;
 float cell_m = 20.0f;
 float3       si_size = float3(0);
@@ -57,17 +58,17 @@ bool output_tke_in_avg_vtk = true;
 bool output_ti_in_avg_vtk = true;
 bool output_tls_in_avg_vtk = true;
 bool enable_coriolis = false;
-bool enable_buffer_nudging = false;
-float buffer_thickness_m = 0.0f;
-float buffer_tau_s = 1.0f;
+bool enable_buffer_nudging = true;
+float buffer_thickness_m = 160.0f;
+float buffer_tau_s = 300.0f;
 int buffer_nudge_vertical = 0;
 bool buffer_nudging_active = false;
 int buffer_n_cells = 1;
 int buffer_downstream_face_id = 0;
 float buffer_inv_tau_lbmu = 0.0f;
-bool enable_top_sponge = false;
-float sponge_thickness_m = 0.0f;
-float sponge_tau_s = 1.0f;
+bool enable_top_sponge = true;
+float sponge_thickness_m = 200.0f;
+float sponge_tau_s = 120.0f;
 int sponge_ref_mode = 0;
 bool top_sponge_active = false;
 int sponge_n_cells = 1;
@@ -82,7 +83,7 @@ constexpr int k_patch_south = 2;
 constexpr int k_patch_north = 3;
 constexpr int k_patch_west = 4;
 constexpr int k_patch_east = 5;
-constexpr int k_vk_nmodes_default = 128;
+constexpr int k_vk_nmodes_default = 256;
 constexpr int k_vk_nmodes_max = 512;
 
 enum class VkInletUcMode {
@@ -91,35 +92,35 @@ enum class VkInletUcMode {
 };
 
 struct VkInletSettings {
-    bool enable = false;
+    bool enable = true;
     // turbulence intensity (fraction); sigma_local uses uc_mode:
     // NORM_MEAN -> ti*|U_base|, NORMAL_COMPONENT -> ti*|U_base·n_face|
-    float ti = 0.0f;
+    float ti = 0.05f;
     float sigma_si = 0.0f;
-    float L_si = 0.0f;
+    float L_si = 100.0f;
     int nmodes = k_vk_nmodes_default;
-    ulong seed = 1469598103934665603ull;
+    ulong seed = 100ull;
     int update_stride = 1;
-    VkInletUcMode uc_mode = VkInletUcMode::NORMAL_COMPONENT;
-    bool same_realization_all_faces = false;
+    VkInletUcMode uc_mode = VkInletUcMode::NORM_MEAN;
+    bool same_realization_all_faces = true;
     bool stride_interpolation = false; // optional double-buffer interpolation for stride > 1
-    bool inflow_only = true; // true: only U·n>0 cells, false: all selected boundary-face cells
+    bool inflow_only = false; // true: only U·n>0 cells, false: all selected boundary-face cells
     float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f); // per-component perturbation gain [ax, ay, az]
 };
 VkInletSettings vk_inlet_settings;
 
 struct VkInletRuntimeConfig {
-    bool enable = false;
-    float ti = 0.0f;
+    bool enable = true;
+    float ti = 0.05f;
     float sigma_lbm = 0.0f;
-    float L_lbm = 0.0f;
+    float L_lbm = 100.0f;
     int nmodes = k_vk_nmodes_default;
-    ulong seed = 1469598103934665603ull;
+    ulong seed = 100ull;
     int update_stride = 1;
-    VkInletUcMode uc_mode = VkInletUcMode::NORMAL_COMPONENT;
-    bool same_realization_all_faces = false;
+    VkInletUcMode uc_mode = VkInletUcMode::NORM_MEAN;
+    bool same_realization_all_faces = true;
     bool stride_interpolation = false;
-    bool inflow_only = true;
+    bool inflow_only = false;
     float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f);
     int downstream_face_id = -1; // {0:west,1:east,2:south,3:north}, -1 means unknown/none
 };
@@ -1485,6 +1486,18 @@ static int boundary_cell_to_patch(const uint x, const uint y, const uint z, cons
     return -1;
 }
 
+static bool is_downstream_boundary_cell(const uint x, const uint y, const uint z,
+                                        const uint Nx, const uint Ny, const uint Nz,
+                                        const std::string& downstream_bc_local) {
+    (void)z;
+    (void)Nz;
+    if (downstream_bc_local == "+y") return y == Ny - 1u;
+    if (downstream_bc_local == "-y") return y == 0u;
+    if (downstream_bc_local == "+x") return x == Nx - 1u;
+    if (downstream_bc_local == "-x") return x == 0u;
+    return false;
+}
+
 static bool patch_surface_coordinates(const int patch, const float3& p, float& a, float& b) {
     switch (patch) {
     case k_patch_bottom:
@@ -2562,6 +2575,18 @@ void main_setup() {
                 }
                 return false;
             };
+            auto parse_boolish_setting = [&](const std::string& txt, bool& out) -> bool {
+                if (parse_bool_setting(txt, out)) {
+                    return true;
+                }
+                char* endptr = nullptr;
+                const long parsed = std::strtol(txt.c_str(), &endptr, 10);
+                if (endptr != txt.c_str() && *endptr == '\0') {
+                    out = parsed != 0;
+                    return true;
+                }
+                return false;
+            };
             while (std::getline(fin, line)) {
                 size_t cmt = line.find("//"); if (cmt != std::string::npos) line.erase(cmt);
                 size_t eq = line.find('=');  if (eq == std::string::npos) continue;
@@ -2603,17 +2628,50 @@ void main_setup() {
                     else buoyancy_enabled = true; // keep default behavior for any non-false explicit value
                 }
                 else if (key == "downstream_bc_yaw") downstream_bc_yaw = unquote(val);
+                else if (key == "downstream_open_face") {
+                    bool parsed = false;
+                    if (!parse_bool_setting(unquote(val), parsed)) {
+                        println("| WARNING: downstream_open_face expects true/false/1/0. Keep default false.    |");
+                    }
+                    else {
+                        downstream_open_face = parsed;
+                    }
+                }
                 else if (key == "base_height") z_si_offset = (float)atof(val.c_str());
                 else if (key == "z_limit")     z_limit_override = (float)atof(val.c_str());
                 else if (key == "memory_lbm")  memory = (uint)atoi(val.c_str());
                 else if (key == "si_x_cfd")    si_size.x = second_val(val);
                 else if (key == "si_y_cfd")    si_size.y = second_val(val);
                 else if (key == "si_z_cfd")    si_size.z = second_val(val);
-                else if (key == "enable_buffer_nudging") enable_buffer_nudging = atoi(unquote(val).c_str()) != 0;
+                else if (key == "enable_buffer_nudging") {
+                    bool parsed = false;
+                    if (!parse_boolish_setting(unquote(val), parsed)) {
+                        println("| WARNING: enable_buffer_nudging expects true/false/1/0. Keep current/default. |");
+                    }
+                    else {
+                        enable_buffer_nudging = parsed;
+                    }
+                }
                 else if (key == "buffer_thickness_m") buffer_thickness_m = (float)atof(unquote(val).c_str());
                 else if (key == "buffer_tau_s") buffer_tau_s = (float)atof(unquote(val).c_str());
-                else if (key == "buffer_nudge_vertical") buffer_nudge_vertical = atoi(unquote(val).c_str()) != 0 ? 1 : 0;
-                else if (key == "enable_top_sponge") enable_top_sponge = atoi(unquote(val).c_str()) != 0;
+                else if (key == "buffer_nudge_vertical") {
+                    bool parsed = false;
+                    if (!parse_boolish_setting(unquote(val), parsed)) {
+                        println("| WARNING: buffer_nudge_vertical expects true/false/1/0. Keep current/default. |");
+                    }
+                    else {
+                        buffer_nudge_vertical = parsed ? 1 : 0;
+                    }
+                }
+                else if (key == "enable_top_sponge") {
+                    bool parsed = false;
+                    if (!parse_boolish_setting(unquote(val), parsed)) {
+                        println("| WARNING: enable_top_sponge expects true/false/1/0. Keep current/default.     |");
+                    }
+                    else {
+                        enable_top_sponge = parsed;
+                    }
+                }
                 else if (key == "sponge_thickness_m") sponge_thickness_m = (float)atof(unquote(val).c_str());
                 else if (key == "sponge_tau_s") sponge_tau_s = (float)atof(unquote(val).c_str());
                 else if (key == "sponge_ref_mode") {
@@ -2709,10 +2767,10 @@ void main_setup() {
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     if (v == "true" || v == "1") enable_coriolis = true;
                 }
-                else if (key == "vk_inlet_enable") {
+                else if (key == "turb_inflow_enable" || key == "vk_inlet_enable") {
                     bool parsed = false;
                     if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: vk_inlet_enable expects true/false/1/0. Keep default false.         |");
+                        println("| WARNING: turb_inflow_enable expects true/false/1/0. Keep current/default value.|");
                     }
                     else {
                         vk_inlet_settings.enable = parsed;
@@ -2837,11 +2895,11 @@ void main_setup() {
                 vk_inlet_settings.sigma_si = 0.0f;
             }
             if (vk_inlet_settings.L_si < 0.0f) {
-                println("| WARNING: vk_inlet_L is negative. It is clamped to 0.                        |");
+                println("| WARNING: vk_inlet_l is negative. It is clamped to 0.                        |");
                 vk_inlet_settings.L_si = 0.0f;
             }
             if (vk_inlet_settings.nmodes <= 0) {
-                println("| WARNING: vk_inlet_nmodes <= 0. Fallback to default 128.                     |");
+                println("| WARNING: vk_inlet_nmodes <= 0. Fallback to default " + to_string((ulong)k_vk_nmodes_default) + ".                     |");
                 vk_inlet_settings.nmodes = k_vk_nmodes_default;
             }
             if (vk_inlet_settings.nmodes > k_vk_nmodes_max) {
@@ -2865,11 +2923,11 @@ void main_setup() {
             sanitize_vk_aniso_component(vk_inlet_settings.anisotropy_scale.y, "y");
             sanitize_vk_aniso_component(vk_inlet_settings.anisotropy_scale.z, "z");
             if (vk_inlet_settings.enable && !(vk_inlet_settings.L_si > 0.0f)) {
-                println("| WARNING: vk_inlet_enable=true but L is invalid. VK inlet disabled.           |");
+                println("| WARNING: turb_inflow_enable=true but L is invalid. VK inlet disabled.         |");
                 vk_inlet_settings.enable = false;
             }
             if (vk_inlet_settings.enable && !(vk_inlet_settings.ti > 0.0f || vk_inlet_settings.sigma_si > 0.0f)) {
-                println("| WARNING: vk_inlet_enable=true but TI/sigma is invalid. VK inlet disabled.    |");
+                println("| WARNING: turb_inflow_enable=true but TI/sigma is invalid. VK inlet disabled.  |");
                 vk_inlet_settings.enable = false;
             }
 
@@ -3001,8 +3059,15 @@ void main_setup() {
     println("| Casename / Time | " + alignr(40u, to_string(caseName)) + alignr(17u, to_string(datetime)) + " |");
     println("| Basement Height | " + alignr(55u, to_string(fmtf(z_si_offset))) + " m |");
     println("| SI Size (m)     | " + alignr(12u, " X:") + alignl(11u, to_string(fmtf(si_size.x))) + "   Y: " + alignl(11u, to_string(fmtf(si_size.y))) + "   Z: " + alignl(11u, to_string(fmtf(si_size.z))) + " | ");
-    println("| Downstream BC   | " + alignr(57u, to_string(downstream_bc)) + " |");
-    println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
+    if (profile_generation) {
+        println("| Downstream BC   | " + alignr(57u, "auto by angle (dominant axis)") + " |");
+        println("| Normal Yaw      | " + alignr(57u, "auto by angle list") + " |");
+    }
+    else {
+        println("| Downstream BC   | " + alignr(57u, to_string(downstream_bc)) + " |");
+        println("| Normal Yaw      | " + alignr(53u, to_string(downstream_bc_yaw)) + " deg |");
+    }
+    println("| Downstream Open | " + alignr(57u, downstream_open_face ? string("true") : string("false")) + " |");
     println("| GPU Decompose   | " + alignr(49u, to_string(Dx)) + ", " + alignr(2u, to_string(Dy)) + ", " + alignr(2u, to_string(Dz)) + " |");
     println("| VRAM Request    | " + alignr(54u, to_string(memory)) + " MB |");
     println("| Run Steps       | " + alignr(57u, run_nstep_override > 0ull ? to_string(run_nstep_override) + " (run_nstep)" : string("20001 (default)")) + " |");
@@ -3255,7 +3320,27 @@ void main_setup() {
     const float si_beta_air = 1.0f / temperature_ref_kelvin; // volumetric thermal expansion [1/K]
     float lbm_alpha = units.alpha(si_alpha_air);
     float lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
-    auto make_vk_runtime_config = [&]() {
+    auto downstream_face_id_from_bc = [](const std::string& bc) -> int {
+        if (bc == "-x") return 0;
+        if (bc == "+x") return 1;
+        if (bc == "-y") return 2;
+        if (bc == "+y") return 3;
+        return -1;
+    };
+    auto buffer_face_id_from_bc = [](const std::string& bc) -> int {
+        if (bc == "-x") return 1;      // west (x=0)
+        if (bc == "+x") return 2;      // east (x=Nx-1)
+        if (bc == "-y") return 3;      // south (y=0)
+        if (bc == "+y") return 4;      // north (y=Ny-1)
+        return 0;                      // none/unknown
+    };
+    auto profile_downstream_bc_from_dir = [](const float dir_x, const float dir_y) -> std::string {
+        if (fabsf(dir_x) >= fabsf(dir_y)) {
+            return dir_x >= 0.0f ? "+x" : "-x";
+        }
+        return dir_y >= 0.0f ? "+y" : "-y";
+    };
+    auto make_vk_runtime_config = [&](const std::string& downstream_bc_runtime = downstream_bc) {
         VkInletRuntimeConfig cfg;
         cfg.enable = vk_inlet_settings.enable;
         cfg.ti = vk_inlet_settings.ti;
@@ -3270,12 +3355,9 @@ void main_setup() {
         cfg.inflow_only = vk_inlet_settings.inflow_only;
         cfg.anisotropy_scale = vk_inlet_settings.anisotropy_scale;
         // Keep parsed for compatibility with existing config/deck fields.
-        if (downstream_bc == "-x") cfg.downstream_face_id = 0;
-        else if (downstream_bc == "+x") cfg.downstream_face_id = 1;
-        else if (downstream_bc == "-y") cfg.downstream_face_id = 2;
-        else if (downstream_bc == "+y") cfg.downstream_face_id = 3;
+        cfg.downstream_face_id = downstream_face_id_from_bc(downstream_bc_runtime);
         if (cfg.enable && !(cfg.L_lbm > 0.0f)) {
-            println("| WARNING: vk_inlet_L converts to non-positive LBM value. Disabled.            |");
+            println("| WARNING: vk_inlet_l converts to non-positive LBM value. Disabled.            |");
             cfg.enable = false;
         }
         if (cfg.enable && !(cfg.ti > 0.0f || cfg.sigma_lbm > 0.0f)) {
@@ -3339,12 +3421,8 @@ void main_setup() {
             print_kv_row("Coriolis", "disabled by 'coriolis_term' setting in .luw");
         }
     };
-    auto update_buffer_nudging = [&](const bool show_info) {
-        if (downstream_bc == "-x") buffer_downstream_face_id = 1;      // west (x=0)
-        else if (downstream_bc == "+x") buffer_downstream_face_id = 2; // east (x=Nx-1)
-        else if (downstream_bc == "-y") buffer_downstream_face_id = 3; // south (y=0)
-        else if (downstream_bc == "+y") buffer_downstream_face_id = 4; // north (y=Ny-1)
-        else buffer_downstream_face_id = 0; // none/unknown
+    auto update_buffer_nudging = [&](const bool show_info, const std::string& downstream_bc_runtime = downstream_bc) {
+        buffer_downstream_face_id = buffer_face_id_from_bc(downstream_bc_runtime);
 
         const uint min_dim = std::min(lbm_N.x, std::min(lbm_N.y, lbm_N.z));
         const uint max_nbuf = std::max(1u, min_dim / 4u);
@@ -3428,7 +3506,15 @@ void main_setup() {
     }
 
     update_coriolis(!dataset_generation && !profile_generation);
-    update_buffer_nudging(true);
+    update_buffer_nudging(!profile_generation);
+    if (profile_generation) {
+        if (enable_buffer_nudging && buffer_tau_s <= 0.0f) {
+            println("| WARNING: enable_buffer_nudging=1 but buffer_tau_s<=0. Buffer nudging disabled. |");
+        }
+        print_kv_row("Buffer nudging", buffer_nudging_active ? "enabled (downstream face auto by angle)" : "disabled");
+        print_kv_row("", "Nbuf=" + to_string((ulong)buffer_n_cells) + " cells, tau_s=" + to_string(buffer_tau_s, 6u) + " s");
+        print_kv_row("", "inv_tau_lbmu=" + to_string(buffer_inv_tau_lbmu, 8u) + ", downstream_face_id=auto, nudge_vertical=" + to_string((ulong)buffer_nudge_vertical));
+    }
     update_top_sponge(true);
  
     std::vector<SamplePoint> samples;
@@ -3620,6 +3706,34 @@ void main_setup() {
         const ulong unsteady_interval = unsteady_output_interval > 0u ? (ulong)unsteady_output_interval : 0ull;
         const bool enable_unsteady_u_output = unsteady_interval > 0ull;
         const ulong total_steps = base_run_steps + extra_run_steps;
+        auto emit_progress_stage = [&](const std::string& stage,
+                                       const std::string& label,
+                                       const std::string& detail,
+                                       const long long current = -1ll,
+                                       const long long total = -1ll,
+                                       const bool indeterminate = true) {
+            luw_emit_progress(stage, label, detail, current, total, indeterminate);
+        };
+        auto last_solver_progress = std::chrono::steady_clock::time_point{};
+        auto emit_solver_progress = [&](const bool force = false) {
+            if(!luw_progress_gui_mode()) return;
+            const auto now = std::chrono::steady_clock::now();
+            if(!force && last_solver_progress.time_since_epoch().count() != 0 &&
+               now - last_solver_progress < std::chrono::milliseconds(120) &&
+               lbm.get_t() < total_steps) {
+                return;
+            }
+            last_solver_progress = now;
+            emit_progress_stage(
+                "solve",
+                "Solving CFD",
+                to_string(lbm.get_t()) + "/" + to_string(total_steps) +
+                    " steps | " + to_string(info.steps_per_second(), 3u) +
+                    " Steps/s | ETA " + print_time(info.time()),
+                (long long)lbm.get_t(),
+                (long long)total_steps,
+                false);
+        };
         auto print_task_finished = [&]() {
             print_kv_row("Task finished", "[" + now_str() + "]");
             if (extra_spacing) {
@@ -3652,6 +3766,16 @@ void main_setup() {
                     first = false;
                 }
             }
+            const string last_file = vtk_saved_files.back();
+            emit_progress_stage(
+                "save",
+                "Saving results",
+                vtk_saved_files.size() == 1u
+                    ? last_file
+                    : to_string((ulong)vtk_saved_files.size()) + " files saved; last: " + last_file,
+                (long long)vtk_saved_files.size(),
+                (long long)vtk_saved_files.size(),
+                false);
             vtk_saved_files.clear();
             info.print_update();
         };
@@ -3975,6 +4099,12 @@ void main_setup() {
             if (avg_window == 0ull) return 0.0;
             constexpr uint k_avg_benchmark_iterations = 10u;
             print_runtime_kv("Avg benchmark", "run " + to_string((ulong)k_avg_benchmark_iterations) + " iterations before solve");
+            emit_progress_stage("speed_estimate",
+                                "Estimating solve speed",
+                                "Benchmarking mean-field post-processing",
+                                0ll,
+                                (long long)k_avg_benchmark_iterations,
+                                false);
 
             avg_count = 0ull;
             std::fill(avg_u.begin(), avg_u.end(), 0.0f);
@@ -3993,10 +4123,23 @@ void main_setup() {
                 enqueue_read_u_rho();
                 accumulate_from_buffers();
                 total_seconds += bench_clock.stop();
+                emit_progress_stage("speed_estimate",
+                                    "Estimating solve speed",
+                                    "Benchmarking mean-field post-processing iteration " +
+                                        to_string((ulong)i + 1ull) + "/" + to_string((ulong)k_avg_benchmark_iterations),
+                                    (long long)i + 1ll,
+                                    (long long)k_avg_benchmark_iterations,
+                                    false);
             }
             const double mean_step_seconds = total_seconds / (double)k_avg_benchmark_iterations;
             const double mean_steps_per_second = mean_step_seconds > 1.0E-12 ? (1.0 / mean_step_seconds) : 0.0;
             print_runtime_kv("Avg benchmark", "mean-field Steps/s = " + to_string(mean_steps_per_second, 3u));
+            emit_progress_stage("speed_estimate",
+                                "Estimating solve speed",
+                                "Mean-field estimate = " + to_string(mean_steps_per_second, 3u) + " Steps/s",
+                                1ll,
+                                1ll,
+                                false);
 
             avg_count = 0ull;
             std::fill(avg_u.begin(), avg_u.end(), 0.0f);
@@ -4016,8 +4159,20 @@ void main_setup() {
                     ? to_string(avg_steps_per_second_hint, 3u)
                     : string("n/a");
                 print_runtime_kv("ETA model", "normal Steps/s = dynamic, mean-field Steps/s = " + avg_sps_text);
+                emit_progress_stage("speed_estimate",
+                                    "Estimating solve speed",
+                                    "ETA model ready: normal Steps/s = dynamic, mean-field Steps/s = " + avg_sps_text,
+                                    1ll,
+                                    1ll,
+                                    false);
             } else {
                 print_runtime_kv("ETA model", "single-stage dynamic Steps/s");
+                emit_progress_stage("speed_estimate",
+                                    "Estimating solve speed",
+                                    "ETA model ready: single-stage dynamic Steps/s",
+                                    1ll,
+                                    1ll,
+                                    false);
             }
         };
         bool avg_phase_entry_reported = false;
@@ -4105,6 +4260,12 @@ void main_setup() {
                 written_files++;
             }
             print_runtime_kv("Probe files", to_string(written_files) + " CSV saved to RESULTS");
+            emit_progress_stage("save",
+                                "Saving results",
+                                to_string(written_files) + " probe CSV file(s) saved to RESULTS",
+                                (long long)written_files,
+                                (long long)written_files,
+                                false);
         };
 
         auto write_final_transient = [&]() {
@@ -4133,6 +4294,12 @@ void main_setup() {
                 info_file << "dt = " << std::fixed << std::setprecision(10) << dt_si << "s\n";
                 info_file.close();
                 println("| Successfully wrote " + info_path + " |");
+                emit_progress_stage("save",
+                                    "Saving results",
+                                    info_path,
+                                    1ll,
+                                    1ll,
+                                    false);
             }
             else {
                 println("ERROR: Could not open " + info_path + " for writing.");
@@ -4152,6 +4319,7 @@ void main_setup() {
         const double avg_steps_per_second_hint = run_avg_phase_benchmark();
         configure_eta_model(avg_steps_per_second_hint);
         print_runtime_section("SOLVER START");
+        emit_solver_progress(true);
         Clock iteration_clock;
         while (lbm.get_t() < total_steps) {
             iteration_clock.start();
@@ -4169,7 +4337,9 @@ void main_setup() {
             maybe_write_unsteady_u();
             process_post_step_samples();
             update_runtime_eta(iteration_clock.stop());
+            emit_solver_progress();
         }
+        emit_solver_progress(true);
         write_final_transient();
         maybe_write_transform_info();
         finalize_avg();
@@ -4181,6 +4351,7 @@ void main_setup() {
         const double avg_steps_per_second_hint = run_avg_phase_benchmark();
         configure_eta_model(avg_steps_per_second_hint);
         print_runtime_section("SOLVER START");
+        emit_solver_progress(true);
         Clock iteration_clock;
         while (lbm.get_t() < total_steps) {
             iteration_clock.start();
@@ -4189,7 +4360,9 @@ void main_setup() {
             maybe_write_unsteady_u();
             process_post_step_samples();
             update_runtime_eta(iteration_clock.stop());
+            emit_solver_progress();
         }
+        emit_solver_progress(true);
         write_final_transient();
         maybe_write_transform_info();
         finalize_avg();
@@ -4206,6 +4379,14 @@ void main_setup() {
             if (!s.empty() && s.back() == '.') s.pop_back();
         }
         return s.empty() ? std::string("0") : s;
+    };
+    auto emit_progress_stage = [&](const std::string& stage,
+                                   const std::string& label,
+                                   const std::string& detail,
+                                   const long long current = -1ll,
+                                   const long long total = -1ll,
+                                   const bool indeterminate = true) {
+        luw_emit_progress(stage, label, detail, current, total, indeterminate);
     };
 
     if (!dataset_generation && !profile_generation) {
@@ -4402,6 +4583,12 @@ void main_setup() {
             const uint Ny = lbm.get_Ny();
             const uint Nz = lbm.get_Nz();
             const int downstream_patch = downstream_to_patch(downstream_bc);
+            emit_progress_stage("interface_interpolation",
+                                "Interface interpolation",
+                                "Patch-driven 2D boundary mapping",
+                                0ll,
+                                1ll,
+                                true);
             std::vector<uchar> voxel_flags((size_t)lbm.get_N());
             for (ulong n = 0ul; n < lbm.get_N(); ++n) {
                 voxel_flags[(size_t)n] = lbm.flags[n];
@@ -4513,7 +4700,7 @@ void main_setup() {
                 }
 
                 lbm.flags[n] = TYPE_E;
-                if (patch == downstream_patch) {
+                if (downstream_open_face && patch == downstream_patch) {
                     outlet_cells.fetch_add(1ul, std::memory_order_relaxed);
                     return;
                 }
@@ -4551,6 +4738,8 @@ void main_setup() {
                     if (patch < 0) return;
                     if ((lbm.flags[n] & TYPE_S) != 0u) return; // solid temperature is handled by ground patch plane
 
+                    if (downstream_open_face && patch == downstream_patch) return;
+
                     const PatchSurfaceField2D& face_field_t = patch_temperature_fields[(size_t)patch];
                     if (!face_field_t.has_samples()) {
                         temperature_missing_patch.fetch_add(1ul, std::memory_order_relaxed);
@@ -4577,6 +4766,12 @@ void main_setup() {
                     println("|                 | WARNING: missing patch samples for " + to_string(temperature_missing_patch.load()) + " cells      |");
                 }
             }
+            emit_progress_stage("interface_interpolation",
+                                "Interface interpolation",
+                                "Patch-driven 2D boundary mapping completed",
+                                1ll,
+                                1ll,
+                                false);
             apply_ground_temperature_plane_bc("patch-2d");
             report_temperature_bc_summary("patch-2d");
 #endif // TEMPERATURE
@@ -4584,6 +4779,12 @@ void main_setup() {
 
             if (flux_correction) {
                 print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "Balancing boundary mass flux",
+                                    0ll,
+                                    1ll,
+                                    true);
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 {
                     if (downstream_patch < k_patch_top || downstream_patch > k_patch_east) return float3(0.0f);
@@ -4596,6 +4797,12 @@ void main_setup() {
                 };
                 apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "avg dU = " + to_string(avg_du, 3u) + " m/s, net after = " + to_string(net_a, 3u),
+                                    1ll,
+                                    1ll,
+                                    false);
 #ifdef TEMPERATURE
                 if (use_temperature_bc) report_temperature_bc_summary("patch-2d/post-flux");
 #endif
@@ -4609,7 +4816,7 @@ void main_setup() {
             // Calculate z base threshold in LBM units
             const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu;
             InletVelocityFieldHD inlet_hd(knn_hd, z_base_threshold_lbmu);
-            apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd, 500000ull, true, top_sponge_side_ref_z_cap);
+            apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd, downstream_open_face, 500000ull, true, top_sponge_side_ref_z_cap);
 
 #ifdef TEMPERATURE
             if (use_temperature_bc) {
@@ -4627,6 +4834,12 @@ void main_setup() {
 
                 const ulong Nbc = (ulong)temp_boundary_indices.size();
                 println("| [" + now_str() + "] temperature BC init (HD): " + to_string(Nbc) + " cells.                    |");
+                emit_progress_stage("interface_interpolation",
+                                    "Interface interpolation",
+                                    "High-order temperature interpolation",
+                                    0ll,
+                                    (long long)std::max<ulong>(Nbc, 1ul),
+                                    Nbc == 0ul);
                 if (Nbc > 0ul) {
                     unsigned num_threads = detect_available_worker_threads_setup();
 #ifdef _MSC_VER
@@ -4667,6 +4880,15 @@ void main_setup() {
                         const std::vector<ulong>& fi = face_indices[f];
                         const ulong Nface = (ulong)fi.size();
                         if (Nface == 0ul) continue;
+                        if (downstream_open_face) {
+                            const int patch_id =
+                                (f == 0) ? k_patch_west :
+                                (f == 1) ? k_patch_east :
+                                (f == 2) ? k_patch_south :
+                                (f == 3) ? k_patch_north :
+                                           k_patch_top;
+                            if (patch_id == downstream_to_patch(downstream_bc)) continue;
+                        }
 
                         const char* face_name = "unknown";
                         if (f == 0) face_name = "x == 0";
@@ -4685,11 +4907,33 @@ void main_setup() {
 
                         std::thread progress_thread([&]() {
                             while (!done.load(std::memory_order_relaxed)) {
-                                const double pct = 100.0 * (double)processed.load(std::memory_order_relaxed) / (double)Nface;
-                                reprint("| [" + now_str() + "] temperature BC init (HD): " + to_string((float)pct, 3u) + "% |");
+                                const ulong current = processed.load(std::memory_order_relaxed);
+                                const double pct = 100.0 * (double)current / (double)Nface;
+                                if (luw_progress_gui_mode()) {
+                                    emit_progress_stage("interface_interpolation",
+                                                        "Interface interpolation",
+                                                        "High-order temperature surface " + to_string((ulong)f + 1ull) +
+                                                            "/5 (" + string(face_name) + "): " +
+                                                            to_string(current) + "/" + to_string(Nface) + " cells",
+                                                        (long long)current,
+                                                        (long long)Nface,
+                                                        false);
+                                } else {
+                                    reprint("| [" + now_str() + "] temperature BC init (HD): " + to_string((float)pct, 3u) + "% |");
+                                }
                                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                             }
-                            println("| [" + now_str() + "] temperature BC init (HD): 100.000% |");
+                            if (luw_progress_gui_mode()) {
+                                emit_progress_stage("interface_interpolation",
+                                                    "Interface interpolation",
+                                                    "High-order temperature surface " + to_string((ulong)f + 1ull) +
+                                                        "/5 (" + string(face_name) + ") completed",
+                                                    (long long)Nface,
+                                                    (long long)Nface,
+                                                    false);
+                            } else {
+                                println("| [" + now_str() + "] temperature BC init (HD): 100.000% |");
+                            }
                         });
 
                         std::vector<std::thread> workers;
@@ -4728,6 +4972,12 @@ void main_setup() {
                     }
                     println("| Temperature BC  | per-face interpolation done on 5 boundary surfaces        |");
                     println("| Temperature BC  | mapped " + to_string(mapped_total) + "/" + to_string(Nbc) + " cells (high-order)      |");
+                    emit_progress_stage("interface_interpolation",
+                                        "Interface interpolation",
+                                        "High-order temperature interpolation completed",
+                                        (long long)mapped_total,
+                                        (long long)Nbc,
+                                        false);
                 }
             }
             apply_ground_temperature_plane_bc("high-order");
@@ -4737,10 +4987,22 @@ void main_setup() {
 
             if (flux_correction) {
                 print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "Balancing boundary mass flux",
+                                    0ll,
+                                    1ll,
+                                    true);
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 { return inlet_hd(q); };
                 apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "avg dU = " + to_string(avg_du, 3u) + " m/s, net after = " + to_string(net_a, 3u),
+                                    1ll,
+                                    1ll,
+                                    false);
 #ifdef TEMPERATURE
                 if (use_temperature_bc) report_temperature_bc_summary("high-order/post-flux");
 #endif
@@ -4753,7 +5015,7 @@ void main_setup() {
         else {
             NearestNeighborInterpolator nn(std::move(P), std::move(Uv));
             InletVelocityField inlet(nn, z0_lbmu, z_off);
-            apply_inlet_outlet(lbm, downstream_bc, inlet, 500000ull, true, top_sponge_side_ref_z_cap);
+            apply_inlet_outlet(lbm, downstream_bc, inlet, downstream_open_face, 500000ull, true, top_sponge_side_ref_z_cap);
 
 #ifdef TEMPERATURE
             if (use_temperature_bc) {
@@ -4766,14 +5028,11 @@ void main_setup() {
                     lbm.coordinates(n, x, y, z);
                     if (z == 0u) return;
 
-                    bool outlet = false;
-                    if (downstream_bc == "+y")      outlet = (y == Ny - 1u);
-                    else if (downstream_bc == "-y") outlet = (y == 0u);
-                    else if (downstream_bc == "+x") outlet = (x == Nx - 1u);
-                    else if (downstream_bc == "-x") outlet = (x == 0u);
+                    const bool outlet = downstream_open_face &&
+                        is_downstream_boundary_cell(x, y, z, Nx, Ny, Nz, downstream_bc);
 
                     const bool inlet_face =
-                        ((x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u) && !outlet);
+                        (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u) && !outlet;
                     if (!inlet_face) return;
 
                     const float3 pos = lbm.position(x, y, z);
@@ -4794,10 +5053,22 @@ void main_setup() {
 
             if (flux_correction) {
                 print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "Balancing boundary mass flux",
+                                    0ll,
+                                    1ll,
+                                    true);
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 { return inlet(q); };
                 apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "avg dU = " + to_string(avg_du, 3u) + " m/s, net after = " + to_string(net_a, 3u),
+                                    1ll,
+                                    1ll,
+                                    false);
 #ifdef TEMPERATURE
                 if (use_temperature_bc) report_temperature_bc_summary("low-order/post-flux");
 #endif
@@ -4846,7 +5117,7 @@ void main_setup() {
             }
         };
 
-        auto apply_velocity_boundaries = [&](LBM& lbm, const float3& u) {
+        auto apply_velocity_boundaries = [&](LBM& lbm, const float3& u, const std::string& downstream_bc_runtime) {
             const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
             const bool has_ground = (Nz > 1u);
             const ulong Ntot = lbm.get_N();
@@ -4861,6 +5132,10 @@ void main_setup() {
                     (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || (has_ground && z == Nz - 1u));
                 if (is_boundary) {
                     lbm.flags[n] = TYPE_E;
+                    if (downstream_open_face &&
+                        is_downstream_boundary_cell(x, y, z, Nx, Ny, Nz, downstream_bc_runtime)) {
+                        continue;
+                    }
                     lbm.u.x[n] = u.x;
                     lbm.u.y[n] = u.y;
                     lbm.u.z[n] = u.z;
@@ -4882,8 +5157,6 @@ void main_setup() {
                 lbm_alpha = units.alpha(si_alpha_air);
                 lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
                 update_coriolis(false);
-                update_buffer_nudging(false);
-                update_top_sponge(false);
 
                 const std::string case_label = to_string(case_index) + "/" + to_string(total_cases) +
                     " (remaining " + to_string(remaining) + ")";
@@ -4893,8 +5166,12 @@ void main_setup() {
                 println("| SI Reference U  | " + alignr(57u, format_tag(si_ref_u) + " m/s") + " |");
 
                 const float3 inflow_lbmu = wind_velocity_lbmu(inflow_si, angle_deg, u_scale);
+                const std::string case_downstream_bc = profile_downstream_bc_from_dir(inflow_lbmu.x, inflow_lbmu.y);
+                update_buffer_nudging(false, case_downstream_bc);
+                update_top_sponge(false);
 
                 print_section_title("DEVICE INFORMATION");
+                print_kv_row("Downstream BC", case_downstream_bc + " (auto from batch angle)");
                 LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
                 lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 
@@ -4902,12 +5179,12 @@ void main_setup() {
                 println("| Voxelization done.                                                          |");
                 print_section_title("BUILD BOUNDARY CONDITIONS");
                 initialize_uniform_velocity(lbm, inflow_lbmu);
-                apply_velocity_boundaries(lbm, inflow_lbmu);
+                apply_velocity_boundaries(lbm, inflow_lbmu, case_downstream_bc);
                 print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
                 std::unique_ptr<VonKarmanInletUpdater> vk_updater;
                 if (vk_inlet_settings.enable) {
-                    VkInletRuntimeConfig vk_runtime = make_vk_runtime_config();
+                    VkInletRuntimeConfig vk_runtime = make_vk_runtime_config(case_downstream_bc);
                     vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
                     if (!vk_updater->initialize(lbm)) {
                         vk_updater.reset();
@@ -5064,11 +5341,13 @@ void main_setup() {
 
         auto apply_profile_boundaries = [&](LBM& lbm,
                                             const std::vector<float>& ground_xy,
-                                            const float dir_x, const float dir_y) {
+                                            const float dir_x, const float dir_y,
+                                            const std::string& downstream_bc_runtime) {
             const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
             const ulong Ntot = lbm.get_N();
             std::atomic<ulong> mapped_bc{ 0ul };
             std::atomic<ulong> terrain_solid_bc{ 0ul };
+            std::atomic<ulong> outlet_bc{ 0ul };
             parallel_for(Ntot, [&](ulong n) {
                 uint x = 0u, y = 0u, z = 0u;
                 lbm.coordinates(n, x, y, z);
@@ -5095,6 +5374,11 @@ void main_setup() {
                     return;
                 }
                 lbm.flags[n] = (uchar)(lbm.flags[n] | TYPE_E);
+                if (downstream_open_face &&
+                    is_downstream_boundary_cell(x, y, z, Nx, Ny, Nz, downstream_bc_runtime)) {
+                    outlet_bc.fetch_add(1ul, std::memory_order_relaxed);
+                    return;
+                }
                 float pos_z_eval = pos_z;
                 const bool is_side_boundary = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u);
                 if (is_side_boundary && top_sponge_side_ref_z_cap >= 0 && (int)z > top_sponge_side_ref_z_cap) {
@@ -5107,6 +5391,9 @@ void main_setup() {
                 mapped_bc.fetch_add(1ul, std::memory_order_relaxed);
             });
             println("| Velocity BC     | profile boundaries mapped: " + to_string(mapped_bc.load()) + " cells                |");
+            if (outlet_bc.load(std::memory_order_relaxed) > 0ul) {
+                println("|                 | downstream outlet cells: " + to_string(outlet_bc.load()) + " (no fixed velocity)        |");
+            }
             if (terrain_solid_bc.load(std::memory_order_relaxed) > 0ul) {
                 println("|                 | boundary cells below local terrain -> solid: " +
                         to_string(terrain_solid_bc.load()) + "                     |");
@@ -5128,8 +5415,11 @@ void main_setup() {
             const float angle_rad = angle_deg * deg2rad;
             const float dir_x = -sinf(angle_rad);
             const float dir_y = -cosf(angle_rad);
+            const std::string case_downstream_bc = profile_downstream_bc_from_dir(dir_x, dir_y);
 
             print_section_title("DEVICE INFORMATION");
+            print_kv_row("Downstream BC", case_downstream_bc + " (auto from profile angle)");
+            update_buffer_nudging(false, case_downstream_bc);
             LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
             lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 
@@ -5183,12 +5473,30 @@ void main_setup() {
                 }
             }
 
+            emit_progress_stage("interface_interpolation",
+                                "Interface interpolation",
+                                "Applying profile boundary conditions",
+                                0ll,
+                                1ll,
+                                true);
             initialize_profile_velocity(lbm, ground_xy, dir_x, dir_y);
-            apply_profile_boundaries(lbm, ground_xy, dir_x, dir_y);
+            apply_profile_boundaries(lbm, ground_xy, dir_x, dir_y, case_downstream_bc);
+            emit_progress_stage("interface_interpolation",
+                                "Interface interpolation",
+                                "Profile boundary conditions completed",
+                                1ll,
+                                1ll,
+                                false);
             print_kv_row("Boundary init", "complete. Time: [" + now_str() + "]");
 
             if (flux_correction) {
                 print_kv_row("Flux correction", "starting. Time: [" + now_str() + "]");
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "Balancing boundary mass flux",
+                                    0ll,
+                                    1ll,
+                                    true);
                 double avg_du = 0.0, net_b = 0.0, net_a = 0.0;
                 auto eval = [&](const float3& q)->float3 {
                     uint x = 0u, y = 0u, z = 0u;
@@ -5197,8 +5505,14 @@ void main_setup() {
                     const float u_mag = profile_speed_lbmu(q.z, ground_z);
                     return float3(dir_x * u_mag, dir_y * u_mag, 0.0f);
                 };
-                apply_flux_correction(lbm, downstream_bc, eval, /*show_report=*/true,
+                apply_flux_correction(lbm, case_downstream_bc, eval, /*show_report=*/true,
                     &avg_du, &net_b, &net_a);
+                emit_progress_stage("flux_correction",
+                                    "Flux correction",
+                                    "avg dU = " + to_string(avg_du, 3u) + " m/s, net after = " + to_string(net_a, 3u),
+                                    1ll,
+                                    1ll,
+                                    false);
             }
             else {
                 print_kv_row("Flux correction", "skipped. Set flux_correction=true to enable");
@@ -5209,7 +5523,7 @@ void main_setup() {
                 : ("ANG_" + format_tag(angle_deg) + "_");
             std::unique_ptr<VonKarmanInletUpdater> vk_updater;
             if (vk_inlet_settings.enable) {
-                VkInletRuntimeConfig vk_runtime = make_vk_runtime_config();
+                VkInletRuntimeConfig vk_runtime = make_vk_runtime_config(case_downstream_bc);
                 vk_updater = std::make_unique<VonKarmanInletUpdater>(vk_runtime);
                 if (!vk_updater->initialize(lbm)) {
                     vk_updater.reset();

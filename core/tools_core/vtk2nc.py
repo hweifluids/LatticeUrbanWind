@@ -4,7 +4,7 @@
 
 
 import sys
-import re
+import argparse
 from pathlib import Path
 import numpy as np
 import xarray as xr
@@ -22,6 +22,12 @@ except Exception as e:
     print(f"[Error] pyproj import failed: {e}")
     sys.exit(1)
 
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck
+
 
 def soft_exit(msg: str, code: int = 1) -> None:
     """Print a message and exit with a non zero code."""
@@ -38,29 +44,15 @@ def parse_luw(cfg_path: Path) -> dict:
       si_y_cfd = [min_y, max_y]  optional
     Returns a dict with found values.
     """
-    txt = cfg_path.read_text(encoding="utf-8", errors="ignore")
-
-    def find_scalar(key: str) -> str | None:
-        m = re.search(rf"{key}\s*=\s*([^\s]+)", txt)
-        return m.group(1) if m else None
-
-    def find_pair(key: str) -> tuple[float, float] | None:
-        m = re.search(rf"{key}\s*=\s*\[([^\]]+)\]", txt)
-        if not m:
-            return None
-        try:
-            a, b = [float(v) for v in m.group(1).split(",")]
-            return a, b
-        except Exception:
-            return None
+    deck = load_deck(cfg_path)
 
     cfg = {
-        "casename": find_scalar("casename"),
-        "datetime": find_scalar("datetime"),
-        "si_x_cfd": find_pair("si_x_cfd"),
-        "si_y_cfd": find_pair("si_y_cfd"),
-        "cut_lon_manual": find_pair("cut_lon_manual"),
-        "cut_lat_manual": find_pair("cut_lat_manual"),
+        "casename": deck.get_text("casename"),
+        "datetime": deck.get_text("datetime"),
+        "si_x_cfd": deck.get_pair("si_x_cfd"),
+        "si_y_cfd": deck.get_pair("si_y_cfd"),
+        "cut_lon_manual": deck.get_pair("cut_lon_manual"),
+        "cut_lat_manual": deck.get_pair("cut_lat_manual"),
     }
 
     return cfg
@@ -162,10 +154,12 @@ def build_coordinates_from_origin_spacing(dims: tuple[int, int, int], origin: tu
 
 
 def main():
-    # Argument parsing
-    if len(sys.argv) != 2:
-        soft_exit("Usage: python script.py /path/to/config.luw")
-    cfg_path = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description="Export a LUW solver result to NetCDF.")
+    parser.add_argument("config_path", help="Path to the LUW deck file")
+    parser.add_argument("--output", default=None, help="Optional NetCDF output path")
+    args = parser.parse_args()
+
+    cfg_path = Path(args.config_path).resolve()
     if not cfg_path.is_file():
         soft_exit(f"Config file not found: {cfg_path}")
     if cfg_path.suffix.lower() != ".luw":
@@ -346,7 +340,9 @@ def main():
     }
 
     # Output path in RESULTS
-    out_nc = results_dir / f"uvw-{casename}_{datetime_str}.nc"
+    out_nc = Path(args.output).resolve() if args.output else (results_dir / f"uvw-{casename}_{datetime_str}.nc")
+    out_nc.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[Info] NetCDF output path: {out_nc}")
     try:
         ds.to_netcdf(out_nc, mode="w", format="NETCDF4", encoding=encoding)
     except Exception as e:

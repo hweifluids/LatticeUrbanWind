@@ -18,6 +18,7 @@
 # Ignore all files under /example, including files in subfolders
 /example/**
 /run/**
+/database/**
 
 # Re-allow directories so we can unignore specific files
 !/example/**/

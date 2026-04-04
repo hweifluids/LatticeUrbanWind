@@ -31,6 +31,10 @@
 		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/Internal/CMakeCommonLinkerInformation.cmake",
 		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/Platform/Linker/Windows-MSVC-CXX.cmake",
 		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/Platform/Linker/Windows-MSVC.cmake",
+		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindGit.cmake",
+		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake",
+		"C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageMessage.cmake",
+		"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BuildInfo.h.in",
 		"C:/Qt/6.8.0/msvc2022_64/lib/cmake/Qt6/Qt6ConfigVersion.cmake",
 		"C:/Qt/6.8.0/msvc2022_64/lib/cmake/Qt6/Qt6ConfigVersionImpl.cmake",
 		"C:/Qt/6.8.0/msvc2022_64/lib/cmake/Qt6/Qt6Config.cmake",
@@ -352,6 +356,12 @@
 			null
 		],
 		[
+			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BuildInfo.h.in",
+			"MU",
+			"S3YOOGFUTE/moc_BuildInfo.h.cpp",
+			null
+		],
+		[
 			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BuildingScalePanel.h",
 			"MU",
 			"S3YOOGFUTE/moc_BuildingScalePanel.cpp",
@@ -397,6 +407,30 @@
 			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Preferences.h",
 			"MU",
 			"S3YOOGFUTE/moc_Preferences.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ProgressPanel.h",
+			"MU",
+			"S3YOOGFUTE/moc_ProgressPanel.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/RuntimePaths.h",
+			"MU",
+			"S3YOOGFUTE/moc_RuntimePaths.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/StartupDiagnostics.h",
+			"MU",
+			"S3YOOGFUTE/moc_StartupDiagnostics.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/include/luwgui/StartupSplash.h",
+			"MU",
+			"S3YOOGFUTE/moc_StartupSplash.cpp",
 			null
 		],
 		[
@@ -516,6 +550,7 @@
 	"MOC_INCLUDES_Debug" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
 		"C:/Qt/6.8.0/msvc2022_64/mkspecs/win32-msvc",
@@ -530,6 +565,7 @@
 	"MOC_INCLUDES_MinSizeRel" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
 		"C:/Qt/6.8.0/msvc2022_64/mkspecs/win32-msvc",
@@ -544,6 +580,7 @@
 	"MOC_INCLUDES_RelWithDebInfo" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
 		"C:/Qt/6.8.0/msvc2022_64/mkspecs/win32-msvc",
@@ -558,6 +595,7 @@
 	"MOC_INCLUDES_Release" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
 		"C:/Qt/6.8.0/msvc2022_64/mkspecs/win32-msvc",
@@ -657,6 +695,26 @@
 		],
 		[
 			"C:/1_Development/LatticeUrbanWind/gui/src/Preferences.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/ProgressPanel.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/RuntimePaths.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/StartupDiagnostics.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/StartupSplash.cpp",
 			"MU",
 			null
 		],

@@ -36,6 +36,7 @@ private:
 void apply_inlet_outlet_hd(LBM& lbm,
                            const std::string& downstream_bc,
                            const InletVelocityFieldHD& inlet,
+                           bool downstream_open_face = false,
                            unsigned long min_work_per_thread = 500000ull,
                            bool show_progress = true,
                            int side_ref_z_cap_index = -1);

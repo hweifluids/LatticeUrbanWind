@@ -68,6 +68,7 @@ float3 InletVelocityField::operator()(const float3& pos) const {
 void apply_inlet_outlet(LBM& lbm,
     const std::string& downstream_bc,
     const InletVelocityField& inlet,
+    bool downstream_open_face,
     unsigned long min_work_per_thread,
     bool show_progress,
     int side_ref_z_cap_index) {
@@ -105,18 +106,38 @@ void apply_inlet_outlet(LBM& lbm,
     if (show_progress) {
         monitor = std::thread([&]() {
             const unsigned long long N = lbm.get_N();
+            const bool gui_progress = luw_progress_gui_mode();
             while (!done.load(std::memory_order_relaxed)) {
+                const unsigned long long current = processed.load(std::memory_order_relaxed);
                 const double pct = (N == 0ull)
                     ? 100.0
-                    : 100.0 * static_cast<double>(processed.load(std::memory_order_relaxed)) / static_cast<double>(N);
-                std::fprintf(stdout, "\r[%s] inlet/outlet init: %6.2f%%",
-                    now_str_local().c_str(), pct);
-                std::fflush(stdout);
+                    : 100.0 * static_cast<double>(current) / static_cast<double>(N);
+                if (gui_progress) {
+                    luw_emit_progress("interface_interpolation",
+                                      "Interface interpolation",
+                                      "Low-order inlet/outlet mapping: " + to_string(current) + "/" + to_string(N) + " cells",
+                                      (long long)current,
+                                      (long long)N,
+                                      false);
+                } else {
+                    std::fprintf(stdout, "\r[%s] inlet/outlet init: %6.2f%%",
+                        now_str_local().c_str(), pct);
+                    std::fflush(stdout);
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            std::fprintf(stdout, "\r| [%s] inlet/outlet init: %6.2f%%                         |",
-                now_str_local().c_str(), 100.0);
-            std::fputc('\n', stdout);
+            if (gui_progress) {
+                luw_emit_progress("interface_interpolation",
+                                  "Interface interpolation",
+                                  "Low-order inlet/outlet mapping completed",
+                                  (long long)N,
+                                  (long long)N,
+                                  false);
+            } else {
+                std::fprintf(stdout, "\r| [%s] inlet/outlet init: %6.2f%%                         |",
+                    now_str_local().c_str(), 100.0);
+                std::fputc('\n', stdout);
+            }
             });
     }
 
@@ -151,7 +172,8 @@ void apply_inlet_outlet(LBM& lbm,
                         else if (downstream_bc == "-x") outlet = (x == 0u);
 
                         const bool inlet_face =
-                            ((x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u) && !outlet);
+                            (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u || z == Nz - 1u) &&
+                            !(downstream_open_face && outlet);
 
                         if (inlet_face) {
                             lbm.flags[n] = TYPE_E;
@@ -165,7 +187,7 @@ void apply_inlet_outlet(LBM& lbm,
                             lbm.u.y[n] = u.y;
                             lbm.u.z[n] = u.z;
                         }
-                        else if (outlet) {
+                        else if (downstream_open_face && outlet) {
                             lbm.flags[n] = TYPE_E;
                         }
                     }

@@ -22,6 +22,15 @@ import sys
 import re
 import time
 
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck, parse_deck_text
+from luw_progress import ProgressEmitter
+
+_PROGRESS = ProgressEmitter("Generating Boundary Conditions")
+
 # limit threads for numpy/scipy to avoid over-subscription
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -391,15 +400,13 @@ def _log_error(msg: str) -> None:
 def _parse_target_lonlat_from_conf(conf_raw: str | None) -> Optional[Tuple[float, float, float, float]]:
     if not conf_raw:
         return None
-    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-    if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
+    deck = parse_deck_text(conf_raw)
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
+    if lon_pair is None or lat_pair is None:
         return None
-
-    lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
-    lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
-    lon_min, lon_max = sorted((lon_min_c, lon_max_c))
-    lat_min, lat_max = sorted((lat_min_c, lat_max_c))
+    lon_min, lon_max = lon_pair
+    lat_min, lat_max = lat_pair
     return lon_min, lon_max, lat_min, lat_max
 
 
@@ -838,30 +845,31 @@ def _read_conf_and_nc_path(conf_path: Union[str, Path]) -> Tuple[Path | None, di
         _log_error(f"conf file not found: {conf_file}")
         raise FileNotFoundError(str(conf_file))
 
-    txt = conf_file.read_text(encoding="utf-8", errors="ignore")
+    deck = load_deck(conf_file)
+    duplicate_keys = deck.duplicate_keys()
+    if duplicate_keys:
+        _log_warn(
+            "Duplicate deck keys found; keep the last value and rewrite canonically: "
+            + ", ".join(duplicate_keys)
+        )
+        deck.save(conf_file)
+
+    txt = deck.render()
     conf: dict = {"__raw__": txt}
 
-    m_case = re.search(r"casename\s*=\s*([^\s]+)", txt)
-    if not m_case:
+    casename = deck.get_text("casename")
+    if not casename:
         _log_error("casename not found in conf")
         raise RuntimeError("casename missing in conf")
-    casename = m_case.group(1)
     conf["casename"] = casename
 
-    m_dt = re.search(r"datetime\s*=\s*([0-9]{14})", txt)
-    if m_dt:
-        dt_str = m_dt.group(1)
-    else:
+    dt_str = deck.get_text("datetime")
+    if not dt_str or re.fullmatch(r"[0-9]{14}", dt_str.strip()) is None:
         dt_str = "20990101120000"
         _log_warn("datetime not provided in conf, use 20990101120000 and write it back")
-        # 追加写回到现有 conf
-        with open(conf_file, "a", encoding="utf-8") as f:
-            if not txt.endswith("\n"):
-                f.write("\n")
-            f.write(f"datetime = {dt_str}\n")
-        # 刷新原文
-        txt = conf_file.read_text(encoding="utf-8", errors="ignore")
-        conf["__raw__"] = txt
+        deck.set_text("datetime", dt_str)
+        deck.save(conf_file)
+        conf["__raw__"] = deck.render()
     conf["datetime"] = dt_str
 
     project_home = conf_file.parent
@@ -900,25 +908,24 @@ def _crop_wind_by_utm_bounds(ds: xr.Dataset, conf_raw: str | None, utm_crs: str)
         return ds
 
     ds = _ensure_lonlat_geo_coords(ds)
+    conf_doc = parse_deck_text(conf_raw)
 
-    m_utm_x = re.search(r"cut_utm_x\s*=\s*\[([^\]]+)\]", conf_raw)
-    m_utm_y = re.search(r"cut_utm_y\s*=\s*\[([^\]]+)\]", conf_raw)
+    utm_x_pair = conf_doc.get_pair("cut_utm_x")
+    utm_y_pair = conf_doc.get_pair("cut_utm_y")
 
-    if m_utm_x and m_utm_y and m_utm_x.group(1).strip() and m_utm_y.group(1).strip():
-        x_lo, x_hi = [float(v) for v in m_utm_x.group(1).split(",")]
-        y_lo, y_hi = [float(v) for v in m_utm_y.group(1).split(",")]
+    if utm_x_pair is not None and utm_y_pair is not None:
+        x_lo, x_hi = utm_x_pair
+        y_lo, y_hi = utm_y_pair
         _log_info(f"Using direct UTM bounds from config: X=[{x_lo}, {x_hi}], Y=[{y_lo}, {y_hi}]")
     else:
-        m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-        m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-        if not (m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip()):
+        lon_pair = conf_doc.get_pair("cut_lon_manual")
+        lat_pair = conf_doc.get_pair("cut_lat_manual")
+        if lon_pair is None or lat_pair is None:
             _log_info("cut_lon_manual or cut_lat_manual not provided, skip cropping")
             return ds
 
-        lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
-        lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
-        lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
-        lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
+        lon_lo, lon_hi = lon_pair
+        lat_lo, lat_hi = lat_pair
 
         transformer_ll2utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
         x_lo, y_lo = transformer_ll2utm.transform(lon_lo, lat_lo)
@@ -1126,8 +1133,10 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
     if verbose:
         _log_info(f"Total vertical levels to interpolate: {nz}")
         _log_info("Start horizontal interpolation onto uniform grid: precomputed barycentric weights with nearest fallback")
-        sys.stdout.write("[INFO] Horizontal interpolation progress (# is 5%): |")
-        sys.stdout.flush()
+        _PROGRESS.progress("horizontal_interpolation", 0, max(nz, 1), f"Interpolating horizontal levels 0/{nz}", force=True)
+        if not _PROGRESS.enabled:
+            sys.stdout.write("[INFO] Horizontal interpolation progress (# is 5%): |")
+            sys.stdout.flush()
 
     next_percent_idx = 1  # 1..20
 
@@ -1157,16 +1166,18 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
         v_out[k] = out_v_flat.reshape(ny, nx)
 
         if verbose:
-            progress_ratio = (k + 1) / nz if nz > 0 else 1.0
-            while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-                sys.stdout.write("#")
-                if next_percent_idx % 4 == 0:
-                    sys.stdout.write(f"|{next_percent_idx * 5}%|")
-                sys.stdout.flush()
-                next_percent_idx += 1
+            _PROGRESS.progress("horizontal_interpolation", k + 1, max(nz, 1), f"Interpolating horizontal levels {k + 1}/{nz}")
+            if not _PROGRESS.enabled:
+                progress_ratio = (k + 1) / nz if nz > 0 else 1.0
+                while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                    sys.stdout.write("#")
+                    if next_percent_idx % 4 == 0:
+                        sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                    sys.stdout.flush()
+                    next_percent_idx += 1
 
     if verbose:
-        if next_percent_idx <= 20:
+        if not _PROGRESS.enabled and next_percent_idx <= 20:
             while next_percent_idx <= 20:
                 sys.stdout.write("#")
                 if next_percent_idx % 4 == 0:
@@ -1174,9 +1185,11 @@ def _interp_to_uniform_meter_grid(u: np.ndarray, v: np.ndarray,
                 next_percent_idx += 1
             sys.stdout.flush()
 
-        sys.stdout.write("|Finished|\n")
-        sys.stdout.flush()
+        if not _PROGRESS.enabled:
+            sys.stdout.write("|Finished|\n")
+            sys.stdout.flush()
         _log_info("Horizontal interpolation finished")
+        _PROGRESS.complete("horizontal_interpolation", f"Interpolated {nz} vertical levels")
 
     dx = (x_max - x_min) / (nx - 1) if nx > 1 else 0.0
     dy = (y_max - y_min) / (ny - 1) if ny > 1 else 0.0
@@ -1194,6 +1207,7 @@ def buildBC_dev(
         nc_path_resolved, conf, conf_file = _read_conf_and_nc_path(conf_path)
         if nc_path_resolved is None:
             raise FileNotFoundError("Cannot determine input nc path. Provide casename in deck file or pass nc_path")
+        _PROGRESS.stage("load_wind", f"Loading wind climate: {Path(nc_path_resolved).name}")
         _log_info(f"Open NetCDF: {nc_path_resolved}")
 
         # parallel config for dask: auto threads equals CPU count
@@ -1207,6 +1221,7 @@ def buildBC_dev(
 
         # Load DEM data (will be reprojected to UTM)
         project_home = conf_file.parent
+        _PROGRESS.stage("load_dem", "Loading terrain DEM and boundary context")
         dem_points_utm, dem_elevations = _load_dem_data(project_home, utm_crs, conf_raw=conf.get("__raw__"))
 
         # Get UTM CRS first
@@ -1244,6 +1259,7 @@ def buildBC_dev(
                 _log_warn(f"Failed to validate wind NC bounds: {e}")
 
         # UTM-based crop (same coordinate system as DEM)
+        _PROGRESS.stage("crop_wind", "Cropping wind field to target domain")
         ds = _crop_wind_by_utm_bounds(ds, conf.get("__raw__"), utm_crs)
 
         # vertical coordinate detection (support WRF: bottom_top as dim without coord)
@@ -1285,6 +1301,7 @@ def buildBC_dev(
                     "must use native NC spacing before horizontal interpolation"
                 )
             else:
+                _PROGRESS.stage("dense_interpolation", "Interpolating wind field to dense compute grid")
                 _log_info("Start interpolation on lon, lat and vertical (Dense Compute)...")
                 if len(new_coords) == 1:
                     ds = ds.interp(new_coords, method="pchip")
@@ -1429,14 +1446,12 @@ def buildBC_dev(
         target_domain_size = None
         domain_origin_rot = None
         if conf.get("__raw__"):
-            conf_raw = conf.get("__raw__")
-            m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-            m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", conf_raw)
-            if m_lon and m_lat and m_lon.group(1).strip() and m_lat.group(1).strip():
-                lon_min_c, lon_max_c = [float(v) for v in m_lon.group(1).split(",")]
-                lat_min_c, lat_max_c = [float(v) for v in m_lat.group(1).split(",")]
-                lon_lo, lon_hi = sorted((lon_min_c, lon_max_c))
-                lat_lo, lat_hi = sorted((lat_min_c, lat_max_c))
+            conf_doc = parse_deck_text(conf.get("__raw__"))
+            lon_pair = conf_doc.get_pair("cut_lon_manual")
+            lat_pair = conf_doc.get_pair("cut_lat_manual")
+            if lon_pair is not None and lat_pair is not None:
+                lon_lo, lon_hi = lon_pair
+                lat_lo, lat_hi = lat_pair
 
                 transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
                 x00, y00 = transformer.transform(lon_lo, lat_lo)
@@ -1510,39 +1525,22 @@ def buildBC_dev(
 
         # Choose target grid resolution in each horizontal direction:
         # make the spacing close to midmesh_basesize (default 50 m) and exactly divide the domain length
-        conf_raw = conf.get("__raw__")
-
+        conf_doc = parse_deck_text(conf.get("__raw__", ""))
         base_height = 50.0
-        if conf_raw:
-            m_bh = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-            if m_bh:
-                try:
-                    base_height = float(m_bh.group(1))
-                except Exception:
-                    base_height = 50.0
+        base_height_conf = conf_doc.get_float("base_height")
+        if base_height_conf is not None:
+            base_height = base_height_conf
         if (not math.isfinite(base_height)) or (base_height < 0.0):
             base_height = 50.0
 
-        z_limit_agl = None
-        if conf_raw:
-            m_zlim = re.search(r"z_limit\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-            if m_zlim:
-                try:
-                    z_limit_agl = float(m_zlim.group(1))
-                except Exception:
-                    z_limit_agl = None
+        z_limit_agl = conf_doc.get_float("z_limit")
         if (z_limit_agl is not None) and ((not math.isfinite(z_limit_agl)) or (z_limit_agl <= 0.0)):
             z_limit_agl = None
 
         mesh_base = 50.0
-
-        if conf_raw:
-            m_mb = re.search(r"midmesh_basesize\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-            if m_mb:
-                try:
-                    mesh_base = float(m_mb.group(1))
-                except Exception:
-                    mesh_base = 50.0
+        mesh_base_conf = conf_doc.get_float("midmesh_basesize")
+        if mesh_base_conf is not None:
+            mesh_base = mesh_base_conf
         if (not math.isfinite(mesh_base)) or (mesh_base <= 0.0):
             mesh_base = 50.0
 
@@ -1611,6 +1609,7 @@ def buildBC_dev(
         dem_points_shifted = None
         dem_data_to_save = None
         if dem_points_utm is not None and dem_elevations is not None:
+            _PROGRESS.stage("terrain_grid", "Interpolating terrain onto CFD grid")
             _log_info("Interpolating DEM to wind field grid")
             x_grid = np.linspace(0.0, x_range_target, nx)
             y_grid = np.linspace(0.0, y_range_target, ny)
@@ -1715,6 +1714,7 @@ def buildBC_dev(
             z_min_raw = float(z_src_raw[0])
             z_top = float(z_src_raw[-1])
 
+        _PROGRESS.stage("vertical_resample", "Resampling vertical CFD grid")
         n_cell_z = max(1, int(round(z_top / mesh_base)))
         nz_new = n_cell_z + 1
         z_new = np.linspace(0.0, z_top, nz_new, dtype=np.float32)
@@ -1802,36 +1802,25 @@ def buildBC_dev(
             float(np.nanmean(w))
         ], dtype=float)
 
+        if target_domain_size is not None:
+            si_x_range, si_y_range = target_domain_size
+            _log_info(f"Using target domain size for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
+        else:
+            si_x_range = x_max_data - x_min_data
+            si_y_range = y_max_data - y_min_data
+            _log_info(f"Using data bounds for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
+
         # write cropped lon/lat and SI ranges back to conf
         if conf_file.exists():
-            conf_lines = conf_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            while len(conf_lines) < 49:
-                conf_lines.append("")
-            conf_lines[19] = "// WRF Data Range in lon/lat"
-            # conf_lines[20] = f"cut_lon_wrf = [{orig_lon_min:.6f}, {orig_lon_max:.6f}]"
-            # conf_lines[21] = f"cut_lat_wrf = [{orig_lat_min:.6f}, {orig_lat_max:.6f}]"
-            conf_lines[14] = "// Projected SI Range after rotation"
-
-            # Use target_domain_size if available (from config bounds), otherwise use data bounds
-            if target_domain_size is not None:
-                si_x_range, si_y_range = target_domain_size
-                _log_info(f"Using target domain size for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
-            else:
-                si_x_range = x_max_data - x_min_data
-                si_y_range = y_max_data - y_min_data
-                _log_info(f"Using data bounds for si_x/y_cfd: {si_x_range:.3f} x {si_y_range:.3f} m")
-
-            conf_lines[15] = f"si_x_cfd = [0.000000, {si_x_range:.6f}]"
-            conf_lines[16] = f"si_y_cfd = [0.000000, {si_y_range:.6f}]"
-            conf_lines[17] = f"si_z_cfd = [0.000000, {z_top_output:.6f}]"
-
-
-            conf_lines[20:23] = [
-                f"utm_crs = \"{utm_crs}\"",
-                f"rotate_deg = {rotate_deg:.6f}",
-                "origin_shift_applied = true",
-            ]
-            conf_file.write_text("\n".join(conf_lines), encoding="utf-8")
+            deck = load_deck(conf_file)
+            deck.set_pair("si_x_cfd", (0.0, si_x_range))
+            deck.set_pair("si_y_cfd", (0.0, si_y_range))
+            deck.set_pair("si_z_cfd", (0.0, z_top_output))
+            deck.set_text("utm_crs", utm_crs, quoted=True)
+            deck.set_float("rotate_deg", rotate_deg)
+            deck.set_bool("origin_shift_applied", True)
+            deck.save(conf_file)
+            conf["__raw__"] = deck.render()
             _log_info("Wrote lon/lat and SI ranges to deck file")
 
         proj_temp = project_home / "proj_temp"
@@ -1875,6 +1864,7 @@ def buildBC_dev(
         # Save DEM data as pkl for 3_voxelization_with_dem.py
         if dem_data_to_save is not None:
             dem_pkl_path = proj_temp / "dem_grid.pkl"
+            _PROGRESS.stage("write_dem_cache", f"Saving terrain cache: {dem_pkl_path.name}")
             with open(dem_pkl_path, 'wb') as f:
                 pickle.dump(dem_data_to_save, f)
             _log_info(f"Saved DEM grid data to: {dem_pkl_path}")
@@ -1887,6 +1877,7 @@ def buildBC_dev(
 
 
         if dem_grid is not None:
+            _PROGRESS.stage("terrain_sampling", "Preparing terrain-following boundary sampling")
             _log_info(f"Applying terrain-following coordinates with fixed top at {z_max_output:.2f}m")
             _log_info(f"DEM elevation difference range: {dem_grid.min():.2f}m to {dem_grid.max():.2f}m")
             _log_info(f"Bottom elevation range: {base_height + dem_grid.min():.2f}m to {base_height + dem_grid.max():.2f}m")
@@ -1901,6 +1892,7 @@ def buildBC_dev(
                         "Boundary CSV may contain very few points; check vertical levels in the input NC."
                     )
         else:
+            _PROGRESS.stage("terrain_sampling", "Preparing flat-terrain boundary sampling")
             _log_info(f"No DEM data, applying flat base offset: Z = Z_grid + {base_height}m")
 
         def _idw_interp_1d(col: np.ndarray, z_query: float, z_src: np.ndarray) -> float:
@@ -2165,6 +2157,8 @@ def buildBC_dev(
         bc_cnt = 0
         csv_path = proj_temp / "SurfData_Latest.csv"
         write_temp = temp_k is not None
+        total_faces = 6
+        face_progress = 0
 
         # Log elevation scale if not 1.0
         if elevation_scale != 1.0:
@@ -2210,6 +2204,13 @@ def buildBC_dev(
                 fp.write(f"{x:.3f},{y:.3f},{z:.3f},{uval},{vval},{wval},{int(patch)}\n")
 
         with open(csv_path, "w", encoding="utf-8") as f:
+            _PROGRESS.progress(
+                "save_boundary_csv",
+                0,
+                total_faces,
+                f"Writing boundary CSV: {csv_path.name} (0/{total_faces} faces)",
+                force=True,
+            )
             if write_temp:
                 f.write("X,Y,Z,u,v,w,T,patch\n")
             else:
@@ -2239,6 +2240,13 @@ def buildBC_dev(
                     )
                     bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
+            face_progress += 1
+            _PROGRESS.progress(
+                "save_boundary_csv",
+                face_progress,
+                total_faces,
+                f"Writing boundary CSV: bottom face {face_progress}/{total_faces}",
+            )
 
             # top face: keep as a flat plane (do not follow terrain)
             for j in range(ny):
@@ -2259,6 +2267,13 @@ def buildBC_dev(
                     )
                     bc_sum += np.array([uval, vval, 0.0])
                     bc_cnt += 1
+            face_progress += 1
+            _PROGRESS.progress(
+                "save_boundary_csv",
+                face_progress,
+                total_faces,
+                f"Writing boundary CSV: top face {face_progress}/{total_faces}",
+            )
 
             # south and north faces
             for j in (0, ny - 1):
@@ -2306,6 +2321,14 @@ def buildBC_dev(
                         )
                         bc_sum += np.array([uval, vval, 0.0])
                         bc_cnt += 1
+                face_progress += 1
+                face_name = "south" if j == 0 else "north"
+                _PROGRESS.progress(
+                    "save_boundary_csv",
+                    face_progress,
+                    total_faces,
+                    f"Writing boundary CSV: {face_name} face {face_progress}/{total_faces}",
+                )
 
 
             # west and east faces
@@ -2354,6 +2377,14 @@ def buildBC_dev(
                         )
                         bc_sum += np.array([uval, vval, 0.0])
                         bc_cnt += 1
+                face_progress += 1
+                face_name = "west" if i == 0 else "east"
+                _PROGRESS.progress(
+                    "save_boundary_csv",
+                    face_progress,
+                    total_faces,
+                    f"Writing boundary CSV: {face_name} face {face_progress}/{total_faces}",
+                )
 
 
         _log_info(f"Wrote boundary CSV: {csv_path}")
@@ -2361,15 +2392,16 @@ def buildBC_dev(
         # copy timestamped CSV
         if conf_file.exists():
             txt = conf.get("__raw__", conf_file.read_text(encoding="utf-8", errors="ignore"))
-            m_dt = re.search(r"datetime\s*=\s*([0-9]{14})", txt)
-            if m_dt:
-                dt_str = m_dt.group(1)
-            else:
+            dt_str = parse_deck_text(txt).get_text("datetime")
+            if not dt_str or re.fullmatch(r"[0-9]{14}", dt_str.strip()) is None:
                 dt_str = "20990101120000"
                 _log_warn("datetime not provided in conf, use 20990101120000")
             dst_path = proj_temp / f"SurfData_{dt_str}.csv"
             shutil.copyfile(csv_path, dst_path)
             _log_info(f"Copied timestamped CSV: {dst_path}")
+            _PROGRESS.complete("save_boundary_csv", f"Saved boundary CSV: {dst_path.name}")
+        else:
+            _PROGRESS.complete("save_boundary_csv", f"Saved boundary CSV: {csv_path.name}")
 
         # boundary mean and downstream face
         um_bc = bc_sum / bc_cnt if bc_cnt > 0 else np.zeros(3, dtype=float)
@@ -2390,15 +2422,13 @@ def buildBC_dev(
         yaw_angle = sign * theta
 
         if conf_file.exists():
-            conf_lines = conf_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            while len(conf_lines) < 49:
-                conf_lines.append("")
-            conf_lines[24] = "// Volume-mean uvw and downstream boundary with yaw angle"
-            conf_lines[25] = f"um_vol = [{um_vol[0]:.6f}, {um_vol[1]:.6f}, {um_vol[2]:.6f}]"
-            conf_lines[26] = f"um_bc = [{um_bc[0]:.6f}, {um_bc[1]:.6f}, {um_bc[2]:.6f}]"
-            conf_lines[27] = f'downstream_bc = "{downstream_face}"'
-            conf_lines[28] = f"downstream_bc_yaw = {yaw_angle:.2f}"
-            conf_file.write_text("\n".join(conf_lines), encoding="utf-8")
+            deck = load_deck(conf_file)
+            deck.set_list("um_vol", [um_vol[0], um_vol[1], um_vol[2]])
+            deck.set_list("um_bc", [um_bc[0], um_bc[1], um_bc[2]])
+            deck.set_text("downstream_bc", downstream_face, quoted=True)
+            deck.set_float("downstream_bc_yaw", yaw_angle, precision=2)
+            deck.save(conf_file)
+            conf["__raw__"] = deck.render()
             _log_info("Wrote mean velocity and downstream info to deck file")
 
         # close file

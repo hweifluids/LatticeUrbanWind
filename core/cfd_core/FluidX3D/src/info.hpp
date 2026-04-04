@@ -16,6 +16,7 @@ struct Info { // contains redundant information for console printing
 	double phase_normal_step_s=0.0, phase_avg_step_s=0.0; // averaged wall-time per solver step
 	double phase_normal_runtime_sum=0.0, phase_avg_runtime_sum=0.0;
 	ulong phase_normal_samples=0ull, phase_avg_samples=0ull;
+	bool progress_console_enabled=true;
 	uint cpu_mem_required=0u, gpu_mem_required=0u; // all in MB
 	string collision = "";
 	std::mutex allow_printing; // to prevent threading conflicts when continuously printing updates to console

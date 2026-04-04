@@ -1,11 +1,13 @@
 C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Debug/S3YOOGFUTE/moc_MainWindow.cpp: C:/1_Development/LatticeUrbanWind/gui/include/luwgui/MainWindow.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BatchBoundaryPanel.h \
+  C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BoundaryCsvPanel.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BuildingScalePanel.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/CommandRunner.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ConfigDocument.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ConfigSchema.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ConsolePanel.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Preferences.h \
+  C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ProgressPanel.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Theme.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/VtkViewWidget.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/WavenumberPanel.h \

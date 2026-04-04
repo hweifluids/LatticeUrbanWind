@@ -1,6 +1,12 @@
 from pathlib import Path
 from typing import Tuple, Optional, Union
-import re
+import sys
+
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import parse_deck_text
 
 
 def get_utm_zone_from_lon(lon: float) -> int:
@@ -35,23 +41,12 @@ def _parse_lonlat_pairs_from_text(txt: str) -> Optional[Tuple[Tuple[float, float
     Parse cut_lon_manual and cut_lat_manual from config text.
     Returns ((lon_min, lon_max), (lat_min, lat_max)) or None if not both found.
     """
-    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", txt)
-    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", txt)
-    if not (m_lon and m_lat):
+    deck = parse_deck_text(txt)
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
+    if lon_pair is None or lat_pair is None:
         return None
-
-    def _parse_pair(m) -> Tuple[float, float]:
-        arr = [s.strip() for s in m.group(1).split(",")]
-        vals = [float(v) for v in arr if v]
-        if not vals:
-            raise ValueError("Empty lon or lat list in config")
-        vmin = min(vals)
-        vmax = max(vals)
-        return vmin, vmax
-
-    lon_min, lon_max = _parse_pair(m_lon)
-    lat_min, lat_max = _parse_pair(m_lat)
-    return (lon_min, lon_max), (lat_min, lat_max)
+    return lon_pair, lat_pair
 
 
 def get_utm_crs_from_bounds(lon_pair: Tuple[float, float], lat_pair: Tuple[float, float]) -> str:

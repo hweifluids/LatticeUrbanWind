@@ -30,6 +30,12 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck
+
 
 def _ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
@@ -114,30 +120,30 @@ class CaseConfig:
 def parse_luw_config(luw_path: Path) -> CaseConfig:
     if not luw_path.is_file():
         fail(f"LUW file not found: {luw_path}")
-    raw = luw_path.read_text(encoding="utf-8", errors="ignore")
+    deck = load_deck(luw_path)
 
-    casename = _parse_scalar(raw, "casename")
+    casename = deck.get_text("casename")
     if not casename:
         fail("Missing key 'casename' in LUW file.")
 
-    datetime_str = _parse_scalar(raw, "datetime")
+    datetime_str = deck.get_text("datetime")
 
-    lon_pair = _parse_pair(raw, "cut_lon_manual")
-    lat_pair = _parse_pair(raw, "cut_lat_manual")
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
     if lon_pair is None or lat_pair is None:
         fail("Missing 'cut_lon_manual' or 'cut_lat_manual' in LUW file.")
 
     lon_lo, lon_hi = sorted((lon_pair[0], lon_pair[1]))
     lat_lo, lat_hi = sorted((lat_pair[0], lat_pair[1]))
 
-    utm_crs = _parse_scalar(raw, "utm_crs")
+    utm_crs = deck.get_text("utm_crs")
     if not utm_crs:
         lon_c = 0.5 * (lon_lo + lon_hi)
         lat_c = 0.5 * (lat_lo + lat_hi)
         utm_crs = _infer_utm_from_lonlat(lon_c, lat_c)
         log_warn(f"'utm_crs' not found in LUW. Auto-inferred CRS: {utm_crs}")
 
-    rotate_conf = _safe_float(_parse_scalar(raw, "rotate_deg"))
+    rotate_conf = deck.get_float("rotate_deg")
 
     # Recompute from geographic lower edge when value is missing.
     tf_ll2utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)

@@ -243,7 +243,7 @@ VtkViewWidget::VtkViewWidget(QWidget* parent)
     watermarkActor_->SetInput("LatticeUrbanWind");
     watermarkActor_->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
     watermarkActor_->SetPosition(0.02, 0.92);
-    watermarkActor_->GetTextProperty()->SetFontFamilyToTimes();
+    watermarkActor_->GetTextProperty()->SetFontFamilyAsString("Segoe UI");
     watermarkActor_->GetTextProperty()->SetBold(true);
     watermarkActor_->GetTextProperty()->SetItalic(false);
     watermarkActor_->GetTextProperty()->SetColor(0.45, 0.45, 0.45);

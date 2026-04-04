@@ -3,6 +3,7 @@ C:/1_Development/LatticeUrbanWind/gui/CMakeLists.txt
 C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/3.31.6-msvc6/CMakeCXXCompiler.cmake
 C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/3.31.6-msvc6/CMakeRCCompiler.cmake
 C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/3.31.6-msvc6/CMakeSystem.cmake
+C:/1_Development/LatticeUrbanWind/gui/include/luwgui/BuildInfo.h.in
 C:/1_Development/deps/VTK-install/lib/cmake/vtk-9.3/FindDirectX.cmake
 C:/1_Development/deps/VTK-install/lib/cmake/vtk-9.3/VTK-targets-release.cmake
 C:/1_Development/deps/VTK-install/lib/cmake/vtk-9.3/VTK-targets.cmake
@@ -42,6 +43,7 @@ C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtens
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/Compiler/MSVC-CXX.cmake
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/Compiler/MSVC.cmake
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/ExternalData.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindGit.cmake
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageMessage.cmake
 C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindThreads.cmake

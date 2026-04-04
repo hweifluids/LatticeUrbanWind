@@ -1,3 +1,9 @@
 {
-    "theme_mode": "light"
+    "default_project_location": "E:/2_Cases/1_CFD/UrbanWinds",
+    "font_size_preset": "normal",
+    "recent_project_files": [
+        "E:/2_Cases/1_CFD/UrbanWinds/ShenzhenVPort/ShenZhenTest1/conf.luw"
+    ],
+    "recent_project_limit": 10,
+    "theme_mode": "frieren"
 }

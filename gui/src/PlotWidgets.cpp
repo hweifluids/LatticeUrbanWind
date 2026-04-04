@@ -312,12 +312,10 @@ void SpectrumPlotWidget::paintEvent(QPaintEvent* event) {
     painter.fillRect(rect(), palette().base());
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QRectF box = plotBoxFor(this, 76, 40, 24, 50);
+    const QRectF box = plotBoxFor(this, 76, 18, 24, 50);
     painter.setPen(gridColor(this));
     painter.drawRect(box);
 
-    painter.setPen(mix(palette().windowText().color(), palette().window().color(), 0.2));
-    painter.drawText(QRectF(10, 8, width() - 20, 20), Qt::AlignLeft | Qt::AlignVCenter, title_);
     painter.drawText(QRectF(10, height() - 28, width() - 20, 20), Qt::AlignHCenter | Qt::AlignVCenter, xAxisTitle_);
     painter.save();
     painter.translate(16, height() / 2.0);
@@ -484,14 +482,12 @@ void HeatmapPlotWidget::paintEvent(QPaintEvent* event) {
     painter.fillRect(rect(), palette().base());
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QRectF box = plotBoxFor(this, 84, 40, 82, 52);
+    const QRectF box = plotBoxFor(this, 84, 18, 82, 52);
     const QRectF colorBarRect(box.right() + 18.0, box.top(), 18.0, box.height());
     painter.setPen(gridColor(this));
     painter.drawRect(box);
     painter.drawRect(colorBarRect);
 
-    painter.setPen(mix(palette().windowText().color(), palette().window().color(), 0.2));
-    painter.drawText(QRectF(10, 8, width() - 20, 20), Qt::AlignLeft | Qt::AlignVCenter, title_);
     painter.drawText(QRectF(10, height() - 28, width() - 20, 20), Qt::AlignHCenter | Qt::AlignVCenter, xAxisTitle_);
     painter.save();
     painter.translate(18, height() / 2.0);
@@ -572,7 +568,6 @@ void DistributionPlotWidget::paintEvent(QPaintEvent* event) {
     painter.drawRect(box);
 
     painter.setPen(mix(palette().windowText().color(), palette().window().color(), 0.2));
-    painter.drawText(QRectF(8, 8, width() - 16, 20), Qt::AlignLeft | Qt::AlignVCenter, "Building Short-Side Distribution");
     painter.drawText(QRectF(8, height() - 24, width() - 16, 20), Qt::AlignHCenter | Qt::AlignVCenter, "Short-side length (m)");
     painter.drawText(QRectF(8, box.top() - 2, 120, 18), Qt::AlignLeft | Qt::AlignVCenter, "PDF");
     painter.drawText(QRectF(width() - 120, box.top() - 2, 110, 18), Qt::AlignRight | Qt::AlignVCenter, "CDF");

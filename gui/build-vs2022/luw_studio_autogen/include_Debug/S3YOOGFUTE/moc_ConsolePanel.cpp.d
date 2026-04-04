@@ -158,6 +158,7 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_De
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpaintdevice.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpalette.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpen.h \
+  C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpicture.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpixelformat.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpixmap.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qpointingdevice.h \
@@ -181,12 +182,14 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_De
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qvectornd.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qwindowdefs.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qwindowdefs_win.h \
+  C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QLabel \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QPlainTextEdit \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QToolButton \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QWidget \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qabstractbutton.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qabstractscrollarea.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qframe.h \
+  C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qlabel.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qplaintextedit.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qsizepolicy.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qtextedit.h \

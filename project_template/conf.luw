@@ -3,6 +3,7 @@ cut_lon_manual=[121.3,121.7]
 cut_lat_manual=[31.1,31.4]
 datetime = 20251010120000
 z_limit = 500
+geometry_mode = 2
 base_height=50
 midmesh_basesize=10
 
@@ -37,17 +38,28 @@ validation = pass
 high_order = true
 flux_correction = true
 coriolis_term = true
-vk_inlet_enable = false
-vk_inlet_ti = 0.10
+ibm_enabler = false
+enable_buffer_nudging = 1
+buffer_thickness_m = 160.0
+buffer_tau_s = 300.0
+buffer_nudge_vertical = 0
+enable_top_sponge = 1
+sponge_thickness_m = 200.0
+sponge_tau_s = 120.0
+sponge_ref_mode = 0
+turb_inflow_enable = true
+turb_inflow_approach = vonkarman
+vk_inlet_ti = 0.050000
 vk_inlet_sigma = 0.0
-vk_inlet_L = 0.0
-vk_inlet_nmodes = 128
-vk_inlet_seed = 1469598103934665603
+vk_inlet_l = 100.0
+vk_inlet_nmodes = 256
+vk_inlet_seed = 100
 vk_inlet_update_stride = 1
-vk_inlet_uc_mode = NORMAL_COMPONENT
-vk_inlet_same_realization_all_faces = false
+vk_inlet_uc_mode = NORM_MEAN
+vk_inlet_same_realization_all_faces = true
 vk_inlet_stride_interpolation = false
-vk_inlet_inflow_only = true
+vk_inlet_inflow_only = false
+vk_inlet_anisotropy = [1.0, 1.0, 1.0]
 
 
 

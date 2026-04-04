@@ -12,6 +12,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVariantList>
@@ -580,6 +581,9 @@ WavenumberPanel::WavenumberPanel(QWidget* parent)
     root->addWidget(summaryLabel_);
 
     plotTabs_ = new QTabWidget(this);
+    plotTabs_->tabBar()->setUsesScrollButtons(false);
+    plotTabs_->tabBar()->setExpanding(true);
+    plotTabs_->tabBar()->setElideMode(Qt::ElideNone);
     energyPlot_ = new SpectrumPlotWidget(plotTabs_);
     energyPlot_->setTitle("3D Isotropic Energy Spectrum");
     energyPlot_->setXAxisTitle("Wavenumber k (rad / m)");
@@ -601,10 +605,10 @@ WavenumberPanel::WavenumberPanel(QWidget* parent)
     lesTabCorner_ = new QWidget(plotTabs_);
     auto* lesCornerLayout = new QHBoxLayout(lesTabCorner_);
     lesCornerLayout->setContentsMargins(0, 0, 0, 0);
+    lesCornerLayout->setSpacing(6);
     lesCornerLayout->addWidget(new QLabel("Height", lesTabCorner_));
     lesHeightCombo_ = new QComboBox(lesTabCorner_);
     lesCornerLayout->addWidget(lesHeightCombo_);
-    plotTabs_->setCornerWidget(lesTabCorner_, Qt::TopRightCorner);
 
     root->addWidget(plotTabs_, 1);
     updateTabUi();
@@ -666,6 +670,9 @@ void WavenumberPanel::setSuggestedFilePath(const QString& filePath, bool autoAna
 
 void WavenumberPanel::updateTabUi() {
     const bool lesTabActive = plotTabs_ && plotTabs_->currentWidget() == lesPlot_;
+    if (plotTabs_ && lesTabCorner_) {
+        plotTabs_->setCornerWidget(lesTabActive ? lesTabCorner_ : nullptr, Qt::TopRightCorner);
+    }
     if (lesTabCorner_) {
         lesTabCorner_->setVisible(lesTabActive);
     }

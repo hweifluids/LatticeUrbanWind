@@ -13,6 +13,9 @@
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\Preferences.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\RuntimePaths.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ConfigSchema.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -23,6 +26,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ConsolePanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\ProgressPanel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\BatchBoundaryPanel.cpp">
@@ -46,6 +52,12 @@
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\MainWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\StartupDiagnostics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\StartupSplash.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_Release.cpp">
       <Filter>Source Files\Generated</Filter>
     </ClCompile>
@@ -57,10 +69,16 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\BuildInfo.h.in">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\Theme.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\Preferences.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\RuntimePaths.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ConfigSchema.h">
@@ -73,6 +91,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ConsolePanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\ProgressPanel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\BatchBoundaryPanel.h">
@@ -94,6 +115,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\MainWindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\StartupDiagnostics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\StartupSplash.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

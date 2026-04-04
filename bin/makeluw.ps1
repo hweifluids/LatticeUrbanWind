@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$false, Position=0)][string]$ConfPath)
 
 if (-not $env:LUW_HOME) { Write-Error "LUW_HOME is not set"; exit 2 }
 
-$py = if ($env:PYTHON) { $env:PYTHON } else { "python" }
+$py = if ($env:LUW_PYTHON) { $env:LUW_PYTHON } elseif ($env:PYTHON) { $env:PYTHON } else { "python" }
 $target = Join-Path $env:LUW_HOME "core\tools_core\makeluw.py"
 if (-not (Test-Path $target)) { Write-Error "Target script not found: $target"; exit 2 }
 

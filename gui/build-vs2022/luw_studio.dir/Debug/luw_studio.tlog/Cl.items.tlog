@@ -1,0 +1,16 @@
+C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_Debug.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\mocs_compilation_Debug.obj
+C:\1_Development\LatticeUrbanWind\gui\src\main.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\main.obj
+C:\1_Development\LatticeUrbanWind\gui\src\Theme.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\Theme.obj
+C:\1_Development\LatticeUrbanWind\gui\src\Preferences.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\Preferences.obj
+C:\1_Development\LatticeUrbanWind\gui\src\ConfigSchema.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ConfigSchema.obj
+C:\1_Development\LatticeUrbanWind\gui\src\ConfigDocument.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ConfigDocument.obj
+C:\1_Development\LatticeUrbanWind\gui\src\CommandRunner.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\CommandRunner.obj
+C:\1_Development\LatticeUrbanWind\gui\src\ConsolePanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ConsolePanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\ProgressPanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ProgressPanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\BatchBoundaryPanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\BatchBoundaryPanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\BoundaryCsvPanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\BoundaryCsvPanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\PlotWidgets.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\PlotWidgets.obj
+C:\1_Development\LatticeUrbanWind\gui\src\VtkViewWidget.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\VtkViewWidget.obj
+C:\1_Development\LatticeUrbanWind\gui\src\WavenumberPanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\WavenumberPanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\BuildingScalePanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\BuildingScalePanel.obj
+C:\1_Development\LatticeUrbanWind\gui\src\MainWindow.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\MainWindow.obj

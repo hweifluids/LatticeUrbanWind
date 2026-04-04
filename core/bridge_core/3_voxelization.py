@@ -22,6 +22,15 @@ from scipy.interpolate import griddata
 from auto_UTM import get_utm_crs_from_conf_raw
 from dem_tif_to_shp import ensure_dem_shp_from_tif
 
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck, parse_deck_text
+from luw_progress import ProgressEmitter
+
+_PROGRESS = ProgressEmitter("Generating Voxel Domain")
+
 def _parse_base_height_from_conf_raw(conf_raw: str) -> float | None:
     """
     Parse base_height from conf raw text if present.
@@ -29,12 +38,8 @@ def _parse_base_height_from_conf_raw(conf_raw: str) -> float | None:
     """
     if not conf_raw:
         return None
-    m = re.search(r"base_height\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", conf_raw)
-    if not m:
-        return None
-    try:
-        v = float(m.group(1))
-    except Exception:
+    v = parse_deck_text(conf_raw).get_float("base_height")
+    if v is None:
         return None
     if (not math.isfinite(v)) or (v < 0.0):
         return None
@@ -201,18 +206,23 @@ def load_dem_data(dem_shp_path: Path, work_crs):
     # Get centroids and elevations
     points = []
     elevations = []
-    for idx, row in dem_gdf.iterrows():
+    total_rows = len(dem_gdf)
+    _PROGRESS.progress("load_dem", 0, max(total_rows, 1), f"Sampling DEM points 0/{total_rows}", force=True)
+    for row_index, (_, row) in enumerate(dem_gdf.iterrows(), start=1):
         geom = row.geometry
         if geom is None or geom.is_empty:
+            _PROGRESS.progress("load_dem", row_index, max(total_rows, 1), f"Sampling DEM points {row_index}/{total_rows}")
             continue
         elev = _safe_float(row[elevation_col])
         if elev is None:
+            _PROGRESS.progress("load_dem", row_index, max(total_rows, 1), f"Sampling DEM points {row_index}/{total_rows}")
             continue
         
         # Use centroid as representative point
         centroid = geom.centroid
         points.append([centroid.x, centroid.y])
         elevations.append(elev)
+        _PROGRESS.progress("load_dem", row_index, max(total_rows, 1), f"Sampling DEM points {row_index}/{total_rows}")
     
     if not points:
         print("[WARN] No valid DEM points found, will use flat terrain")
@@ -633,17 +643,13 @@ def _build_bbox_polygon_from_conf(conf_path) -> Polygon:
     conf_file = Path(conf_path).expanduser().resolve()
     if not conf_file.exists():
         raise FileNotFoundError(f"[ERROR] Configuration file not found: {conf_file}")
-    txt = conf_file.read_text(encoding="utf-8", errors="ignore")
-
-    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", txt)
-    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", txt)
-    if not (m_lon and m_lat):
+    deck = load_deck(conf_file)
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
+    if lon_pair is None or lat_pair is None:
         raise ValueError("conf 中未找到 cut_lon_manual/cut_lat_manual")
-
-    lon_vals = [float(v.strip()) for v in m_lon.group(1).split(",")]
-    lat_vals = [float(v.strip()) for v in m_lat.group(1).split(",")]
-    minx, maxx = min(lon_vals), max(lon_vals)
-    miny, maxy = min(lat_vals), max(lat_vals)
+    minx, maxx = lon_pair
+    miny, maxy = lat_pair
 
     ring = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
     return Polygon(ring)
@@ -796,6 +802,7 @@ def main():
 
     args = parser.parse_args()
     print("[INFO] Parsed CLI arguments")
+    _PROGRESS.stage("load_shapefile", "Loading cropped building geometries")
 
     conf_file = Path(args.conf).expanduser().resolve()
     if not conf_file.exists():
@@ -805,14 +812,14 @@ def main():
     proj_temp.mkdir(parents=True, exist_ok=True)
 
     txt_conf = conf_file.read_text(encoding="utf-8", errors="ignore")
-    m_case = re.search(r"casename\s*=\s*([^\s]+)", txt_conf)
-    if not m_case:
+    deck = load_deck(conf_file)
+    case_name = deck.get_text("casename")
+    if not case_name:
         raise RuntimeError("casename not found in conf")
-    case_name = m_case.group(1)
 
     # If --base-height is not provided, read from conf (same behavior as 1_buildBC.py)
     if args.base_height is None:
-        conf_base_height = _parse_base_height_from_conf_raw(txt_conf)
+        conf_base_height = deck.get_float("base_height")
         args.base_height = conf_base_height if conf_base_height is not None else 50.0
     if (not math.isfinite(float(args.base_height))) or (float(args.base_height) < 0.0):
         args.base_height = 50.0
@@ -905,12 +912,14 @@ def main():
         return pts, elevs, pkl_data
 
     if args.dem_source in ("auto", "shp"):
+        _PROGRESS.stage("load_dem", "Loading terrain DEM")
         print("[INFO] Loading DEM from shapefile/GeoTIFF ...")
         dem_points, dem_elevations = _try_load_dem_shp()
 
     if dem_points is None and args.dem_source in ("auto", "pkl", "shp"):
         if args.dem_source == "shp":
             print("[WARN] DEM shapefile/GeoTIFF not available. Falling back to PKL if present.")
+        _PROGRESS.stage("load_dem", "Loading cached terrain DEM")
         print("[INFO] Loading DEM from PKL ...")
         dem_points, dem_elevations, dem_data_pkl = _try_load_dem_pkl()
         use_pkl_dem = dem_data_pkl is not None and dem_points is not None and dem_elevations is not None
@@ -948,17 +957,13 @@ def main():
     conf_file_path = Path(conf_file).expanduser().resolve()
     if not conf_file_path.exists():
         raise FileNotFoundError(f"[ERROR] Configuration file not found: {conf_file_path}")
-    txt = conf_file_path.read_text(encoding="utf-8", errors="ignore")
-
-    m_lon = re.search(r"cut_lon_manual\s*=\s*\[([^\]]+)\]", txt)
-    m_lat = re.search(r"cut_lat_manual\s*=\s*\[([^\]]+)\]", txt)
-    if not (m_lon and m_lat):
+    conf_deck = load_deck(conf_file_path)
+    lon_pair = conf_deck.get_pair("cut_lon_manual")
+    lat_pair = conf_deck.get_pair("cut_lat_manual")
+    if lon_pair is None or lat_pair is None:
         raise ValueError("conf 中未找到 cut_lon_manual/cut_lat_manual")
-
-    lon_vals = [float(v.strip()) for v in m_lon.group(1).split(",")]
-    lat_vals = [float(v.strip()) for v in m_lat.group(1).split(",")]
-    lon_min, lon_max = min(lon_vals), max(lon_vals)
-    lat_min, lat_max = min(lat_vals), max(lat_vals)
+    lon_min, lon_max = lon_pair
+    lat_min, lat_max = lat_pair
 
     print(f"[INFO] Config bounds: lon=[{lon_min}, {lon_max}], lat=[{lat_min}, {lat_max}]")
 
@@ -971,10 +976,8 @@ def main():
     x01, y01 = transformer.transform(lon_min, lat_max)
 
     # Read rotate_deg from conf when present; otherwise compute from lower edge
-    m_rot = re.search(r"rotate_deg\s*=\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", txt)
-    if m_rot:
-        rotate_deg_conf = float(m_rot.group(1))
-    else:
+    rotate_deg_conf = conf_deck.get_float("rotate_deg")
+    if rotate_deg_conf is None:
         dx0 = x10 - x00
         dy0 = y10 - y00
         angle_rad = math.atan2(dy0, dx0)
@@ -1031,21 +1034,28 @@ def main():
         dem_points = _rotate_points_xy(dem_points, rotate_deg, pivot_xy)
 
     # Filter buildings by height (no rotation needed)
+    _PROGRESS.stage("filter_buildings", "Filtering buildings by height")
     print("[INFO] Filtering building polygons by height")
     rotated_polygons = []
     heights = []
-    for _, row in gdf_work.iterrows():
+    total_rows = len(gdf_work)
+    _PROGRESS.progress("filter_buildings", 0, max(total_rows, 1), f"Filtering buildings 0/{total_rows}", force=True)
+    for index, (_, row) in enumerate(gdf_work.iterrows(), start=1):
         geom = row.geometry
         if geom is None or geom.is_empty:
+            _PROGRESS.progress("filter_buildings", index, max(total_rows, 1), f"Filtering buildings {index}/{total_rows}")
             continue
         h = _safe_float(row.get(args.height_field))
         if h is None or h <= args.min_height:
+            _PROGRESS.progress("filter_buildings", index, max(total_rows, 1), f"Filtering buildings {index}/{total_rows}")
             continue
         geom_valid = _make_valid(geom)
         if geom_valid is None or geom_valid.is_empty:
+            _PROGRESS.progress("filter_buildings", index, max(total_rows, 1), f"Filtering buildings {index}/{total_rows}")
             continue
         polys = _to_iter_polygons(geom_valid)
         if not polys:
+            _PROGRESS.progress("filter_buildings", index, max(total_rows, 1), f"Filtering buildings {index}/{total_rows}")
             continue
         for poly in polys:
             try:
@@ -1057,18 +1067,22 @@ def main():
                 heights.append(h)
             except Exception:
                 continue
+        _PROGRESS.progress("filter_buildings", index, max(total_rows, 1), f"Filtering buildings {index}/{total_rows}")
 
 
     if not rotated_polygons:
         raise RuntimeError("[ERROR] No valid building polygons available")
 
     # Clip buildings to boundary
+    _PROGRESS.stage("clip_buildings", "Clipping buildings to CFD domain")
     print("[INFO] Clipping buildings to boundary box")
     clipped_polygons = []
     clipped_heights = []
     boundary_box = base_rot
 
-    for poly, h in zip(rotated_polygons, heights):
+    total_clips = len(rotated_polygons)
+    _PROGRESS.progress("clip_buildings", 0, max(total_clips, 1), f"Clipping polygons 0/{total_clips}", force=True)
+    for index, (poly, h) in enumerate(zip(rotated_polygons, heights), start=1):
         try:
             clipped = poly.intersection(boundary_box)
             if not clipped.is_empty and clipped.area > 0:
@@ -1082,6 +1096,7 @@ def main():
                             clipped_heights.append(h)
         except Exception:
             continue
+        _PROGRESS.progress("clip_buildings", index, max(total_clips, 1), f"Clipping polygons {index}/{total_clips}")
 
     rotated_polygons = clipped_polygons
     heights = clipped_heights
@@ -1111,11 +1126,13 @@ def main():
         dem_points[:, 1] += ty
 
     # Create base layer (z=0 to z=base_height)
+    _PROGRESS.stage("create_base", f"Creating base layer to {args.base_height:.2f} m")
     print(f"[INFO] Creating base layer from z=0 to z={args.base_height}m")
     base_mesh = extrude_polygon_to_mesh(base_final, args.base_height)
     print("[INFO] Base layer created")
 
     # Create terrain mesh (sits on top of base layer)
+    _PROGRESS.stage("terrain_mesh", "Creating terrain mesh")
     terrain_mesh = create_terrain_mesh(
         base_final,
         dem_points,
@@ -1138,6 +1155,7 @@ def main():
     # Create fast elevation lookup grid for building placement
     # Use finer resolution (10m) for more accurate building base elevations
     # Note: dem_elevations are already adjusted to datum (min=0)
+    _PROGRESS.stage("terrain_lookup", "Preparing terrain lookup grid")
     X_elev_grid, Y_elev_grid, Z_elev_grid = create_elevation_lookup_grid(
         base_final,
         dem_points,
@@ -1163,6 +1181,7 @@ def main():
 
     total_buildings = len(shifted_polygons)
     extrude_start_time = time.time()
+    _PROGRESS.progress("voxelize", 0, max(total_buildings, 1), f"Extruding buildings 0/{total_buildings}", force=True)
     print(f"[INFO] Extruding {total_buildings} buildings in parallel...")
 
 
@@ -1185,8 +1204,9 @@ def main():
 
     task_batches = [tasks[i:i + batch_size] for i in range(0, len(tasks), batch_size)]
 
-    sys.stdout.write(f"[INFO] Using {len(task_batches)} batches for {batch_size} parallel tasks |")
-    sys.stdout.flush()
+    if not _PROGRESS.enabled:
+        sys.stdout.write(f"[INFO] Using {len(task_batches)} batches for {batch_size} parallel tasks |")
+        sys.stdout.flush()
 
 
     max_workers = min(32, os.cpu_count() or 1)
@@ -1217,13 +1237,15 @@ def main():
                     results[idx] = res
 
                     completed += 1
-                    progress_ratio = completed / nz if nz > 0 else 1.0
-                    while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-                        sys.stdout.write("#")
-                        if next_percent_idx % 4 == 0:
-                            sys.stdout.write(f"|{next_percent_idx * 5}%|")
-                        sys.stdout.flush()
-                        next_percent_idx += 1
+                    _PROGRESS.progress("voxelize", completed, max(nz, 1), f"Extruding buildings {completed}/{nz}")
+                    if not _PROGRESS.enabled:
+                        progress_ratio = completed / nz if nz > 0 else 1.0
+                        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                            sys.stdout.write("#")
+                            if next_percent_idx % 4 == 0:
+                                sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                            sys.stdout.flush()
+                            next_percent_idx += 1
                 del future_to_batch[future]
 
         for future in concurrent.futures.as_completed(list(future_to_batch)):
@@ -1233,18 +1255,22 @@ def main():
                 results[idx] = res
 
                 completed += 1
-                progress_ratio = completed / nz if nz > 0 else 1.0
-                while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-                    sys.stdout.write("#")
-                    if next_percent_idx % 4 == 0:
-                        sys.stdout.write(f"|{next_percent_idx * 5}%|")
-                    sys.stdout.flush()
-                    next_percent_idx += 1
+                _PROGRESS.progress("voxelize", completed, max(nz, 1), f"Extruding buildings {completed}/{nz}")
+                if not _PROGRESS.enabled:
+                    progress_ratio = completed / nz if nz > 0 else 1.0
+                    while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                        sys.stdout.write("#")
+                        if next_percent_idx % 4 == 0:
+                            sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                        sys.stdout.flush()
+                        next_percent_idx += 1
 
+        if not _PROGRESS.enabled:
+            sys.stdout.flush()
+
+    if not _PROGRESS.enabled:
+        sys.stdout.write("|Finished|\n")
         sys.stdout.flush()
-
-    sys.stdout.write("|Finished|\n")
-    sys.stdout.flush()
 
     for idx, m, base_elev, err in results:
         if err is not None:
@@ -1294,7 +1320,9 @@ def main():
             print(f"[WARN] Mesh combination failed: {e}")
             final_mesh = trimesh.util.concatenate(meshes_to_combine)
 
+    _PROGRESS.stage("save_stl", f"Saving STL: {combined_file.name}")
     final_mesh.export(combined_file, file_type="stl")
+    _PROGRESS.complete("save_stl", f"Saved STL: {combined_file.name}")
     print(f"[INFO] Exported STL with terrain: {combined_file.resolve()}")
 
     # Report statistics

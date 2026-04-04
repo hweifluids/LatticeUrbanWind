@@ -55,17 +55,12 @@ signals:
     void externalFileReloadFailed(const QString& filePath, const QString& error);
 
 private:
-    struct ParsedLine {
-        enum class Type {
-            Raw,
-            KeyValue
-        };
-
-        Type type = Type::Raw;
-        QString raw;
+    struct DeckEntry {
         QString key;
         QString value;
+        QString sectionId;
         QString comment;
+        bool known = false;
     };
 
     static int commentIndex(const QString& line);
@@ -73,21 +68,27 @@ private:
     static QString normalizeKey(const QString& key);
     static QVariant parseValue(const FieldSpec& spec, const QString& rawValue);
     static QString serializeValue(const FieldSpec& spec, const QVariant& value);
+    static QString renderEntry(const DeckEntry& entry);
 
     bool readTextFile(const QString& filePath, QString* text, QString* errorMessage) const;
+    void rewriteCanonicalFileIfNeeded(const QString& originalText);
     void syncWatchPaths();
     void scheduleExternalReload();
-    void rebuildIndex();
+    bool parseDocument(const QString& text, bool strictDuplicates, QString* errorMessage);
     void setTextInternal(const QString& text);
-    int ensureManagedSection();
-    void upsertLine(const QString& key, const QString& value);
+    QStringList renderSection(const QString& sectionId) const;
+    void rememberUnknownKey(const QString& sectionId, const QString& key);
+    void forgetUnknownKey(const QString& key);
 
     QString filePath_;
     QString repoRoot_;
     QString rawText_;
     RunMode mode_ = RunMode::Luw;
-    QVector<ParsedLine> lines_;
-    QHash<QString, int> keyToLine_;
+    QStringList preambleLines_;
+    QHash<QString, QStringList> sectionLooseLines_;
+    QHash<QString, DeckEntry> entries_;
+    QHash<QString, QStringList> unknownOrder_;
+    QStringList duplicateKeys_;
     QHash<QString, QString> values_;
     QFileSystemWatcher* watcher_ = nullptr;
     QTimer* externalReloadTimer_ = nullptr;

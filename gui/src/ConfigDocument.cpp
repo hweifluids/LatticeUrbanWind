@@ -1,31 +1,18 @@
 #include "luwgui/ConfigDocument.h"
+#include "luwgui/RuntimePaths.h"
 
-#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QRegularExpression>
 #include <QStringBuilder>
-#include <QTimer>
 #include <QTextStream>
+#include <QTimer>
 
 namespace luwgui {
 
 namespace {
-
-QString detectRepoRoot() {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 8; ++depth) {
-        if (dir.exists("core") && dir.exists("bin")) {
-            return dir.absolutePath();
-        }
-        if (!dir.cdUp()) {
-            break;
-        }
-    }
-    return QDir::currentPath();
-}
 
 QString normalizeTextForCompare(QString text) {
     text.replace("\r\n", "\n");
@@ -100,6 +87,141 @@ QString renderList(const QVariantList& values, bool integerMode) {
     return "[" % parts.join(",   ") % "]";
 }
 
+QString normalizeSectionLabel(QString text) {
+    text = text.trimmed().toLower();
+    if (text.startsWith('[')) {
+        const int endIndex = text.indexOf(']');
+        if (endIndex > 0) {
+            text = text.mid(1, endIndex - 1);
+        }
+    }
+    return text.simplified();
+}
+
+QStringList sectionOrder() {
+    return {
+        "project",
+        "domain",
+        "generated",
+        "cfd",
+        "output",
+        "physics",
+        "vk",
+        "batch",
+        "custom",
+    };
+}
+
+QString sectionTitle(const QString& sectionId) {
+    if (sectionId == "project") {
+        return "Project";
+    }
+    if (sectionId == "domain") {
+        return "Domain";
+    }
+    if (sectionId == "generated") {
+        return "Generated";
+    }
+    if (sectionId == "cfd") {
+        return "CFD Controls";
+    }
+    if (sectionId == "output") {
+        return "Output & Probes";
+    }
+    if (sectionId == "physics") {
+        return "Physics";
+    }
+    if (sectionId == "vk") {
+        return "Turbulence inflow";
+    }
+    if (sectionId == "batch") {
+        return "Batch";
+    }
+    if (sectionId == "custom") {
+        return "Custom";
+    }
+    return sectionId;
+}
+
+QStringList sectionAliases(const QString& sectionId) {
+    if (sectionId == "project") {
+        return {"project", "project info", "case"};
+    }
+    if (sectionId == "domain") {
+        return {"domain", "projected si range after rotation", "wrf data range in lon/lat"};
+    }
+    if (sectionId == "generated") {
+        return {"generated", "generated info", "volume-mean uvw and downstream boundary with yaw angle"};
+    }
+    if (sectionId == "cfd") {
+        return {"cfd control", "cfd controls"};
+    }
+    if (sectionId == "output") {
+        return {"output", "output and probes", "output & probes"};
+    }
+    if (sectionId == "physics") {
+        return {"physics"};
+    }
+    if (sectionId == "vk") {
+        return {"turbulence inflow", "vk inlet", "von karman inlet"};
+    }
+    if (sectionId == "batch") {
+        return {"batch", "batch modes", "dataset generation", "inflow directions"};
+    }
+    if (sectionId == "custom") {
+        return {"custom"};
+    }
+    return {};
+}
+
+QString orderedSectionForKey(const QString& key) {
+    const FieldSpec* spec = findFieldSpec(key);
+    if (spec) {
+        return spec->sectionId;
+    }
+    return "custom";
+}
+
+QString matchSectionHeader(const QString& strippedLine) {
+    if (strippedLine.isEmpty()) {
+        return {};
+    }
+    if (!strippedLine.startsWith("//") && !strippedLine.startsWith('#')) {
+        return {};
+    }
+
+    QString label = strippedLine.startsWith("//")
+        ? strippedLine.mid(2).trimmed()
+        : strippedLine.mid(1).trimmed();
+    const QString normalized = normalizeSectionLabel(label);
+
+    for (const QString& sectionId : sectionOrder()) {
+        if (normalized == normalizeSectionLabel(sectionId)) {
+            return sectionId;
+        }
+        if (normalized == normalizeSectionLabel(sectionTitle(sectionId))) {
+            return sectionId;
+        }
+        for (const QString& alias : sectionAliases(sectionId)) {
+            if (normalized == normalizeSectionLabel(alias)) {
+                return sectionId;
+            }
+        }
+    }
+
+    return {};
+}
+
+QStringList orderedKnownKeysForSection(const QString& sectionId) {
+    QStringList keys;
+    for (const FieldSpec& spec : fieldSpecs()) {
+        if (spec.sectionId == sectionId) {
+            keys.push_back(spec.key.toLower());
+        }
+    }
+    return keys;
+}
+
 } // namespace
 
 ConfigDocument::ConfigDocument(QObject* parent)
@@ -132,7 +254,10 @@ bool ConfigDocument::loadFromFile(const QString& filePath, QString* errorMessage
 
     filePath_ = QFileInfo(filePath).absoluteFilePath();
     mode_ = runModeFromPath(filePath_);
-    setTextInternal(text);
+    if (!parseDocument(text, false, errorMessage)) {
+        return false;
+    }
+    rewriteCanonicalFileIfNeeded(text);
     syncWatchPaths();
     emit modeChanged(mode_);
     emit documentReloaded();
@@ -162,7 +287,10 @@ bool ConfigDocument::reloadFromDisk(QString* errorMessage) {
     const RunMode nextMode = runModeFromPath(filePath_);
     const bool modeChangedNow = nextMode != mode_;
     mode_ = nextMode;
-    setTextInternal(text);
+    if (!parseDocument(text, false, errorMessage)) {
+        return false;
+    }
+    rewriteCanonicalFileIfNeeded(text);
     if (modeChangedNow) {
         emit modeChanged(mode_);
     }
@@ -205,8 +333,9 @@ bool ConfigDocument::saveAs(const QString& filePath, QString* errorMessage) {
 }
 
 bool ConfigDocument::applyRawText(const QString& text, QString* errorMessage) {
-    Q_UNUSED(errorMessage)
-    setTextInternal(text);
+    if (!parseDocument(text, true, errorMessage)) {
+        return false;
+    }
     emit documentReloaded();
     emit changed();
     return true;
@@ -235,20 +364,80 @@ QString ConfigDocument::rawText() const {
     return rawText_;
 }
 
-QString ConfigDocument::renderedText() const {
-    QStringList out;
-    out.reserve(lines_.size());
-    for (const ParsedLine& line : lines_) {
-        if (line.type == ParsedLine::Type::Raw) {
-            out.push_back(line.raw);
+QString ConfigDocument::renderEntry(const DeckEntry& entry) {
+    QString line = entry.key % " = " % entry.value;
+    if (!entry.comment.trimmed().isEmpty()) {
+        line += " " % entry.comment.trimmed();
+    }
+    return line;
+}
+
+QStringList ConfigDocument::renderSection(const QString& sectionId) const {
+    const QStringList looseLines = sectionLooseLines_.value(sectionId);
+    const QStringList knownKeys = orderedKnownKeysForSection(sectionId);
+    const QStringList unknownKeys = unknownOrder_.value(sectionId);
+
+    QStringList lines;
+    for (const QString& looseLine : looseLines) {
+        if (!looseLine.trimmed().isEmpty()) {
+            lines.push_back(looseLine);
+        }
+    }
+
+    for (const QString& key : knownKeys) {
+        const auto it = entries_.constFind(key);
+        if (it == entries_.cend() || it.value().sectionId != sectionId) {
             continue;
         }
-        QString rendered = line.key % " = " % line.value;
-        if (!line.comment.trimmed().isEmpty()) {
-            rendered += " " % line.comment.trimmed();
-        }
-        out.push_back(rendered);
+        lines.push_back(renderEntry(it.value()));
     }
+
+    for (const QString& key : unknownKeys) {
+        const auto it = entries_.constFind(key);
+        if (it == entries_.cend() || it.value().sectionId != sectionId || it.value().known) {
+            continue;
+        }
+        lines.push_back(renderEntry(it.value()));
+    }
+
+    if (lines.isEmpty()) {
+        return {};
+    }
+
+    QStringList out;
+    out.push_back("// " + sectionTitle(sectionId));
+    out.append(lines);
+    return out;
+}
+
+QString ConfigDocument::renderedText() const {
+    QStringList out;
+
+    if (!preambleLines_.isEmpty()) {
+        out = preambleLines_;
+        while (!out.isEmpty() && out.back().trimmed().isEmpty()) {
+            out.removeLast();
+        }
+        if (!out.isEmpty()) {
+            out.push_back("");
+        }
+    } else {
+        out << "// LUW deck" << "";
+    }
+
+    for (const QString& sectionId : sectionOrder()) {
+        const QStringList sectionLines = renderSection(sectionId);
+        if (sectionLines.isEmpty()) {
+            continue;
+        }
+        out.append(sectionLines);
+        out.push_back("");
+    }
+
+    while (!out.isEmpty() && out.back().trimmed().isEmpty()) {
+        out.removeLast();
+    }
+
     QString text = out.join('\n');
     if (!text.endsWith('\n')) {
         text += '\n';
@@ -292,10 +481,51 @@ QVariant ConfigDocument::typedValue(const QString& key) const {
     return parseValue(*spec, rawValue(normalized));
 }
 
+void ConfigDocument::rememberUnknownKey(const QString& sectionId, const QString& key) {
+    if (findFieldSpec(key)) {
+        return;
+    }
+    QStringList& keys = unknownOrder_[sectionId];
+    if (!keys.contains(key)) {
+        keys.push_back(key);
+    }
+}
+
+void ConfigDocument::forgetUnknownKey(const QString& key) {
+    for (auto it = unknownOrder_.begin(); it != unknownOrder_.end(); ++it) {
+        it.value().removeAll(key);
+    }
+}
+
 void ConfigDocument::setRawValue(const QString& key, const QString& value) {
     const QString normalized = normalizeKey(key);
-    values_[normalized] = value.trimmed();
-    upsertLine(normalized, value.trimmed());
+    const QString trimmed = value.trimmed();
+    const auto existing = entries_.constFind(normalized);
+
+    QString sectionId = orderedSectionForKey(normalized);
+    QString comment;
+    if (existing != entries_.cend()) {
+        sectionId = existing.value().sectionId;
+        comment = existing.value().comment;
+    }
+
+    const bool known = findFieldSpec(normalized) != nullptr;
+    if (known) {
+        forgetUnknownKey(normalized);
+    } else {
+        rememberUnknownKey(sectionId, normalized);
+    }
+
+    DeckEntry entry;
+    entry.key = normalized;
+    entry.value = trimmed;
+    entry.sectionId = sectionId;
+    entry.comment = comment;
+    entry.known = known;
+
+    entries_.insert(normalized, entry);
+    values_[normalized] = trimmed;
+    duplicateKeys_.removeAll(normalized);
     rawText_ = renderedText();
     emit keyChanged(normalized);
     emit changed();
@@ -351,7 +581,11 @@ QString ConfigDocument::normalizeText(const QString& text) {
 }
 
 QString ConfigDocument::normalizeKey(const QString& key) {
-    return key.trimmed().toLower();
+    const QString normalized = key.trimmed().toLower();
+    if (normalized == "vk_inlet_enable") {
+        return "turb_inflow_enable";
+    }
+    return normalized;
 }
 
 QVariant ConfigDocument::parseValue(const FieldSpec& spec, const QString& rawValue) {
@@ -434,19 +668,6 @@ QString ConfigDocument::serializeValue(const FieldSpec& spec, const QVariant& va
     return value.toString().trimmed();
 }
 
-void ConfigDocument::rebuildIndex() {
-    keyToLine_.clear();
-    values_.clear();
-    for (int i = 0; i < lines_.size(); ++i) {
-        const ParsedLine& line = lines_[i];
-        if (line.type != ParsedLine::Type::KeyValue) {
-            continue;
-        }
-        keyToLine_.insert(line.key, i);
-        values_.insert(line.key, line.value);
-    }
-}
-
 bool ConfigDocument::readTextFile(const QString& filePath, QString* text, QString* errorMessage) const {
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -462,6 +683,24 @@ bool ConfigDocument::readTextFile(const QString& filePath, QString* text, QStrin
         *text = in.readAll();
     }
     return true;
+}
+
+void ConfigDocument::rewriteCanonicalFileIfNeeded(const QString& originalText) {
+    if (filePath_.isEmpty()) {
+        return;
+    }
+    if (normalizeText(originalText) == normalizeText(rawText_)) {
+        return;
+    }
+
+    QFile file(filePath_);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return;
+    }
+
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << rawText_;
 }
 
 void ConfigDocument::syncWatchPaths() {
@@ -504,9 +743,28 @@ void ConfigDocument::scheduleExternalReload() {
     externalReloadTimer_->start();
 }
 
-void ConfigDocument::setTextInternal(const QString& text) {
-    rawText_ = text;
-    lines_.clear();
+bool ConfigDocument::parseDocument(const QString& text, bool strictDuplicates, QString* errorMessage) {
+    QStringList preambleLines;
+    QHash<QString, QStringList> sectionLooseLines;
+    QHash<QString, DeckEntry> entries;
+    QHash<QString, QStringList> unknownOrder;
+    QStringList duplicateKeys;
+    QHash<QString, QString> values;
+
+    const auto rememberUnknownKey = [&](const QString& sectionId, const QString& key) {
+        if (findFieldSpec(key)) {
+            return;
+        }
+        QStringList& keys = unknownOrder[sectionId];
+        if (!keys.contains(key)) {
+            keys.push_back(key);
+        }
+    };
+    const auto forgetUnknownKey = [&](const QString& key) {
+        for (auto it = unknownOrder.begin(); it != unknownOrder.end(); ++it) {
+            it.value().removeAll(key);
+        }
+    };
 
     QString normalized = text;
     normalized.replace("\r\n", "\n");
@@ -517,69 +775,82 @@ void ConfigDocument::setTextInternal(const QString& text) {
     }
 
     const QRegularExpression kvPattern(R"(^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$)");
+    QString currentSection;
+    bool sawStructuredContent = false;
 
     for (const QString& originalLine : rawLines) {
-        ParsedLine parsed;
-        const int cmtIndex = commentIndex(originalLine);
-        const QString content = (cmtIndex >= 0) ? originalLine.left(cmtIndex) : originalLine;
-        const QString comment = (cmtIndex >= 0) ? originalLine.mid(cmtIndex) : QString();
-        const QRegularExpressionMatch match = kvPattern.match(content);
-        if (!match.hasMatch()) {
-            parsed.type = ParsedLine::Type::Raw;
-            parsed.raw = originalLine;
-            lines_.push_back(parsed);
+        const QString stripped = originalLine.trimmed();
+        const QString headerSection = matchSectionHeader(stripped);
+        if (!headerSection.isEmpty()) {
+            currentSection = headerSection;
+            sawStructuredContent = true;
             continue;
         }
 
-        parsed.type = ParsedLine::Type::KeyValue;
-        parsed.key = normalizeKey(match.captured(1));
-        parsed.value = match.captured(2).trimmed();
-        parsed.comment = comment.trimmed();
-        lines_.push_back(parsed);
-    }
+        const int cmtIndex = commentIndex(originalLine);
+        const QString content = (cmtIndex >= 0) ? originalLine.left(cmtIndex) : originalLine;
+        const QString comment = (cmtIndex >= 0) ? originalLine.mid(cmtIndex).trimmed() : QString();
+        const QRegularExpressionMatch match = kvPattern.match(content);
+        if (match.hasMatch()) {
+            const QString key = normalizeKey(match.captured(1));
+            const QString value = match.captured(2).trimmed();
+            const bool known = findFieldSpec(key) != nullptr;
 
-    rebuildIndex();
-}
+            if (entries.contains(key) && !duplicateKeys.contains(key)) {
+                duplicateKeys.push_back(key);
+            }
+            if (entries.contains(key) && strictDuplicates) {
+                if (errorMessage) {
+                    *errorMessage = "Duplicate deck keys are not allowed: " + duplicateKeys.join(", ");
+                }
+                return false;
+            }
 
-int ConfigDocument::ensureManagedSection() {
-    static const QString marker = "// GUI managed additions";
-    for (int i = 0; i < lines_.size(); ++i) {
-        if (lines_[i].type == ParsedLine::Type::Raw && lines_[i].raw.trimmed() == marker) {
-            return i;
+            forgetUnknownKey(key);
+
+            DeckEntry entry;
+            entry.key = key;
+            entry.value = value;
+            entry.sectionId = known ? orderedSectionForKey(key) : (currentSection.isEmpty() ? "custom" : currentSection);
+            entry.comment = comment;
+            entry.known = known;
+
+            entries.insert(key, entry);
+            values.insert(key, value);
+            if (!known) {
+                rememberUnknownKey(entry.sectionId, key);
+            }
+            sawStructuredContent = true;
+            continue;
+        }
+
+        if (stripped.isEmpty()) {
+            if (!sawStructuredContent && currentSection.isEmpty()) {
+                preambleLines.push_back("");
+            }
+            continue;
+        }
+
+        if (!sawStructuredContent && currentSection.isEmpty()) {
+            preambleLines.push_back(originalLine);
+        } else {
+            const QString targetSection = currentSection.isEmpty() ? "custom" : currentSection;
+            sectionLooseLines[targetSection].push_back(originalLine);
         }
     }
 
-    if (!lines_.isEmpty()) {
-        ParsedLine blank;
-        blank.type = ParsedLine::Type::Raw;
-        blank.raw = "";
-        lines_.push_back(blank);
-    }
-
-    ParsedLine markerLine;
-    markerLine.type = ParsedLine::Type::Raw;
-    markerLine.raw = marker;
-    lines_.push_back(markerLine);
-    return lines_.size() - 1;
+    preambleLines_ = preambleLines;
+    sectionLooseLines_ = sectionLooseLines;
+    entries_ = entries;
+    unknownOrder_ = unknownOrder;
+    duplicateKeys_ = duplicateKeys;
+    values_ = values;
+    rawText_ = renderedText();
+    return true;
 }
 
-void ConfigDocument::upsertLine(const QString& key, const QString& value) {
-    const auto it = keyToLine_.constFind(key);
-    if (it != keyToLine_.cend()) {
-        ParsedLine& line = lines_[it.value()];
-        line.type = ParsedLine::Type::KeyValue;
-        line.key = key;
-        line.value = value;
-        return;
-    }
-
-    const int managedIndex = ensureManagedSection();
-    ParsedLine entry;
-    entry.type = ParsedLine::Type::KeyValue;
-    entry.key = key;
-    entry.value = value;
-    lines_.insert(managedIndex + 1, entry);
-    rebuildIndex();
+void ConfigDocument::setTextInternal(const QString& text) {
+    parseDocument(text, false, nullptr);
 }
 
-}
+} // namespace luwgui

@@ -1,7 +1,9 @@
 #include "luwgui/CommandRunner.h"
+#include "luwgui/RuntimePaths.h"
 
 #include <QDir>
-#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcessEnvironment>
 
 namespace luwgui {
@@ -10,7 +12,7 @@ QString commandPresetTitle(CommandPreset preset, RunMode mode) {
     Q_UNUSED(mode)
     switch (preset) {
     case CommandPreset::FullWorkflow:
-        return "Full Workflow";
+        return "Run preprocessing workflow";
     case CommandPreset::CdfInspect:
         return "Inspect Wind Climate Inputs";
     case CommandPreset::ShpInspect:
@@ -45,19 +47,19 @@ CommandRunner::CommandRunner(QObject* parent)
     process_->setProcessChannelMode(QProcess::MergedChannels);
 
     connect(process_, &QProcess::started, this, [this] {
+        pendingOutput_.clear();
+        pendingCarriageReturn_ = false;
         emit started(activeTitle_);
     });
     connect(process_, &QProcess::readyReadStandardOutput, this, [this] {
-        emit outputReady(QString::fromLocal8Bit(process_->readAllStandardOutput()));
-    });
-    connect(process_, &QProcess::readyReadStandardError, this, [this] {
-        emit errorText(QString::fromLocal8Bit(process_->readAllStandardError()));
+        processMergedOutput(process_->readAllStandardOutput());
     });
     connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         Q_UNUSED(error)
         emit errorText(process_->errorString() + "\n");
     });
     connect(process_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
+        flushPendingOutput();
         emit finished(activeTitle_, exitCode, exitStatus);
         activeTitle_.clear();
     });
@@ -77,6 +79,10 @@ bool CommandRunner::isRunning() const {
 
 QString CommandRunner::pythonExecutable() const {
     return findPython();
+}
+
+QString CommandRunner::activeTitle() const {
+    return activeTitle_;
 }
 
 CommandSpec CommandRunner::buildPreset(CommandPreset preset, const QStringList& extraArguments) const {
@@ -176,9 +182,104 @@ bool CommandRunner::startCommand(const CommandSpec& spec) {
         path.prepend(binPath + QDir::listSeparator());
     }
     env.insert("PATH", path);
+    env.insert("LUW_PROGRESS_MODE", "gui");
     process_->setProcessEnvironment(env);
     process_->start();
     return process_->waitForStarted(2000);
+}
+
+void CommandRunner::processMergedOutput(const QByteArray& data) {
+    QString chunk = QString::fromLocal8Bit(data);
+    int index = 0;
+
+    if (pendingCarriageReturn_) {
+        if (!chunk.isEmpty() && chunk.front() == '\n') {
+            dispatchCompletedLine(pendingOutput_);
+            pendingOutput_.clear();
+            index = 1;
+        } else {
+            handleStandaloneCarriageReturn();
+        }
+        pendingCarriageReturn_ = false;
+    }
+
+    for (; index < chunk.size(); ++index) {
+        const QChar ch = chunk.at(index);
+        if (ch == '\r') {
+            if (index + 1 < chunk.size()) {
+                if (chunk.at(index + 1) == '\n') {
+                    dispatchCompletedLine(pendingOutput_);
+                    pendingOutput_.clear();
+                    ++index;
+                } else {
+                    handleStandaloneCarriageReturn();
+                }
+            } else {
+                pendingCarriageReturn_ = true;
+            }
+            continue;
+        }
+
+        if (ch == '\n') {
+            dispatchCompletedLine(pendingOutput_);
+            pendingOutput_.clear();
+            continue;
+        }
+
+        pendingOutput_.append(ch);
+    }
+}
+
+void CommandRunner::flushPendingOutput() {
+    if (pendingCarriageReturn_) {
+        handleStandaloneCarriageReturn();
+        pendingCarriageReturn_ = false;
+    }
+    if (pendingOutput_.isEmpty()) {
+        return;
+    }
+    dispatchCompletedLine(pendingOutput_);
+    pendingOutput_.clear();
+}
+
+void CommandRunner::dispatchCompletedLine(const QString& line) {
+    if (!tryHandleProgressLine(line)) {
+        emit outputReady(line + "\n");
+    }
+}
+
+void CommandRunner::handleStandaloneCarriageReturn() {
+    const QString line = pendingOutput_.trimmed();
+    pendingOutput_.clear();
+    if (line.isEmpty()) {
+        return;
+    }
+    tryHandleProgressLine(line);
+}
+
+bool CommandRunner::tryHandleProgressLine(const QString& line) {
+    static const QString kProgressPrefix = QStringLiteral("[[LUW_PROGRESS]]");
+    if (!line.startsWith(kProgressPrefix)) {
+        return false;
+    }
+
+    const QByteArray payload = line.mid(kProgressPrefix.size()).trimmed().toUtf8();
+    QJsonParseError parseError{};
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return false;
+    }
+
+    const QJsonObject object = document.object();
+    const QString stage = object.value("stage").toString();
+    const QString summary = object.value("label").toString(stage.isEmpty() ? QStringLiteral("CFD progress") : stage);
+    const QString detail = object.value("detail").toString();
+    const qint64 current = object.value("current").toInteger(-1);
+    const qint64 total = object.value("total").toInteger(-1);
+    const bool indeterminate = object.value("indeterminate").toBool(current < 0 || total <= 0);
+
+    emit progressUpdated(summary, detail, current, total, indeterminate);
+    return true;
 }
 
 void CommandRunner::stop() {
@@ -208,7 +309,7 @@ QString CommandRunner::repoRoot() const {
     if (document_) {
         return document_->repoRoot();
     }
-    return QDir::currentPath();
+    return detectRepoRoot();
 }
 
 QString CommandRunner::deckPath() const {
@@ -227,47 +328,15 @@ QString CommandRunner::projectDirectory() const {
 }
 
 QString CommandRunner::findPython() const {
-    const QString root = repoRoot();
-    const QStringList candidates = {
-        QDir(root).filePath(".venv/Scripts/python.exe"),
-        QDir(root).filePath(".venv/bin/python"),
-        "python",
-        "python3"
-    };
-
-    for (const QString& candidate : candidates) {
-        if (candidate.contains('/') || candidate.contains('\\')) {
-            if (QFileInfo::exists(candidate)) {
-                return candidate;
-            }
-        } else {
-            return candidate;
-        }
-    }
-    return "python";
+    return findPythonExecutable(repoRoot());
 }
 
 QString CommandRunner::solverExecutable() const {
-    const QString root = repoRoot();
-    const QStringList candidates = {
-        QDir(root).filePath("core/cfd_core/FluidX3D/bin/FluidX3D.exe"),
-        QDir(root).filePath("core/cfd_core/FluidX3D/bin/FluidX3D"),
-        "FluidX3D"
-    };
-    for (const QString& candidate : candidates) {
-        if (candidate.contains('/') || candidate.contains('\\')) {
-            if (QFileInfo::exists(candidate)) {
-                return candidate;
-            }
-        } else {
-            return candidate;
-        }
-    }
-    return {};
+    return findSolverExecutable(repoRoot());
 }
 
 QString CommandRunner::scriptPath(const QString& relativePath) const {
-    return QDir(repoRoot()).filePath(relativePath);
+    return resolveRepoFilePath(repoRoot(), relativePath);
 }
 
 }

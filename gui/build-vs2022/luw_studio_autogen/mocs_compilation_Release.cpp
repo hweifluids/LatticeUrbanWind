@@ -7,5 +7,7 @@
 #include <S3YOOGFUTE/moc_ConsolePanel.cpp>
 #include <S3YOOGFUTE/moc_MainWindow.cpp>
 #include <S3YOOGFUTE/moc_PlotWidgets.cpp>
+#include <S3YOOGFUTE/moc_ProgressPanel.cpp>
+#include <S3YOOGFUTE/moc_StartupSplash.cpp>
 #include <S3YOOGFUTE/moc_VtkViewWidget.cpp>
 #include <S3YOOGFUTE/moc_WavenumberPanel.cpp>

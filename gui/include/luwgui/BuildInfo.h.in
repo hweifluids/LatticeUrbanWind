@@ -1,0 +1,15 @@
+#pragma once
+
+namespace luwgui::buildinfo {
+
+inline constexpr const char* kStudioVersion = "@LUW_STUDIO_VERSION@";
+inline constexpr const char* kBuildTimestamp = "@LUW_BUILD_TIMESTAMP@";
+inline constexpr const char* kCfdCoreVersion = "@LUW_CFD_CORE_VERSION@";
+inline constexpr const char* kAuthorName = "Huanxia Wei";
+inline constexpr const char* kAuthorEmail = "huanxia.wei@u.nus.edu";
+inline constexpr const char* kAuthorContact = "WeChat: TJerCZ";
+inline constexpr const char* kCopyrightNotice =
+    "Copyright (c) LatticeUrbanWind contributors. Use is governed by the repository license; "
+    "the bundled FluidX3D core remains subject to its own license terms.";
+
+} // namespace luwgui::buildinfo

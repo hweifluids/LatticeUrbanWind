@@ -191,6 +191,7 @@ void Info::print_initialize(LBM* lbm) {
 	runtime_lbm_timestep_smooth = 1.0;
 	runtime_lbm_samples = 0ull;
 	clear_two_phase_eta();
+	progress_console_enabled = !luw_progress_gui_mode();
 #if defined(SRT)
 	collision = "SRT";
 #elif defined(TRT)
@@ -233,18 +234,21 @@ void Info::print_initialize(LBM* lbm) {
 	println("| Thermal Diff.   | "+alignr(57u, /**********************************************************************************/ to_string(lbm->get_alpha(), 8u))+" |");
 	println("| Thermal Exp.    | "+alignr(57u, /***********************************************************************************/ to_string(lbm->get_beta(), 8u))+" |");
 #endif // TEMPERATURE
+	if(progress_console_enabled) {
 #ifndef INTERACTIVE_GRAPHICS_ASCII
-	println(progress_separator_top());
-	println(progress_header_row(steps==max_ulong));
-	println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
+		println(progress_separator_top());
+		println(progress_header_row(steps==max_ulong));
+		println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
 #else // INTERACTIVE_GRAPHICS_ASCII
-	println("'-----------------'-----------------------------------------------------------'");
+		println("'-----------------'-----------------------------------------------------------'");
 #endif // INTERACTIVE_GRAPHICS_ASCII
+	}
 	clock.start();
 	info.allow_printing.unlock();
 }
 void Info::print_update() const {
 	if(lbm==nullptr) return;
+	if(!progress_console_enabled) return;
 	info.allow_printing.lock();
 	reprint(progress_value_row(*this));
 #ifdef GRAPHICS
@@ -260,9 +264,9 @@ void Info::print_update() const {
 	info.allow_printing.unlock();
 }
 void Info::print_finalize() {
-	if(lbm!=nullptr) {
+	if(lbm!=nullptr&&progress_console_enabled) {
 		println();
 	}
 	lbm = nullptr;
-	println(progress_separator_bottom());
+	if(progress_console_enabled) println(progress_separator_bottom());
 }

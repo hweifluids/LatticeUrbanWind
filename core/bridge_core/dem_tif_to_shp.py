@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import ast
 import os
-import re
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
+
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import parse_deck_text
 
 
 def _parse_conf_bbox(conf_raw: str) -> Tuple[str, Tuple[float, float], Tuple[float, float]]:
@@ -16,39 +21,21 @@ def _parse_conf_bbox(conf_raw: str) -> Tuple[str, Tuple[float, float], Tuple[flo
       cut_lon_manual = [min, max]
       cut_lat_manual = [min, max]
     """
-    def find_value(pattern: str) -> str:
-        m = re.search(pattern, conf_raw, flags=re.MULTILINE)
-        if not m:
-            raise ValueError(f"Missing required line in conf: {pattern}")
-        return m.group(1).strip()
+    deck = parse_deck_text(conf_raw)
 
-    casename_raw = find_value(r"^\s*casename\s*=\s*(.+?)\s*$")
-    casename = casename_raw.strip().strip('"').strip("'")
+    casename = deck.get_text("casename")
+    if not casename:
+        raise ValueError("Missing required key 'casename' in conf.")
 
-    cut_lon_str = find_value(r"^\s*cut_lon_manual\s*=\s*(\[[^\]]+\])\s*$")
-    cut_lat_str = find_value(r"^\s*cut_lat_manual\s*=\s*(\[[^\]]+\])\s*$")
-
-    try:
-        cut_lon = ast.literal_eval(cut_lon_str)
-        cut_lat = ast.literal_eval(cut_lat_str)
-    except Exception as e:
-        raise ValueError("Failed to parse cut_lon_manual / cut_lat_manual as Python lists like [min, max].") from e
-
-    if not (isinstance(cut_lon, (list, tuple)) and len(cut_lon) == 2):
+    cut_lon = deck.get_pair("cut_lon_manual")
+    cut_lat = deck.get_pair("cut_lat_manual")
+    if cut_lon is None:
         raise ValueError("cut_lon_manual must be a list/tuple of length 2, e.g. [113.302, 113.342].")
-    if not (isinstance(cut_lat, (list, tuple)) and len(cut_lat) == 2):
+    if cut_lat is None:
         raise ValueError("cut_lat_manual must be a list/tuple of length 2, e.g. [23.093, 23.133].")
 
-    try:
-        lon0 = float(cut_lon[0])
-        lon1 = float(cut_lon[1])
-        lat0 = float(cut_lat[0])
-        lat1 = float(cut_lat[1])
-    except Exception as e:
-        raise ValueError("cut_lon_manual / cut_lat_manual values must be numeric.") from e
-
-    lon_min, lon_max = (lon0, lon1) if lon0 <= lon1 else (lon1, lon0)
-    lat_min, lat_max = (lat0, lat1) if lat0 <= lat1 else (lat1, lat0)
+    lon_min, lon_max = cut_lon
+    lat_min, lat_max = cut_lat
 
     if lon_min == lon_max or lat_min == lat_max:
         raise ValueError("Invalid bbox: lon/lat range has zero size.")

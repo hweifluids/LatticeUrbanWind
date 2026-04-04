@@ -10,6 +10,12 @@ import os
 import locale
 import codecs
 
+CORE_DIR = pathlib.Path(__file__).resolve().parents[1]
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
+
+from luw_progress import ProgressEmitter
+
 print("|-------------------------------------------------------------------|")
 print("|  Project:   WRFcpLBM - toolbox for WRF-FluidX3D coupling          |")
 print("|  Module:    MAKELUW - THE MAKING OF LUW                           |")
@@ -18,6 +24,8 @@ print("|  Email:     huanxia.wei@u.nus.edu                                 |")
 print("|  Version:   <20251031A-GPU>                                       |")
 print("|  License:   Customized License.                                   |")
 print("|-------------------------------------------------------------------|")
+
+PIPELINE_PROGRESS = ProgressEmitter("Running Workflow")
 
 
 def safe_stream_write(stream, msg: str) -> None:
@@ -153,6 +161,15 @@ SCRIPTS = [
     LUW_HOME / "core/tools_core/prerunValidate.py",
 ]
 
+SCRIPT_TITLES = {
+    "cdfInspect.py": "Inspect Wind Climate Inputs",
+    "shpInspect.py": "Inspect Building Footprints",
+    "1_buildBC.py": "Generate Boundary Conditions",
+    "2_shpCutter.py": "Crop Geometry Domain",
+    "3_voxelization.py": "Generate Voxel Domain",
+    "prerunValidate.py": "Validate Case Setup",
+}
+
 # --- read deck path from command line ----------------------------------------
 if len(sys.argv) != 2:
     sys.stderr.write("Usage: makeluw.py <deck_file_path>\n")
@@ -260,12 +277,19 @@ def run_script(script: pathlib.Path, log):
 def main():
 
     with pathlib.Path(sys.stdout.log_file.name).open("a", encoding="utf-8") as log:
-        for script_path in SCRIPTS:
+        total_scripts = len(SCRIPTS)
+        for index, script_path in enumerate(SCRIPTS, start=1):
+            title = SCRIPT_TITLES.get(script_path.name, script_path.stem)
             if not script_path.is_file():
                 msg = f"[WARN] {script_path} not found, skipping.\n"
                 sys.stderr.write(msg); log.write(msg)
                 continue
 
+            PIPELINE_PROGRESS.stage(
+                f"workflow_{script_path.stem}",
+                f"Workflow step {index}/{total_scripts}",
+                label=title,
+            )
             print() 
             print(f"------------------------------------------------------------------------------------ Running {script_path.name} ")
 

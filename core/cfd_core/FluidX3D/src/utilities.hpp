@@ -3114,6 +3114,59 @@ inline string get_console_log_file() {
 	std::lock_guard<std::mutex> lock(console_io_mutex());
 	return console_log_path();
 }
+inline bool luw_progress_gui_mode() {
+	static int cached = -1;
+	if(cached < 0) {
+		string mode = "";
+#if defined(_WIN32)
+		char* env = nullptr;
+		size_t env_len = 0u;
+		if(_dupenv_s(&env, &env_len, "LUW_PROGRESS_MODE") == 0 && env != nullptr) {
+			mode = string(env);
+			std::free(env);
+		}
+#else
+		const char* env = std::getenv("LUW_PROGRESS_MODE");
+		if(env != nullptr) mode = string(env);
+#endif
+		cached = (mode == "gui" || mode == "1" || mode == "true") ? 1 : 0;
+	}
+	return cached == 1;
+}
+inline string luw_progress_escape_json(const string& s) {
+	string out;
+	out.reserve(s.size() + 16u);
+	for(size_t i = 0u; i < s.size(); i++) {
+		const char c = s[i];
+		switch(c) {
+		case '\\': out += "\\\\"; break;
+		case '"': out += "\\\""; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		default: out.push_back(c); break;
+		}
+	}
+	return out;
+}
+inline void luw_emit_progress(const string& stage,
+							  const string& label,
+							  const string& detail = "",
+							  const long long current = -1ll,
+							  const long long total = -1ll,
+							  const bool indeterminate = true) {
+	if(!luw_progress_gui_mode()) return;
+	const string payload =
+		"[[LUW_PROGRESS]]{\"stage\":\"" + luw_progress_escape_json(stage) +
+		"\",\"label\":\"" + luw_progress_escape_json(label) +
+		"\",\"detail\":\"" + luw_progress_escape_json(detail) +
+		"\",\"current\":" + to_string(current) +
+		",\"total\":" + to_string(total) +
+		",\"indeterminate\":" + string(indeterminate ? "true" : "false") + "}";
+	std::lock_guard<std::mutex> lock(console_io_mutex());
+	std::cout << payload << "\n";
+	std::cout.flush();
+}
 
 inline void print(const string& s="") {
 	std::lock_guard<std::mutex> lock(console_io_mutex());
@@ -4785,6 +4838,12 @@ inline Mesh* read_stl_raw(const string& path, const bool reposition, const float
 	uint counter = 84u;
 	if(triangle_number>0u&&filesize==84u+50u*triangle_number) print_info("Loading \""+filename+"\" with "+to_string(triangle_number)+" triangles.");
 	else print_error("File \""+filename+"\" is corrupt or unsupported! Only binary .stl files are supported.");
+	luw_emit_progress("load_stl",
+					  "Loading STL",
+					  filename+" ("+to_string(triangle_number)+" triangles)",
+					  0ll,
+					  1ll,
+					  false);
 	Mesh* mesh = new Mesh(triangle_number, center);
 	mesh->p0[0] = float3(0.0f); // to fix warning C6001
 	for(uint i=0u; i<triangle_number; i++) {
@@ -4811,6 +4870,12 @@ inline Mesh* read_stl_raw(const string& path, const bool reposition, const float
 		mesh->p2[i] = center+scale*(offset+mesh->p2[i]);
 	}
 	mesh->find_bounds();
+	luw_emit_progress("load_stl",
+					  "Loading STL",
+					  filename+" loaded",
+					  1ll,
+					  1ll,
+					  false);
 	return mesh;
 }
 inline Mesh* read_stl(const string& path, const float3& box_size, const float3& center, const float3x3& rotation, const float size) { // read binary .stl file (rescale and reposition)

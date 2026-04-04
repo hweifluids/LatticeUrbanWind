@@ -9,6 +9,7 @@ import sys
 import re
 import glob
 import time
+from pathlib import Path
 from typing import Tuple, Optional
 
 try:
@@ -18,6 +19,12 @@ except Exception as e:
     print("[FATAL] Missing dependencies. Please install numpy and trimesh.")
     print(f"[FATAL] Import error: {e}")
     sys.exit(2)
+
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import parse_deck_text
 
 
 def ts() -> str:
@@ -86,47 +93,13 @@ def parse_luwdg(path: str) -> Tuple[str, float, float, float, float, str]:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
 
-    casename = None
-    base_height = None
-    x_exp_rat = None
-    y_exp_rat = None
-    z_limit = None
+    deck = parse_deck_text(text)
 
-    m_case = re.search(r'^\s*casename\s*=\s*([A-Za-z0-9_.\-]+)\s*$', text, flags=re.MULTILINE)
-    if m_case:
-        casename = m_case.group(1).strip()
-
-    m_base = re.search(
-        r'^\s*base_height\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
-        text,
-        flags=re.MULTILINE
-    )
-    if m_base:
-        base_height = float(m_base.group(1))
-
-    m_xrat = re.search(
-        r'^\s*x_exp_rat\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
-        text,
-        flags=re.MULTILINE
-    )
-    if m_xrat:
-        x_exp_rat = float(m_xrat.group(1))
-
-    m_yrat = re.search(
-        r'^\s*y_exp_rat\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
-        text,
-        flags=re.MULTILINE
-    )
-    if m_yrat:
-        y_exp_rat = float(m_yrat.group(1))
-
-    m_zlim = re.search(
-        r'^\s*z_limit\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+\-]?[0-9]+)?)\s*$',
-        text,
-        flags=re.MULTILINE
-    )
-    if m_zlim:
-        z_limit = float(m_zlim.group(1))
+    casename = deck.get_text("casename")
+    base_height = deck.get_float("base_height")
+    x_exp_rat = deck.get_float("x_exp_rat")
+    y_exp_rat = deck.get_float("y_exp_rat")
+    z_limit = deck.get_float("z_limit")
 
     if casename is None:
         fatal("casename not found in luwdg file.", 1)
@@ -353,56 +326,14 @@ def update_luwdg_ranges(
     base_height: float,
     z_limit: float
 ) -> None:
+    deck = parse_deck_text(original_text)
+    deck.set_pair("si_x_cfd", [x_min, x_max], precision=6)
+    deck.set_pair("si_y_cfd", [y_min, y_max], precision=6)
+    deck.set_pair("si_z_cfd", [0.0, float(z_limit) + float(base_height)], precision=6)
 
-    new_x_line = f"si_x_cfd = {format_range(x_min, x_max)}"
-    new_y_line = f"si_y_cfd = {format_range(y_min, y_max)}"
-    new_z_line = f"si_z_cfd = {format_range(0.0, float(z_limit) + float(base_height))}"
-
-    debug(f"Updating luwdg si_x_cfd to: {new_x_line}")
-    debug(f"Updating luwdg si_y_cfd to: {new_y_line}")
-    debug(f"Updating luwdg si_z_cfd to: {new_z_line}")
-
-    text = original_text
-
-    rx_x = re.compile(r'^\s*si_x_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
-    rx_y = re.compile(r'^\s*si_y_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
-    rx_z = re.compile(r'^\s*si_z_cfd\s*=\s*\[[^\]]*\]\s*$', flags=re.MULTILINE)
-
-    has_x = bool(rx_x.search(text))
-    has_y = bool(rx_y.search(text))
-    has_z = bool(rx_z.search(text))
-
-    if has_x:
-        text = rx_x.sub(new_x_line, text, count=1)
-    if has_y:
-        text = rx_y.sub(new_y_line, text, count=1)
-    if has_z:
-        text = rx_z.sub(new_z_line, text, count=1)
-
-    if (not has_x) or (not has_y) or (not has_z):
-        debug("One or more of si_x_cfd, si_y_cfd, si_z_cfd were not found. Inserting missing fields.")
-
-        insert_lines = []
-        if not has_x:
-            insert_lines.append(new_x_line)
-        if not has_y:
-            insert_lines.append(new_y_line)
-        if not has_z:
-            insert_lines.append(new_z_line)
-
-        insert_block = "\n".join(insert_lines) + "\n"
-
-        m_dt = re.search(r'^\s*datetime\s*=\s*.*$', text, flags=re.MULTILINE)
-        m_case = re.search(r'^\s*casename\s*=\s*.*$', text, flags=re.MULTILINE)
-
-        if m_dt:
-            idx = m_dt.end()
-            text = text[:idx] + "\n" + insert_block + text[idx:]
-        elif m_case:
-            idx = m_case.end()
-            text = text[:idx] + "\n" + insert_block + text[idx:]
-        else:
-            text = insert_block + text
+    debug(f"Updating luwdg si_x_cfd to: si_x_cfd = {format_range(x_min, x_max)}")
+    debug(f"Updating luwdg si_y_cfd to: si_y_cfd = {format_range(y_min, y_max)}")
+    debug(f"Updating luwdg si_z_cfd to: si_z_cfd = {format_range(0.0, float(z_limit) + float(base_height))}")
 
     backup_path = luwdg_path + ".bak"
     try:
@@ -414,7 +345,7 @@ def update_luwdg_ranges(
 
     debug(f"Writing updated luwdg to: {luwdg_path}")
     with open(luwdg_path, "w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(deck.render())
 
     debug("luwdg update completed.")
 

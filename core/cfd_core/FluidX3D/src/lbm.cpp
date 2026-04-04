@@ -192,10 +192,22 @@ LBM_Domain::LBM_Domain(const Device_Info& device_info, const uint Nx, const uint
 #endif // GRAPHICS
 	this->device = Device(device_info, opencl_c_code);
 	print_info("Allocating memory. This may take a few seconds.");
+	luw_emit_progress("gpu_memory",
+					  "Configuring GPU memory",
+					  "Allocating CFD buffers on device "+to_string(device_info.id),
+					  0ll,
+					  1ll,
+					  false);
 	allocate(device); // lbm first
 #ifdef GRAPHICS
 	graphics.allocate(device); // graphics after lbm
 #endif // GRAPHICS
+	luw_emit_progress("gpu_memory",
+					  "Configuring GPU memory",
+					  "Device "+to_string(device_info.id)+" buffers ready",
+					  1ll,
+					  1ll,
+					  false);
 }
 
 void LBM_Domain::allocate(Device& device) {
@@ -1328,6 +1340,12 @@ void LBM::write_status(const string& path) { // write LBM status report to a .tx
 
 void LBM::voxelize_mesh_on_device(const Mesh* mesh, const uchar flag, const float3& rotation_center, const float3& linear_velocity, const float3& rotational_velocity) { // voxelize triangle mesh
 	const uint domain_count = get_D();
+	luw_emit_progress("voxelization",
+					  "Voxelizing geometry",
+					  to_string(mesh->triangle_number)+" triangles across "+to_string(domain_count)+" domain(s)",
+					  0ll,
+					  (long long)domain_count,
+					  false);
 	vector<TriangleAABB> triangle_bounds;
 	if(domain_count>1u) {
 		triangle_bounds.resize(mesh->triangle_number);
@@ -1498,14 +1516,25 @@ void LBM::voxelize_mesh_on_device(const Mesh* mesh, const uchar flag, const floa
 		}
 		lbm_domain[d]->voxelize_mesh_on_device(mesh, flag, rotation_center, linear_velocity, rotational_velocity, direction_0, max_uint, triangle_ids_0, nullptr);
 	};
+	std::atomic_uint completed_voxel_domains{0u};
+	auto launch_and_report_voxelize_domain = [&](const uint d) {
+		launch_voxelize_domain(d);
+		const uint completed = completed_voxel_domains.fetch_add(1u)+1u;
+		luw_emit_progress("voxelization",
+						  "Voxelizing geometry",
+						  "Finished domain "+to_string((ulong)completed)+"/"+to_string((ulong)domain_count),
+						  (long long)completed,
+						  (long long)domain_count,
+						  false);
+	};
 	if(domain_count==1u) {
-		launch_voxelize_domain(0u);
+		launch_and_report_voxelize_domain(0u);
 	} else if(gpu_ids.size()<=1u) { // single physical GPU with multiple domains: launch sequentially to minimize transient peak
-		for(uint d=0u; d<domain_count; d++) launch_voxelize_domain(d);
+		for(uint d=0u; d<domain_count; d++) launch_and_report_voxelize_domain(d);
 	} else {
 		parallel_for((ulong)gpu_ids.size(), gpu_ids.size(), [&](ulong g) {
 			const vector<uint>& domains = domains_per_gpu[(uint)g];
-			for(uint i=0u; i<(uint)domains.size(); i++) launch_voxelize_domain(domains[i]);
+			for(uint i=0u; i<(uint)domains.size(); i++) launch_and_report_voxelize_domain(domains[i]);
 		});
 	}
 

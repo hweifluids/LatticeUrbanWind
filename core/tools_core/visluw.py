@@ -20,11 +20,19 @@ This version implements:
 import os
 import sys
 import re
+import argparse
 from typing import Dict, Any, Tuple, Optional, List
+from pathlib import Path
 
 import numpy as np
 import pyvista as pv
 from pyproj import Transformer, CRS
+
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck
 
 
 # ------------------------- Utilities -------------------------
@@ -51,49 +59,33 @@ def read_luw(path: str) -> Dict[str, Any]:
         center_lat = 31.25
     Lines starting with // or # are ignored. Standalone ... lines are ignored.
     """
-    if not os.path.isfile(path):
-        soft_exit(f"LUW file not found: {path}")
-
+    deck = load_deck(path)
     data: Dict[str, Any] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
 
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("//") or line.startswith("#") or line == "...":
-            continue
-        m = re.match(r'^([A-Za-z0-9_]+)\s*=\s*(.+)$', line)
-        if not m:
-            continue
-        k, v = m.group(1), m.group(2).strip()
+    list_keys = ("cut_lon_manual", "cut_lat_manual", "si_x_cfd", "si_y_cfd")
+    int_keys = ("datetime", "utm_epsg", "utm", "utm_zone")
+    float_keys = ("center_lon", "center_lat")
+    text_keys = ("casename", "utm_hemisphere", "utm_crs")
 
-        # Try simple JSON-like list [a,b]
-        if v.startswith("[") and v.endswith("]"):
-            try:
-                parts = [p.strip() for p in v[1:-1].split(",") if p.strip()]
-                data[k] = [float(p) for p in parts]
-                continue
-            except Exception:
-                pass
+    for key in list_keys:
+        values = deck.get_float_list(key)
+        if values:
+            data[key] = values
 
-        # Try int
-        if re.fullmatch(r'[+-]?\d+', v):
-            try:
-                data[k] = int(v)
-                continue
-            except Exception:
-                pass
+    for key in int_keys:
+        value = deck.get_int(key)
+        if value is not None:
+            data[key] = value
 
-        # Try float
-        if re.fullmatch(r'[+-]?\d+\.\d*', v):
-            try:
-                data[k] = float(v)
-                continue
-            except Exception:
-                pass
+    for key in float_keys:
+        value = deck.get_float(key)
+        if value is not None:
+            data[key] = value
 
-        # Fallback string
-        data[k] = v.strip().strip('"').strip("'")
+    for key in text_keys:
+        value = deck.get_text(key)
+        if value:
+            data[key] = value
 
     return data
 
@@ -680,12 +672,19 @@ class WindFieldProcessor:
 # ------------------------- Main -------------------------
 
 def main() -> None:
-    # Validate CLI
-    if len(sys.argv) != 2:
-        print("Usage: python wind_from_luw.py <path/to/conf.luw>")
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description="Generate visualization figures from a LUW result.")
+    parser.add_argument("config_path", help="Path to the LUW deck file")
+    parser.add_argument("--lon-min", type=float, default=None, help="Crop longitude minimum")
+    parser.add_argument("--lon-max", type=float, default=None, help="Crop longitude maximum")
+    parser.add_argument("--lat-min", type=float, default=None, help="Crop latitude minimum")
+    parser.add_argument("--lat-max", type=float, default=None, help="Crop latitude maximum")
+    parser.add_argument("--layers", type=int, default=None, help="Number of section layers to export")
+    parser.add_argument("--output-dir", default=None, help="Export root directory for NPZ and section figures")
+    parser.add_argument("--export-nc", action="store_true", help="Also export a 3D NetCDF file")
+    parser.add_argument("--nc-output", default=None, help="Optional NetCDF output path")
+    args = parser.parse_args()
 
-    luw_path = sys.argv[1]
+    luw_path = args.config_path
     print(f"[INFO] LUW: {luw_path}")
 
     # Read LUW
@@ -733,22 +732,28 @@ def main() -> None:
     transformer_inv = Transformer.from_crs(crs_dst, "EPSG:4326", always_xy=True)
     print(f"[INFO] Using UTM CRS EPSG:{epsg}")
 
-    # Interactive crop inputs
-    try:
-        print("[INPUT] Please provide target crop in lon/lat.")
-        lon_min = input_float_with_default("Enter target longitude min", lon_min_def)
-        lon_max = input_float_with_default("Enter target longitude max", lon_max_def)
-        lat_min = input_float_with_default("Enter target latitude min", lat_min_def)
-        lat_max = input_float_with_default("Enter target latitude max", lat_max_def)
-    except KeyboardInterrupt:
-        soft_exit("Aborted by user during input.")
-    except Exception as e:
-        soft_exit(f"Invalid inputs. Detail: {e}")
+    interactive_crop = any(value is None for value in (args.lon_min, args.lon_max, args.lat_min, args.lat_max))
+    if interactive_crop:
+        try:
+            print("[INPUT] Please provide target crop in lon/lat.")
+            lon_min = input_float_with_default("Enter target longitude min", lon_min_def)
+            lon_max = input_float_with_default("Enter target longitude max", lon_max_def)
+            lat_min = input_float_with_default("Enter target latitude min", lat_min_def)
+            lat_max = input_float_with_default("Enter target latitude max", lat_max_def)
+        except KeyboardInterrupt:
+            soft_exit("Aborted by user during input.")
+        except Exception as e:
+            soft_exit(f"Invalid inputs. Detail: {e}")
 
-    # Echo and confirm
-    print(f"[CONFIRM] Crop box lon [{lon_min}, {lon_max}], lat [{lat_min}, {lat_max}]")
-    if not confirm_proceed("Press ENTER to proceed, or type 'y'/'yes'. Any other key to abort:"):
-        soft_exit("User did not confirm the crop box.")
+        print(f"[CONFIRM] Crop box lon [{lon_min}, {lon_max}], lat [{lat_min}, {lat_max}]")
+        if not confirm_proceed("Press ENTER to proceed, or type 'y'/'yes'. Any other key to abort:"):
+            soft_exit("User did not confirm the crop box.")
+    else:
+        lon_min = float(args.lon_min)
+        lon_max = float(args.lon_max)
+        lat_min = float(args.lat_min)
+        lat_max = float(args.lat_max)
+        print(f"[INFO] Using CLI crop box lon [{lon_min}, {lon_max}], lat [{lat_min}, {lat_max}]")
 
     # Set mapping origin to the SW corner of the CFD grid. This origin corresponds to VTK (0,0).
     if center_lon_luw is not None and center_lat_luw is not None:
@@ -763,13 +768,15 @@ def main() -> None:
     print(f"[INFO] Mapping origin set to SW corner at lon {center_lon}, lat {center_lat}")
 
 
-    # Ask for number of layers to export
-    try:
-        n_layers = input_int_with_default("Enter number of layers to export", 6)
-    except KeyboardInterrupt:
-        soft_exit("Aborted by user during input.")
-    except Exception as e:
-        soft_exit(f"Invalid inputs. Detail: {e}")
+    if args.layers is not None:
+        n_layers = max(int(args.layers), 1)
+    else:
+        try:
+            n_layers = input_int_with_default("Enter number of layers to export", 6)
+        except KeyboardInterrupt:
+            soft_exit("Aborted by user during input.")
+        except Exception as e:
+            soft_exit(f"Invalid inputs. Detail: {e}")
 
     # Locate RESULTS and VTK
     results_dir = find_results_dir(luw_path)
@@ -778,9 +785,12 @@ def main() -> None:
     print(f"[INFO] VTK located: {vtk_path}")
 
     # Prepare outputs
-    npz_out = os.path.join(results_dir, f"{base_name}.npz")
-    sections_dir = os.path.join(results_dir, "sections")
+    export_root = os.path.abspath(args.output_dir) if args.output_dir else results_dir
+    os.makedirs(export_root, exist_ok=True)
+    npz_out = os.path.join(export_root, f"{base_name}.npz")
+    sections_dir = os.path.join(export_root, "sections")
     os.makedirs(sections_dir, exist_ok=True)
+    print(f"[INFO] Export root: {export_root}")
 
     # Process
     try:
@@ -794,13 +804,19 @@ def main() -> None:
         processor.save_npz(npz_out)
         processor.visualize(sections_dir, num_layers=n_layers)
 
-        # Optional NetCDF export
-        print("[INPUT] Do you want to export a 3D NetCDF file in lon/lat coordinates to RESULTS?")
-        if confirm_proceed("Press ENTER, 'y', or 'yes' to export. Any other key to skip:"):
-            nc_out = os.path.join(results_dir, f"{base_name}_visluw.nc")
+        export_nc = args.export_nc
+        if not export_nc and not interactive_crop and args.layers is not None:
+            print("[INFO] NetCDF export skipped.")
+        elif not export_nc:
+            print("[INPUT] Do you want to export a 3D NetCDF file in lon/lat coordinates?")
+            export_nc = confirm_proceed("Press ENTER, 'y', or 'yes' to export. Any other key to skip:")
+
+        if export_nc:
+            nc_out = os.path.abspath(args.nc_output) if args.nc_output else os.path.join(export_root, f"{base_name}_visluw.nc")
+            os.makedirs(os.path.dirname(nc_out), exist_ok=True)
             processor.export_netcdf(nc_out, epsg=epsg, casename=casename, dtstr=dtstr, vtk_basename=base_name)
         else:
-            print("[INFO] NetCDF export skipped by user choice.")
+            print("[INFO] NetCDF export skipped.")
 
     except SystemExit:
         raise

@@ -1,0 +1,10 @@
+^C:\1_DEVELOPMENT\LATTICEURBANWIND\GUI\BUILD-VS2022\CMAKEFILES\731084FCA396D7FF213B6725DE01461B\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/1_Development/LatticeUrbanWind/gui -BC:/1_Development/LatticeUrbanWind/gui/build-vs2022 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/1_Development/LatticeUrbanWind/gui/build-vs2022/LUWStudio.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

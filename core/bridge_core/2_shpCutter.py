@@ -19,10 +19,18 @@ import numpy as np
 from auto_UTM import get_utm_epsg_from_lonlat, get_utm_crs_from_bounds
 import time
 
+_CORE_DIR = Path(__file__).resolve().parents[1]
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from deck_io import load_deck
+from luw_progress import ProgressEmitter
+
+_PROGRESS = ProgressEmitter("Cropping Geometry Domain")
+
 # ----------------------- Helpers -----------------------
 
 from typing import Tuple, Union, Optional
-import re
 
 def get_lonlat(conf_path: Union[str, Path] | None = None) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     if conf_path is None:
@@ -33,23 +41,11 @@ def get_lonlat(conf_path: Union[str, Path] | None = None) -> Tuple[Tuple[float, 
     if not conf_path.exists():
         raise FileNotFoundError(f"Cannot find deck file: {conf_path}")
 
-    txt = conf_path.read_text(encoding="utf-8", errors="ignore")
-
-    def _parse_pair(key: str):
-        m = re.search(rf"{key}\s*=\s*\[([^\]]+)\]", txt)
-        if not m:
-            return None
-        arr = [s.strip() for s in m.group(1).split(",")]
-        if len(arr) != 2:
-            raise ValueError(f"{key} has wrong configuration format, expected two values")
-        a, b = float(arr[0]), float(arr[1])
-        lo, hi = (a, b) if a <= b else (b, a)
-        return lo, hi
-
-    lon_pair = _parse_pair("cut_lon_manual")
-    lat_pair = _parse_pair("cut_lat_manual")
+    deck = load_deck(conf_path)
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
     if lon_pair is None or lat_pair is None:
-        raise ValueError("conf.txt does not provide clipping range, missing cut_lon_manual/cut_lat_manual")
+        raise ValueError("Deck does not provide clipping range, missing cut_lon_manual/cut_lat_manual")
 
     return lon_pair, lat_pair
 
@@ -237,6 +233,10 @@ def select_height_column(gdf: gpd.GeoDataFrame):
 
 def _area_mask_chunk(geoms, min_area):
     """Filter geometries by area in meters, with UTM CRS auto detection."""
+    total = len(geoms)
+    if total > 0:
+        _PROGRESS.progress("area_filter", 0, total, f"Filtering footprints by area 0/{total}", force=True)
+
     # Auto detect UTM CRS from a representative geometry
     first_valid = None
     for g in geoms:
@@ -256,15 +256,17 @@ def _area_mask_chunk(geoms, min_area):
         return x2, y2
 
     out = []
-    for g in geoms:
+    for index, g in enumerate(geoms, start=1):
         if g is None or g.is_empty:
             out.append(False)
+            _PROGRESS.progress("area_filter", index, total, f"Filtering footprints by area {index}/{total}")
             continue
         try:
             g_m = transform(_proj, g)
             out.append(g_m.area >= min_area)
         except Exception:
             out.append(False)
+        _PROGRESS.progress("area_filter", index, total, f"Filtering footprints by area {index}/{total}")
     return out
 
 
@@ -310,12 +312,14 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print("Cleaning step started. Ensuring geometries are valid and polygonal.")
     before = len(gdf)
     print(f"Total geometries to validate: {before}")
+    _PROGRESS.progress("geometry_clean", 0, max(before, 1), f"Validating geometries 0/{before}", force=True)
     # Try to fix invalids and drop non-polygonal
     fixed = []
 
     import sys
-    sys.stdout.write("Validation Progress (# is 5%): |")
-    sys.stdout.flush()
+    if not _PROGRESS.enabled:
+        sys.stdout.write("Validation Progress (# is 5%): |")
+        sys.stdout.flush()
     next_percent_idx = 1  # 1..20, each is 5%
 
     for idx, g in enumerate(gdf.geometry, 1):
@@ -325,15 +329,17 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             g2 = _make_valid_safe(g)
             fixed.append(g2)
 
-        progress_ratio = idx / before if before > 0 else 1.0
-        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-            sys.stdout.write("#")
-            if next_percent_idx % 4 == 0:
-                sys.stdout.write(f"|{next_percent_idx * 5}%|")
-            sys.stdout.flush()
-            next_percent_idx += 1
+        _PROGRESS.progress("geometry_clean", idx, max(before, 1), f"Validating geometries {idx}/{before}")
+        if not _PROGRESS.enabled:
+            progress_ratio = idx / before if before > 0 else 1.0
+            while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                sys.stdout.write("#")
+                if next_percent_idx % 4 == 0:
+                    sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                sys.stdout.flush()
+                next_percent_idx += 1
 
-    if next_percent_idx <= 20:
+    if not _PROGRESS.enabled and next_percent_idx <= 20:
         while next_percent_idx <= 20:
             sys.stdout.write("#")
             if next_percent_idx % 4 == 0:
@@ -341,8 +347,9 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             next_percent_idx += 1
         sys.stdout.flush()
 
-    sys.stdout.write("|Finished|\n")
-    sys.stdout.flush()
+    if not _PROGRESS.enabled:
+        sys.stdout.write("|Finished|\n")
+        sys.stdout.flush()
 
     gdf2 = gdf.copy()
     gdf2["geometry"] = fixed
@@ -352,6 +359,7 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     after_fix = len(gdf2)
     dropped = before - after_fix
     print(f"Cleaning step completed. Dropped features that are non-polygonal or unrecoverable. Count dropped: {dropped}. Remaining: {after_fix}")
+    _PROGRESS.complete("geometry_clean", f"Validated {before} geometries, kept {after_fix}")
     return gdf2
 
 def remove_small_interior_rings_projected(
@@ -364,10 +372,13 @@ def remove_small_interior_rings_projected(
     """
     removed = 0
     new_geoms = []
+    total = len(gdf)
+    _PROGRESS.progress("remove_holes", 0, max(total, 1), f"Removing small holes 0/{total}", force=True)
 
-    for geom in gdf.geometry:
+    for index, geom in enumerate(gdf.geometry, start=1):
         if geom is None or geom.is_empty:
             new_geoms.append(geom)
+            _PROGRESS.progress("remove_holes", index, max(total, 1), f"Removing small holes {index}/{total}")
             continue
 
         if geom.geom_type == "Polygon":
@@ -409,9 +420,11 @@ def remove_small_interior_rings_projected(
             new_geoms.append(new_polys[0])
         else:
             new_geoms.append(MultiPolygon(new_polys))
+        _PROGRESS.progress("remove_holes", index, max(total, 1), f"Removing small holes {index}/{total}")
 
     out = gdf.copy()
     out["geometry"] = new_geoms
+    _PROGRESS.complete("remove_holes", f"Removed {removed} interior holes")
     return out, removed
 
 
@@ -434,6 +447,7 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
     print("Overlap union step started. Building overlap graph.")
     if gdf.empty:
         print("Overlap union skipped because there are no features.")
+        _PROGRESS.complete("overlap_union", "No footprints need overlap merging")
         return gdf
 
     gdf = gdf.reset_index(drop=True)
@@ -448,8 +462,10 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
 
     import sys
     print(f"Total seeds to check for overlap components: {n}")
-    sys.stdout.write("Component discovery progress (# is 5%): |")
-    sys.stdout.flush()
+    _PROGRESS.progress("overlap_union", 0, max(n, 1), f"Finding overlap components 0/{n}", force=True)
+    if not _PROGRESS.enabled:
+        sys.stdout.write("Component discovery progress (# is 5%): |")
+        sys.stdout.flush()
     next_percent_idx = 1  # 1..20, each is 5 percent
 
     for i in range(n):
@@ -482,23 +498,26 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
             components.append(comp)
             comp_sizes.append(len(comp))
 
-        progress_ratio = (i + 1) / n if n > 0 else 1.0
-        while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
-            sys.stdout.write("#")
-            if next_percent_idx % 4 == 0:
-                sys.stdout.write(f"|{next_percent_idx * 5}%|")
-            sys.stdout.flush()
-            next_percent_idx += 1
+        _PROGRESS.progress("overlap_union", i + 1, max(n, 1), f"Finding overlap components {i + 1}/{n}")
+        if not _PROGRESS.enabled:
+            progress_ratio = (i + 1) / n if n > 0 else 1.0
+            while next_percent_idx <= 20 and progress_ratio >= (next_percent_idx / 20.0):
+                sys.stdout.write("#")
+                if next_percent_idx % 4 == 0:
+                    sys.stdout.write(f"|{next_percent_idx * 5}%|")
+                sys.stdout.flush()
+                next_percent_idx += 1
 
-    if next_percent_idx <= 20:
+    if not _PROGRESS.enabled and next_percent_idx <= 20:
         while next_percent_idx <= 20:
             sys.stdout.write("#")
             if next_percent_idx % 4 == 0:
                 sys.stdout.write(f"|{next_percent_idx * 5}%|")
             next_percent_idx += 1
         sys.stdout.flush()
-    sys.stdout.write("|Finished|\n")
-    sys.stdout.flush()
+    if not _PROGRESS.enabled:
+        sys.stdout.write("|Finished|\n")
+        sys.stdout.flush()
 
 
     merged_rows = []
@@ -543,11 +562,13 @@ def union_overlapping_buildings(gdf: gpd.GeoDataFrame, height_col: str | None) -
 
     out = gpd.GeoDataFrame(merged_rows, geometry="geometry", crs=gdf.crs)
     print(f"Overlap union step completed. Components found: {len(components)}. Merged components with size greater than one: {merged_count}. Output features: {len(out)}")
+    _PROGRESS.complete("overlap_union", f"Found {len(components)} overlap groups, merged {merged_count}")
     return out
 
 
 def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, output_dir: Path, bbox_wgs84) -> None:
     print("Preview step started. Preparing map outline and info panel.")
+    _PROGRESS.stage("preview", "Generating preview image")
     gdf_wgs84 = gdf.to_crs(epsg=4326)
     min_lon, min_lat, max_lon, max_lat = gdf_wgs84.total_bounds
 
@@ -710,11 +731,13 @@ def save_outline_preview(gdf: gpd.GeoDataFrame, case_name: str, shp_path: Path, 
     fig.savefig(out_img, dpi=4800)
     plt.close(fig)
     print(f"Preview step completed. Saved preview image to {out_img}")
+    _PROGRESS.complete("preview", f"Saved preview image: {out_img.name}")
 
 # ----------------------- Main -----------------------
 
 def main():
     print("Program started.")
+    _PROGRESS.stage("load_shapefile", "Reading source building shapefile")
     start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Start time: {start_ts}")
 
@@ -736,11 +759,10 @@ def main():
     project_home = conf_file.parent
 
     # 读取 casename
-    txt_conf = conf_file.read_text(encoding="utf-8", errors="ignore")
-    m_case = re.search(r"casename\s*=\s*([^\s]+)", txt_conf)
-    if not m_case:
+    deck = load_deck(conf_file)
+    case_name_base = deck.get_text("casename")
+    if not case_name_base:
         raise RuntimeError("casename not found in conf")
-    case_name_base = m_case.group(1)
 
     # 读取裁剪范围，使用 manual 项
     cut_lon, cut_lat = get_lonlat(conf_file)
@@ -839,6 +861,7 @@ def main():
     bbox_rot = box(x_min_rot, y_min_rot, x_max_rot, y_max_rot)
     bbox_utm = affinity.rotate(bbox_rot, -rotate_deg, origin=(cx, cy), use_radians=False)
 
+    _PROGRESS.stage("clip_domain", "Cropping buildings to rotated CFD domain")
     print(f"Clipping to rotated-rectangle bbox (four-corner projected). rotate_deg={rotate_deg:.6f}, pivot=({cx:.3f}, {cy:.3f})")
     gdf_wgs84_cleaned = clean_building_geometries(gdf_wgs84)
     gdf_utm = gdf_wgs84_cleaned.to_crs(utm_crs)
@@ -881,6 +904,7 @@ def main():
         print("Area filter skipped because there are no geometries after union.")
     merged = merged.loc[mask_area].copy()
     print(f"Features after area filter: {len(merged)}")
+    _PROGRESS.stage("remove_holes", "Removing small interior holes")
     print(f"Small interior rings removal started. Threshold: {MIN_HOLE_AREA} m^2.")
     removed_holes = 0
     if not merged.empty:
@@ -941,9 +965,11 @@ def main():
         subset = result_wgs84
         print("Original CRS is EPSG 4326. No final reprojection needed.")
 
+    _PROGRESS.stage("save_crop", f"Saving cropped shapefile: {out_path.name}")
     print("Writing output shapefile.")
     subset.to_file(out_path, driver="ESRI Shapefile", encoding="utf-8")
     print("Write completed.")
+    _PROGRESS.complete("save_crop", f"Saved cropped shapefile: {out_path.name}")
 
     print(f"Processing finished. Feature count written: {len(subset)}")
     print(f"Output file path: {out_path.resolve()}")

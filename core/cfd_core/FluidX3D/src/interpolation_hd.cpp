@@ -421,7 +421,20 @@ float3 InletVelocityFieldHD::operator()(const float3& pos) const {
 
 // ======================= Parellel computing =======================
 
-static inline void print_progress_inline_hd(double pct, bool final_flush = false) {
+static inline void print_progress_inline_hd(double pct,
+                                            unsigned long long current,
+                                            unsigned long long total,
+                                            const std::string& detail,
+                                            bool final_flush = false) {
+    if (luw_progress_gui_mode()) {
+        luw_emit_progress("interface_interpolation",
+                          "Interface interpolation",
+                          detail,
+                          static_cast<long long>(current),
+                          static_cast<long long>(total),
+                          false);
+        return;
+    }
     std::fprintf(stdout, "\r| [%s] inlet/outlet init (HD): %6.3f%%                      |",
                  now_str_local_hd().c_str(), pct);
     if (final_flush) std::fflush(stdout);
@@ -430,6 +443,7 @@ static inline void print_progress_inline_hd(double pct, bool final_flush = false
 void apply_inlet_outlet_hd(LBM& lbm,
                            const std::string& downstream_bc,
                            const InletVelocityFieldHD& inlet,
+                           bool downstream_open_face,
                            unsigned long /*min_work_per_thread*/,
                            bool show_progress,
                            int side_ref_z_cap_index) {
@@ -457,12 +471,21 @@ void apply_inlet_outlet_hd(LBM& lbm,
 #endif
 
     if (show_progress) {
-        std::fprintf(stdout,
-            "| [%s] inlet/outlet init (HD) using %u worker threads (hardware reports %u)\n",
-            now_str_local_hd().c_str(),
-            num_threads,
-            hw);
-        std::fflush(stdout);
+        if (luw_progress_gui_mode()) {
+            luw_emit_progress("interface_interpolation",
+                              "Interface interpolation",
+                              "High-order inlet/outlet mapping with " + to_string((ulong)num_threads) + " worker threads",
+                              0ll,
+                              1ll,
+                              true);
+        } else {
+            std::fprintf(stdout,
+                "| [%s] inlet/outlet init (HD) using %u worker threads (hardware reports %u)\n",
+                now_str_local_hd().c_str(),
+                num_threads,
+                hw);
+            std::fflush(stdout);
+        }
     }
 
     std::vector<std::vector<unsigned long long>> heavy_lists(num_threads);
@@ -480,9 +503,18 @@ void apply_inlet_outlet_hd(LBM& lbm,
     std::atomic<bool> progress_stop{ false };
     std::thread progress_thread;
     if (show_progress) {
-        std::fprintf(stdout, "| [%s] inlet/outlet init (HD) step 1/2: classifying boundary cells...\n",
-            now_str_local_hd().c_str());
-        std::fflush(stdout);
+        if (luw_progress_gui_mode()) {
+            luw_emit_progress("interface_interpolation",
+                              "Interface interpolation",
+                              "Classifying high-order boundary cells",
+                              0ll,
+                              (long long)Ntot,
+                              false);
+        } else {
+            std::fprintf(stdout, "| [%s] inlet/outlet init (HD) step 1/2: classifying boundary cells...\n",
+                now_str_local_hd().c_str());
+            std::fflush(stdout);
+        }
     }
 
 
@@ -520,7 +552,9 @@ void apply_inlet_outlet_hd(LBM& lbm,
                         //}
                         if (on_outer) {
                             lbm.flags[n] = TYPE_E;
-                            heavy_lists[t].push_back(n);
+                            if (!(downstream_open_face && outlet)) {
+                                heavy_lists[t].push_back(n);
+                            }
                         }
                     }
 
@@ -609,26 +643,46 @@ void apply_inlet_outlet_hd(LBM& lbm,
             }
 
             if (show_progress) {
-                std::fprintf(stdout,
-                    "| [%s] inlet/outlet init (HD) surface %d/5 (%s): %llu cells\n",
-                    now_str_local_hd().c_str(),
-                    f + 1,
-                    face_name,
-                    static_cast<unsigned long long>(Nface));
-                std::fflush(stdout);
+                if (luw_progress_gui_mode()) {
+                    luw_emit_progress("interface_interpolation",
+                                      "Interface interpolation",
+                                      "High-order surface " + to_string((ulong)f + 1ull) + "/5 (" + string(face_name) + ")",
+                                      0ll,
+                                      (long long)Nface,
+                                      false);
+                } else {
+                    std::fprintf(stdout,
+                        "| [%s] inlet/outlet init (HD) surface %d/5 (%s): %llu cells\n",
+                        now_str_local_hd().c_str(),
+                        f + 1,
+                        face_name,
+                        static_cast<unsigned long long>(Nface));
+                    std::fflush(stdout);
+                }
 
                 processed.store(0ull, std::memory_order_relaxed);
                 progress_stop.store(false, std::memory_order_relaxed);
                 progress_thread = std::thread([&, Nface]() {
                     using namespace std::chrono;
                     while (!progress_stop.load(std::memory_order_relaxed)) {
-                        const double pct = 100.0 * double(processed.load(std::memory_order_relaxed))
+                        const unsigned long long current = processed.load(std::memory_order_relaxed);
+                        const double pct = 100.0 * double(current)
                             / double(Nface);
-                        print_progress_inline_hd(pct);
+                        print_progress_inline_hd(
+                            pct,
+                            current,
+                            Nface,
+                            "High-order surface " + to_string((ulong)f + 1ull) + "/5 (" + string(face_name) + "): " +
+                                to_string(current) + "/" + to_string(Nface) + " cells");
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
-                    print_progress_inline_hd(100.0, true);
-                    std::fputc('\n', stdout);
+                    print_progress_inline_hd(
+                        100.0,
+                        Nface,
+                        Nface,
+                        "High-order surface " + to_string((ulong)f + 1ull) + "/5 (" + string(face_name) + ") completed",
+                        true);
+                    if (!luw_progress_gui_mode()) std::fputc('\n', stdout);
                     });
             }
 
@@ -682,6 +736,15 @@ void apply_inlet_outlet_hd(LBM& lbm,
                 }
             }
         }
+    }
+
+    if (show_progress && luw_progress_gui_mode()) {
+        luw_emit_progress("interface_interpolation",
+                          "Interface interpolation",
+                          "High-order inlet/outlet mapping completed",
+                          1ll,
+                          1ll,
+                          false);
     }
 
 }
