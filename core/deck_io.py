@@ -4,151 +4,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-
-SECTION_ORDER: List[str] = [
-    "project",
-    "domain",
-    "generated",
-    "cfd",
-    "output",
-    "physics",
-    "vk",
-    "batch",
-    "custom",
-]
-
-SECTION_TITLES: Dict[str, str] = {
-    "project": "Project",
-    "domain": "Domain",
-    "generated": "Generated",
-    "cfd": "CFD Controls",
-    "output": "Output & Probes",
-    "physics": "Physics",
-    "vk": "Turbulence inflow",
-    "batch": "Batch",
-    "custom": "Custom",
-}
-
-SECTION_ALIASES: Dict[str, tuple[str, ...]] = {
-    "project": (
-        "project",
-        "project info",
-        "case",
-    ),
-    "domain": (
-        "domain",
-        "projected si range after rotation",
-        "wrf data range in lon/lat",
-    ),
-    "generated": (
-        "generated",
-        "generated info",
-        "volume-mean uvw and downstream boundary with yaw angle",
-    ),
-    "cfd": (
-        "cfd control",
-        "cfd controls",
-    ),
-    "output": (
-        "output",
-        "output and probes",
-        "output & probes",
-    ),
-    "physics": (
-        "physics",
-    ),
-    "vk": (
-        "turbulence inflow",
-        "vk inlet",
-        "von karman inlet",
-    ),
-    "batch": (
-        "batch",
-        "batch modes",
-        "dataset generation",
-        "inflow directions",
-    ),
-    "custom": (
-        "custom",
-    ),
-}
-
-FIELD_TO_SECTION: Dict[str, str] = {
-    "casename": "project",
-    "datetime": "project",
-    "cut_lon_manual": "domain",
-    "cut_lat_manual": "domain",
-    "cut_utm_x": "domain",
-    "cut_utm_y": "domain",
-    "si_x_cfd": "domain",
-    "si_y_cfd": "domain",
-    "si_z_cfd": "domain",
-    "base_height": "domain",
-    "z_limit": "domain",
-    "geometry_mode": "domain",
-    "midmesh_basesize": "domain",
-    "utm_crs": "domain",
-    "utm_epsg": "domain",
-    "utm": "domain",
-    "utm_zone": "domain",
-    "utm_hemisphere": "domain",
-    "rotate_deg": "domain",
-    "center_lon": "domain",
-    "center_lat": "domain",
-    "x_exp_rat": "batch",
-    "y_exp_rat": "batch",
-    "origin_shift_applied": "generated",
-    "um_vol": "generated",
-    "um_bc": "generated",
-    "downstream_bc": "generated",
-    "downstream_bc_yaw": "generated",
-    "n_gpu": "cfd",
-    "mesh_control": "cfd",
-    "gpu_memory": "cfd",
-    "cell_size": "cfd",
-    "validation": "cfd",
-    "high_order": "cfd",
-    "flux_correction": "cfd",
-    "downstream_open_face": "cfd",
-    "run_nstep": "cfd",
-    "research_output": "cfd",
-    "unsteady_output": "output",
-    "probes_output": "output",
-    "purge_avg": "output",
-    "purge_avg_stride": "output",
-    "output_tke_ti_tls": "output",
-    "probes": "output",
-    "coriolis_term": "physics",
-    "buoyancy": "physics",
-    "ibm_enabler": "physics",
-    "enable_buffer_nudging": "physics",
-    "buffer_thickness_m": "physics",
-    "buffer_tau_s": "physics",
-    "buffer_nudge_vertical": "physics",
-    "enable_top_sponge": "physics",
-    "sponge_thickness_m": "physics",
-    "sponge_tau_s": "physics",
-    "sponge_ref_mode": "physics",
-    "turb_inflow_enable": "vk",
-    "turb_inflow_approach": "vk",
-    "vk_inlet_ti": "vk",
-    "vk_inlet_sigma": "vk",
-    "vk_inlet_l": "vk",
-    "vk_inlet_nmodes": "vk",
-    "vk_inlet_seed": "vk",
-    "vk_inlet_update_stride": "vk",
-    "vk_inlet_uc_mode": "vk",
-    "vk_inlet_same_realization_all_faces": "vk",
-    "vk_inlet_stride_interpolation": "vk",
-    "vk_inlet_inflow_only": "vk",
-    "vk_inlet_anisotropy": "vk",
-    "inflow": "batch",
-    "angle": "batch",
-}
-
-FIELD_ORDER: Dict[str, List[str]] = {section: [] for section in SECTION_ORDER}
-for _key, _section in FIELD_TO_SECTION.items():
-    FIELD_ORDER.setdefault(_section, []).append(_key)
+from deck_schema import (
+    FIELD_ORDER,
+    FIELD_TO_SECTION,
+    SECTION_ALIASES,
+    SECTION_ORDER,
+    SECTION_TITLES,
+    field_spec_map,
+    normalize_key,
+    parse_bool_token,
+)
 
 
 class DeckParseError(ValueError):
@@ -156,10 +21,7 @@ class DeckParseError(ValueError):
 
 
 def _normalize_key(key: str) -> str:
-    normalized = key.strip().lower()
-    if normalized == "vk_inlet_enable":
-        return "turb_inflow_enable"
-    return normalized
+    return normalize_key(key)
 
 
 def _normalize_section_label(text: str) -> str:
@@ -339,12 +201,8 @@ class DeckDocument:
         raw = self.get_text(key, None)
         if raw is None:
             return default
-        lowered = raw.strip().lower()
-        if lowered in {"true", "1", "yes", "on"}:
-            return True
-        if lowered in {"false", "0", "no", "off"}:
-            return False
-        return default
+        parsed = parse_bool_token(raw)
+        return default if parsed is None else parsed
 
     def get_list(self, key: str) -> List[str]:
         raw = self.get_raw(key, None)
@@ -502,7 +360,27 @@ class DeckDocument:
 
     @staticmethod
     def _render_entry(entry: DeckEntry) -> str:
-        line = f"{entry.key} = {entry.value}".rstrip()
+        rendered_value = entry.value
+        spec = field_spec_map().get(entry.key) if entry.known else None
+        if spec is not None:
+            if spec.kind == "boolean":
+                parsed = parse_bool_token(rendered_value)
+                if parsed is not None:
+                    rendered_value = "true" if parsed else "false"
+            elif spec.kind in {"float_pair", "float_triplet", "uint_triplet", "float_list", "token_list"} and rendered_value.strip():
+                rendered_value = "[" + ", ".join(_parse_list_items(rendered_value)) + "]"
+            elif spec.quoted and rendered_value.strip():
+                rendered_value = f'"{rendered_value.strip()[1:-1].strip()}"' if (
+                    len(rendered_value.strip()) >= 2
+                    and (
+                        (rendered_value.strip()[0] == '"' and rendered_value.strip()[-1] == '"')
+                        or (rendered_value.strip()[0] == "'" and rendered_value.strip()[-1] == "'")
+                    )
+                ) else f'"{rendered_value.strip()}"'
+
+        line = f"{entry.key} =".rstrip()
+        if rendered_value.strip():
+            line += f" {rendered_value.strip()}"
         if entry.comment:
             line += f" {entry.comment}"
         return line.rstrip()

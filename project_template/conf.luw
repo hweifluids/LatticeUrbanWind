@@ -1,52 +1,61 @@
+// LUW deck
+
+// Project
 casename = example
-cut_lon_manual=[121.3,121.7]
-cut_lat_manual=[31.1,31.4]
 datetime = 20251010120000
-z_limit = 500
-geometry_mode = 2
-base_height=50
-midmesh_basesize=10
 
-
-
-
-
-
-// Projected SI Range after rotation
+// Domain
+cut_lon_manual = [121.3, 121.7]
+cut_lat_manual = [31.1, 31.4]
 si_x_cfd = [0.000000, 38156.187309]
 si_y_cfd = [0.000000, 33276.727502]
 si_z_cfd = [0.000000, 1000.000000]
-
-// WRF Data Range in lon/lat
+base_height = 50
+z_limit = 500
+geometry_mode = 2
+terr_voxel_height_field = auto
+terr_voxel_ignore_under = 0.000000
+terr_voxel_approach = idw
+terr_voxel_grid_resolution = 50.000000
+terr_voxel_idw_sigma = 1.000000
+terr_voxel_idw_power = 2.000000
+terr_voxel_idw_neighbors = 12
+midmesh_basesize = 10
 utm_crs = "EPSG:32651"
 rotate_deg = 0.774936
-origin_shift_applied = true
 
-// Volume-mean uvw and downstream boundary with yaw angle
+// Generated
+origin_shift_applied = true
 um_vol = [0.450915, 0.775041, 0.092367]
 um_bc = [0.464899, 1.326544, 0.000000]
 downstream_bc = "+y"
 downstream_bc_yaw = 30.19
 
-// CFD control
+// CFD Controls
 n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
 gpu_memory = 20000
-cell_size = 
-unsteady_output = 0
+cell_size =
 validation = pass
 high_order = true
 flux_correction = true
+
+// Output & Probes
+unsteady_output = 0
+
+// Physics
 coriolis_term = true
 ibm_enabler = false
-enable_buffer_nudging = 1
+enable_buffer_nudging = true
 buffer_thickness_m = 160.0
 buffer_tau_s = 300.0
-buffer_nudge_vertical = 0
-enable_top_sponge = 1
+buffer_nudge_vertical = false
+enable_top_sponge = true
 sponge_thickness_m = 200.0
 sponge_tau_s = 120.0
 sponge_ref_mode = 0
+
+// Turbulence inflow
 turb_inflow_enable = true
 turb_inflow_approach = vonkarman
 vk_inlet_ti = 0.050000
@@ -60,13 +69,3 @@ vk_inlet_same_realization_all_faces = true
 vk_inlet_stride_interpolation = false
 vk_inlet_inflow_only = false
 vk_inlet_anisotropy = [1.0, 1.0, 1.0]
-
-
-
-
-
-
-
-
-
-

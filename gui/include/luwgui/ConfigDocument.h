@@ -24,6 +24,10 @@ public:
     bool save(QString* errorMessage = nullptr);
     bool saveAs(const QString& filePath, QString* errorMessage = nullptr);
     bool applyRawText(const QString& text, QString* errorMessage = nullptr);
+    bool repairRawText(const QString& text,
+                       QString* repairedText,
+                       QStringList* operations = nullptr,
+                       QString* errorMessage = nullptr) const;
     void clearFilePath();
 
     QString filePath() const;

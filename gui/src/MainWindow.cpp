@@ -8,14 +8,17 @@
 #include <QClipboard>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleValidator>
 #include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QFormLayout>
 #include <QFrame>
 #include <QFont>
@@ -25,6 +28,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QIntValidator>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -251,17 +255,268 @@ bool sameProjectDeckPath(const QString& lhs, const QString& rhs) {
 }
 
 QString recentProjectActionText(const QString& filePath) {
-    const QFileInfo fileInfo(filePath);
-    const QString projectDirectory = fileInfo.absolutePath();
-    const QString nativeProjectDirectory = QDir::toNativeSeparators(projectDirectory);
-    const QString folderName = QFileInfo(projectDirectory).fileName();
-    if (!folderName.isEmpty()) {
-        return folderName;
-    }
-    if (!projectDirectory.isEmpty()) {
-        return nativeProjectDirectory;
-    }
     return QDir::toNativeSeparators(filePath);
+}
+
+const QString kGuiPropertiesDirName = QStringLiteral("gui_properties");
+const QString kManagedRoleTool = QStringLiteral("tool");
+const QString kManagedRoleDisplay = QStringLiteral("display");
+const QString kManagedRoleDataProcessor = QStringLiteral("data_processor");
+const QString kToolFileExtension = QStringLiteral(".luwtools");
+const QString kVisFileExtension = QStringLiteral(".luwvis");
+const QString kProcessorFileExtension = QStringLiteral(".luwpp");
+
+struct ManagedFileNameInfo {
+    QString baseName;
+    bool trashed = false;
+    int trashIndex = -1;
+};
+
+QString stripWrappingQuotes(QString text) {
+    text = text.trimmed();
+    if (text.size() >= 2) {
+        const QChar first = text.front();
+        const QChar last = text.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+            text = text.mid(1, text.size() - 2).trimmed();
+        }
+    }
+    return text;
+}
+
+QString managedFileExtension(const QString& role) {
+    if (role == kManagedRoleTool) {
+        return kToolFileExtension;
+    }
+    if (role == kManagedRoleDisplay) {
+        return kVisFileExtension;
+    }
+    if (role == kManagedRoleDataProcessor) {
+        return kProcessorFileExtension;
+    }
+    return {};
+}
+
+QString managedRoleDisplayName(const QString& role) {
+    if (role == kManagedRoleTool) {
+        return QStringLiteral("tool");
+    }
+    if (role == kManagedRoleDisplay) {
+        return QStringLiteral("display");
+    }
+    if (role == kManagedRoleDataProcessor) {
+        return QStringLiteral("data processor");
+    }
+    return QStringLiteral("node");
+}
+
+QString managedNodeId(const QString& role, const QString& filePath) {
+    return role + "::" + normalizeProjectDeckPath(filePath);
+}
+
+QString managedNodeDefaultTitle(const QString& role, const QString& storageType) {
+    if (role == kManagedRoleTool) {
+        if (storageType == "crop") {
+            return QStringLiteral("Crop region");
+        }
+        if (storageType == "multimoment") {
+            return QStringLiteral("Multi-moment automation");
+        }
+    } else if (role == kManagedRoleDisplay) {
+        if (storageType == "geometry") {
+            return QStringLiteral("Geometry display");
+        }
+        if (storageType == "2d") {
+            return QStringLiteral("2D visualization");
+        }
+        if (storageType == "3d") {
+            return QStringLiteral("3D visualization");
+        }
+        if (storageType == "plot") {
+            return QStringLiteral("Data plot");
+        }
+        if (storageType == "sheet") {
+            return QStringLiteral("Spreadsheet view");
+        }
+    } else if (role == kManagedRoleDataProcessor) {
+        return QStringLiteral("Data processor");
+    }
+    return QStringLiteral("Node");
+}
+
+QString managedNodeTypePropertyKey(const QString& role) {
+    if (role == kManagedRoleTool) {
+        return QStringLiteral("tool_type");
+    }
+    if (role == kManagedRoleDisplay) {
+        return QStringLiteral("vis_type");
+    }
+    return {};
+}
+
+QString managedNodeFileContents(const QString& role, const QString& storageType) {
+    const QString key = managedNodeTypePropertyKey(role);
+    if (key.isEmpty()) {
+        return {};
+    }
+    return QString("%1 = %2\n").arg(key, storageType);
+}
+
+QString managedNodeTrashSuffix(int trashIndex) {
+    if (trashIndex <= 0) {
+        return QStringLiteral(" (trashed)");
+    }
+    return QString(" (trashed %1)").arg(trashIndex);
+}
+
+QString managedNodeDisplayTitle(const QString& baseName, bool trashed, int trashIndex) {
+    return trashed ? baseName + managedNodeTrashSuffix(trashIndex) : baseName;
+}
+
+QString managedNodeRecoverLabel(const QString& role) {
+    if (role == kManagedRoleTool) {
+        return QStringLiteral("Recover tool");
+    }
+    if (role == kManagedRoleDisplay) {
+        return QStringLiteral("Recover display");
+    }
+    if (role == kManagedRoleDataProcessor) {
+        return QStringLiteral("Recover data processor");
+    }
+    return QStringLiteral("Recover");
+}
+
+bool parseManagedFileName(const QString& fileName, const QString& extension, ManagedFileNameInfo* info) {
+    const QRegularExpression expression(
+        QString(R"(^(.+)%1(?:\.trash(\d*)?)?$)")
+            .arg(QRegularExpression::escape(extension)),
+        QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = expression.match(fileName);
+    if (!match.hasMatch()) {
+        return false;
+    }
+
+    ManagedFileNameInfo parsed;
+    parsed.baseName = match.captured(1);
+    const bool hasTrashSuffix = !match.captured(2).isNull();
+    parsed.trashed = hasTrashSuffix;
+    parsed.trashIndex = hasTrashSuffix
+        ? (match.captured(2).isEmpty() ? 0 : match.captured(2).toInt())
+        : -1;
+
+    if (info) {
+        *info = parsed;
+    }
+    return true;
+}
+
+QHash<QString, QString> readLooseKeyValueFile(const QString& filePath) {
+    QHash<QString, QString> values;
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return values;
+    }
+
+    const QString text = QString::fromUtf8(file.readAll());
+    const QStringList lines = text.split(QRegularExpression(R"(\r\n|\r|\n)"));
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (line.isEmpty() || line.startsWith('#') || line.startsWith("//")) {
+            continue;
+        }
+        const int equalsIndex = line.indexOf('=');
+        if (equalsIndex <= 0) {
+            continue;
+        }
+        const QString key = line.left(equalsIndex).trimmed().toLower();
+        const QString value = stripWrappingQuotes(line.mid(equalsIndex + 1));
+        if (!key.isEmpty()) {
+            values.insert(key, value);
+        }
+    }
+
+    return values;
+}
+
+bool writeManagedNodeFile(const QString& filePath, const QString& role, const QString& storageType, QString* errorMessage) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        if (errorMessage) {
+            *errorMessage = file.errorString();
+        }
+        return false;
+    }
+
+    const QByteArray data = managedNodeFileContents(role, storageType).toUtf8();
+    if (!data.isEmpty() && file.write(data) != data.size()) {
+        if (errorMessage) {
+            *errorMessage = file.errorString();
+        }
+        return false;
+    }
+
+    return true;
+}
+
+QString nextAvailableTrashPath(const QString& activeFilePath) {
+    const QString baseTrashPath = activeFilePath + ".trash";
+    if (!QFileInfo::exists(baseTrashPath)) {
+        return baseTrashPath;
+    }
+    for (int index = 2; index < std::numeric_limits<int>::max(); ++index) {
+        const QString candidate = activeFilePath + ".trash" + QString::number(index);
+        if (!QFileInfo::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return baseTrashPath;
+}
+
+QString nextAvailableManagedPath(const QString& directoryPath, const QString& preferredBaseName, const QString& extension) {
+    const QDir directory(directoryPath);
+    const QString preferredPath = directory.filePath(preferredBaseName + extension);
+    if (!QFileInfo::exists(preferredPath)) {
+        return preferredPath;
+    }
+
+    for (int index = 2; index < std::numeric_limits<int>::max(); ++index) {
+        const QString candidate = directory.filePath(
+            QString("%1_%2%3").arg(preferredBaseName, QString::number(index), extension));
+        if (!QFileInfo::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    return preferredPath;
+}
+
+bool isValidManagedNodeName(const QString& name, QString* errorMessage = nullptr) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = "Name cannot be empty.";
+        }
+        return false;
+    }
+    if (trimmed == "." || trimmed == "..") {
+        if (errorMessage) {
+            *errorMessage = "Name is not valid.";
+        }
+        return false;
+    }
+    if (trimmed.endsWith('.') || trimmed.endsWith(' ')) {
+        if (errorMessage) {
+            *errorMessage = "Name cannot end with a space or period.";
+        }
+        return false;
+    }
+    if (trimmed.contains(QRegularExpression(R"([\\/:*?"<>|])"))) {
+        if (errorMessage) {
+            *errorMessage = "Name contains invalid path characters.";
+        }
+        return false;
+    }
+    return true;
 }
 
 QVariantList parseLooseList(const QString& text, bool integerMode) {
@@ -319,12 +574,8 @@ bool hasNextSibling(const QModelIndex& index) {
 }
 
 bool rawValueTruthy(const QString& raw) {
-    QString normalized = raw.trimmed().toLower();
-    if ((normalized.startsWith('"') && normalized.endsWith('"'))
-        || (normalized.startsWith('\'') && normalized.endsWith('\''))) {
-        normalized = normalized.mid(1, normalized.size() - 2).trimmed();
-    }
-    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+    bool parsed = false;
+    return tryParseDeckBool(raw, &parsed) && parsed;
 }
 
 QString cssColor(const QColor& color) {
@@ -506,6 +757,230 @@ private:
     bool drawGrid_ = false;
 };
 
+QStringList splitLooseVectorTokens(QString text) {
+    text.replace('[', ' ');
+    text.replace(']', ' ');
+    return text.split(QRegularExpression(R"([,\s]+)"), Qt::SkipEmptyParts);
+}
+
+QString canonicalizeLooseVectorText(const QString& text) {
+    return splitLooseVectorTokens(text).join(", ");
+}
+
+QString normalizeTerrainHeightFieldValue(const QString& value) {
+    const QString trimmed = value.trimmed();
+    const QString normalized = trimmed.toLower();
+    if (normalized.isEmpty() || normalized == "auto" || normalized == "inferred") {
+        return QStringLiteral("auto");
+    }
+    return trimmed;
+}
+
+QString displayTerrainHeightFieldValue(const QString& value) {
+    return normalizeTerrainHeightFieldValue(value) == "auto" ? QStringLiteral("Inferred") : value.trimmed();
+}
+
+QString formatFloatTokenForDisplay(const QString& token) {
+    bool ok = false;
+    const double value = token.trimmed().toDouble(&ok);
+    return ok ? QString::number(value, 'f', 2) : token.trimmed();
+}
+
+QString formatFloatVectorForDisplay(const QString& text) {
+    const QStringList tokens = splitLooseVectorTokens(text);
+    if (tokens.isEmpty()) {
+        return {};
+    }
+
+    QStringList displayTokens;
+    displayTokens.reserve(tokens.size());
+    for (const QString& token : tokens) {
+        displayTokens.push_back(formatFloatTokenForDisplay(token));
+    }
+    return displayTokens.join(", ");
+}
+
+QString renderBracketedListText(const QString& text) {
+    const QStringList tokens = splitLooseVectorTokens(text);
+    if (tokens.isEmpty()) {
+        return {};
+    }
+    return "[" + tokens.join(", ") + "]";
+}
+
+QString renderBracketedListText(const QStringList& parts) {
+    QStringList tokens;
+    tokens.reserve(parts.size());
+    for (const QString& part : parts) {
+        const QString trimmed = part.trimmed();
+        if (!trimmed.isEmpty()) {
+            tokens.push_back(trimmed);
+        }
+    }
+    if (tokens.isEmpty()) {
+        return {};
+    }
+    return "[" + tokens.join(", ") + "]";
+}
+
+QStringList tripletPartsFromRawText(const QString& text) {
+    QStringList parts = splitLooseVectorTokens(text);
+    while (parts.size() < 3) {
+        parts.push_back({});
+    }
+    if (parts.size() > 3) {
+        parts = parts.mid(0, 3);
+    }
+    return parts;
+}
+
+bool usesSplitTripletEditor(const FieldSpec& spec) {
+    return spec.key == "n_gpu" || spec.key == "vk_inlet_anisotropy";
+}
+
+class PrecisionNumericLineEdit final : public QLineEdit {
+public:
+    enum class Mode {
+        Scalar,
+        Vector
+    };
+
+    explicit PrecisionNumericLineEdit(Mode mode, QWidget* parent = nullptr)
+        : QLineEdit(parent)
+        , mode_(mode) {
+        if (mode_ == Mode::Scalar) {
+            auto* validator = new QDoubleValidator(-1.0e100, 1.0e100, 15, this);
+            validator->setNotation(QDoubleValidator::ScientificNotation);
+            setValidator(validator);
+        }
+    }
+
+    void setRawText(const QString& rawText) {
+        fullText_ = normalizeText(rawText);
+        applyPresentation();
+    }
+
+    QString canonicalText() const {
+        if (hasFocus()) {
+            return text().trimmed();
+        }
+        return fullText_.isEmpty() ? text().trimmed() : fullText_;
+    }
+
+    QString commitVisibleText() {
+        fullText_ = normalizeText(text());
+        return fullText_;
+    }
+
+protected:
+    void focusInEvent(QFocusEvent* event) override {
+        QLineEdit::focusInEvent(event);
+        const QSignalBlocker blocker(this);
+        setText(fullText_);
+        selectAll();
+    }
+
+    void focusOutEvent(QFocusEvent* event) override {
+        fullText_ = normalizeText(text());
+        QLineEdit::focusOutEvent(event);
+        applyPresentation();
+    }
+
+private:
+    QString normalizeText(const QString& text) const {
+        return mode_ == Mode::Scalar ? text.trimmed() : canonicalizeLooseVectorText(text);
+    }
+
+    QString displayText(const QString& text) const {
+        if (text.trimmed().isEmpty()) {
+            return {};
+        }
+        return mode_ == Mode::Scalar ? formatFloatTokenForDisplay(text) : formatFloatVectorForDisplay(text);
+    }
+
+    void applyPresentation() {
+        const QSignalBlocker blocker(this);
+        setText(hasFocus() ? fullText_ : displayText(fullText_));
+        if (!hasFocus()) {
+            deselect();
+            setCursorPosition(0);
+        }
+    }
+
+    Mode mode_;
+    QString fullText_;
+};
+
+class SplitTripletEditor final : public QWidget {
+public:
+    enum class ValueMode {
+        Integer,
+        Float
+    };
+
+    explicit SplitTripletEditor(ValueMode mode, QWidget* parent = nullptr)
+        : QWidget(parent)
+        , mode_(mode) {
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+
+        for (int index = 0; index < 3; ++index) {
+            QLineEdit* edit = nullptr;
+            if (mode_ == ValueMode::Float) {
+                edit = new PrecisionNumericLineEdit(PrecisionNumericLineEdit::Mode::Scalar, this);
+            } else {
+                edit = new QLineEdit(this);
+                edit->setValidator(new QIntValidator(0, 999999999, edit));
+            }
+            edit->setMinimumWidth(0);
+            edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            layout->addWidget(edit, 1);
+            edits_.push_back(edit);
+        }
+    }
+
+    QList<QLineEdit*> lineEdits() const {
+        return edits_;
+    }
+
+    QStringList canonicalParts() const {
+        QStringList parts;
+        parts.reserve(edits_.size());
+        for (QLineEdit* edit : edits_) {
+            if (auto* precision = dynamic_cast<PrecisionNumericLineEdit*>(edit)) {
+                parts.push_back(precision->canonicalText());
+            } else {
+                parts.push_back(edit ? edit->text().trimmed() : QString());
+            }
+        }
+        return parts;
+    }
+
+    QString rawTextForDeck() const {
+        return renderBracketedListText(canonicalParts());
+    }
+
+    void setRawText(const QString& rawText) {
+        const QStringList parts = tripletPartsFromRawText(rawText);
+        for (int index = 0; index < edits_.size(); ++index) {
+            QLineEdit* edit = edits_[index];
+            if (auto* precision = dynamic_cast<PrecisionNumericLineEdit*>(edit)) {
+                precision->setRawText(parts.value(index));
+            } else {
+                const QSignalBlocker blocker(edit);
+                edit->setText(parts.value(index));
+                edit->deselect();
+                edit->setCursorPosition(0);
+            }
+        }
+    }
+
+private:
+    ValueMode mode_;
+    QList<QLineEdit*> edits_;
+};
+
 QString displayEnumLabel(const QString& key, const QString& value) {
     if (key == "geometry_mode") {
         if (value == "0") {
@@ -536,10 +1011,21 @@ QString displayEnumLabel(const QString& key, const QString& value) {
     }
     if (key == "turb_inflow_approach") {
         if (value == "vonkarman") {
-            return "Von Karman (Harmonic)";
+            return "Von Karman (harmonic)";
         }
         if (value == "smirnov") {
             return "Smirnov (Gaussian-like)";
+        }
+    }
+    if (key == "terr_voxel_approach") {
+        if (value == "idw") {
+            return "IDW";
+        }
+        if (value == "kriging_gpu") {
+            return "Kriging (GPU)";
+        }
+        if (value == "kriging") {
+            return "Kriging";
         }
     }
     return value;
@@ -873,6 +1359,55 @@ bool copyFileReplacing(const QString& sourcePath, const QString& targetPath, QSt
     return false;
 }
 
+enum class ProjectImportKind {
+    Unknown,
+    Building,
+    Terrain,
+    Wind
+};
+
+ProjectImportKind importKindForSubdirectory(const QString& targetSubdirectory) {
+    const QString normalized = targetSubdirectory.trimmed().toLower();
+    if (normalized == "building_db") {
+        return ProjectImportKind::Building;
+    }
+    if (normalized == "terrain_db") {
+        return ProjectImportKind::Terrain;
+    }
+    if (normalized == "wind_bc") {
+        return ProjectImportKind::Wind;
+    }
+    return ProjectImportKind::Unknown;
+}
+
+QString importKindDisplayName(ProjectImportKind kind) {
+    switch (kind) {
+    case ProjectImportKind::Building:
+        return QStringLiteral("building database");
+    case ProjectImportKind::Terrain:
+        return QStringLiteral("terrain database");
+    case ProjectImportKind::Wind:
+        return QStringLiteral("wind data");
+    case ProjectImportKind::Unknown:
+        break;
+    }
+    return QStringLiteral("project asset");
+}
+
+QString importDialogFilter(ProjectImportKind kind) {
+    switch (kind) {
+    case ProjectImportKind::Building:
+        return QStringLiteral("Building Shapefile (*.shp)");
+    case ProjectImportKind::Terrain:
+        return QStringLiteral("Terrain Data (*.shp *.tif *.tiff)");
+    case ProjectImportKind::Wind:
+        return QStringLiteral("Wind Data (*.nc *.out)");
+    case ProjectImportKind::Unknown:
+        break;
+    }
+    return QStringLiteral("All files (*.*)");
+}
+
 QStringList companionExtensionsFor(const QString& suffix) {
     const QString ext = suffix.toLower();
     if (ext == "shp") {
@@ -882,6 +1417,172 @@ QStringList companionExtensionsFor(const QString& suffix) {
         return {"tif", "tiff", "tfw", "prj", "aux.xml", "ovr"};
     }
     return {suffix};
+}
+
+bool isRelevantImportArtifact(ProjectImportKind kind, const QString& fileName) {
+    const QString lower = fileName.trimmed().toLower();
+    if (lower.isEmpty()) {
+        return false;
+    }
+
+    switch (kind) {
+    case ProjectImportKind::Building:
+        return lower.endsWith(".shp")
+            || lower.endsWith(".shx")
+            || lower.endsWith(".dbf")
+            || lower.endsWith(".prj")
+            || lower.endsWith(".cpg")
+            || lower.endsWith(".qix")
+            || lower.endsWith(".sbn")
+            || lower.endsWith(".sbx")
+            || lower.endsWith(".stl");
+    case ProjectImportKind::Terrain:
+        return lower.endsWith(".shp")
+            || lower.endsWith(".shx")
+            || lower.endsWith(".dbf")
+            || lower.endsWith(".prj")
+            || lower.endsWith(".cpg")
+            || lower.endsWith(".qix")
+            || lower.endsWith(".sbn")
+            || lower.endsWith(".sbx")
+            || lower.endsWith(".tif")
+            || lower.endsWith(".tiff")
+            || lower.endsWith(".tfw")
+            || lower.endsWith(".aux.xml")
+            || lower.endsWith(".ovr");
+    case ProjectImportKind::Wind:
+        return lower.endsWith(".nc") || lower.endsWith(".out");
+    case ProjectImportKind::Unknown:
+        break;
+    }
+    return false;
+}
+
+QStringList existingImportArtifacts(const QString& directoryPath, ProjectImportKind kind) {
+    QStringList files;
+    const QDir directory(directoryPath);
+    const QFileInfoList entries = directory.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const QFileInfo& entry : entries) {
+        if (isRelevantImportArtifact(kind, entry.fileName())) {
+            files.push_back(entry.absoluteFilePath());
+        }
+    }
+    return files;
+}
+
+bool removeFilesReplacing(const QStringList& filePaths, QString* errorMessage = nullptr) {
+    for (const QString& filePath : filePaths) {
+        const QFileInfo fileInfo(filePath);
+        if (!fileInfo.exists()) {
+            continue;
+        }
+        if (!QFile::remove(filePath)) {
+            if (errorMessage) {
+                *errorMessage = QString("Failed to remove existing file %1.").arg(QDir::toNativeSeparators(filePath));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+QString sanitizeImportedBaseName(QString text, const QString& fallback) {
+    text = text.trimmed();
+    text.replace(QRegularExpression(R"([\\/:*?"<>|\s]+)"), "_");
+    text.replace(QRegularExpression(R"(_+)"), "_");
+    while (text.startsWith('_')) {
+        text.remove(0, 1);
+    }
+    while (text.endsWith('_')) {
+        text.chop(1);
+    }
+    return text.isEmpty() ? fallback : text;
+}
+
+QString canonicalImportBaseName(ProjectImportKind kind, const QString& sourcePath, const luwgui::ConfigDocument* document) {
+    switch (kind) {
+    case ProjectImportKind::Building:
+        return QStringLiteral("rawbuildings");
+    case ProjectImportKind::Terrain: {
+        const QString suffix = QFileInfo(sourcePath).suffix().toLower();
+        if (suffix == "shp") {
+            const QString caseName = document ? document->typedValue("casename").toString() : QString();
+            return sanitizeImportedBaseName(caseName, QStringLiteral("terrain"));
+        }
+        return QStringLiteral("dem");
+    }
+    case ProjectImportKind::Wind:
+    case ProjectImportKind::Unknown:
+        break;
+    }
+    return sanitizeImportedBaseName(QFileInfo(sourcePath).completeBaseName(), QStringLiteral("imported"));
+}
+
+QString targetFileNameForBaseName(const QString& sourcePath, const QString& canonicalBaseName) {
+    const QFileInfo sourceInfo(sourcePath);
+    const QString fileName = sourceInfo.fileName();
+    const QString lowerFileName = fileName.toLower();
+    if (lowerFileName.endsWith(".aux.xml")) {
+        const QString auxSuffix = QStringLiteral(".aux.xml");
+        const QString prefix = fileName.left(fileName.size() - auxSuffix.size());
+        const QString innerSuffix = QFileInfo(prefix).suffix();
+        return innerSuffix.isEmpty()
+            ? canonicalBaseName + auxSuffix
+            : canonicalBaseName + "." + innerSuffix + auxSuffix;
+    }
+
+    const QString suffix = sourceInfo.suffix();
+    return suffix.isEmpty() ? canonicalBaseName : canonicalBaseName + "." + suffix;
+}
+
+QString canonicalWindFileName(const QString& sourcePath, const luwgui::ConfigDocument* document) {
+    const QString fallbackCaseName = sanitizeImportedBaseName(QFileInfo(sourcePath).completeBaseName(), QStringLiteral("wind"));
+    const QString caseName = sanitizeImportedBaseName(
+        document ? document->typedValue("casename").toString() : QString(),
+        fallbackCaseName);
+
+    QString datetimeToken = document ? document->typedValue("datetime").toString().trimmed() : QString();
+    datetimeToken.remove(QRegularExpression(R"([\\/:*?"<>|\s]+)"));
+    if (datetimeToken.isEmpty()) {
+        return caseName + ".nc";
+    }
+    return caseName + "_" + datetimeToken + ".nc";
+}
+
+QStringList sourceFilesForImport(const QString& selectedFile) {
+    std::set<QString> sourceFiles;
+    const QFileInfo sourceInfo(selectedFile);
+    const QString baseName = sourceInfo.completeBaseName();
+    const QDir sourceDir = sourceInfo.dir();
+    QStringList candidates;
+
+    for (const QString& extension : companionExtensionsFor(sourceInfo.suffix())) {
+        if (extension.contains('.')) {
+            const QString sidecarName = sourceInfo.fileName() + "." + extension;
+            if (sourceDir.exists(sidecarName)) {
+                candidates.push_back(sourceDir.filePath(sidecarName));
+            }
+            continue;
+        }
+        const QStringList matches = sourceDir.entryList({baseName + "." + extension}, QDir::Files);
+        for (const QString& match : matches) {
+            candidates.push_back(sourceDir.filePath(match));
+        }
+    }
+
+    if (candidates.isEmpty()) {
+        candidates.push_back(selectedFile);
+    }
+
+    for (const QString& candidate : candidates) {
+        sourceFiles.insert(QFileInfo(candidate).absoluteFilePath());
+    }
+
+    if (sourceInfo.fileName().toLower().endsWith(".aux.xml")) {
+        sourceFiles.insert(sourceInfo.absoluteFilePath());
+    }
+
+    return QStringList(sourceFiles.begin(), sourceFiles.end());
 }
 
 QString chooseDeckFilePath(QWidget* parent,
@@ -990,10 +1691,9 @@ MainWindow::MainWindow(const AppPreferences& preferences, QWidget* parent)
                                                                     qint64 current,
                                                                     qint64 total,
                                                                     bool indeterminate) {
-        if (!progressPanel_) {
-            return;
+        if (progressPanel_) {
+            progressPanel_->setProgress(summary, detail, current, total, indeterminate);
         }
-        progressPanel_->setProgress(summary, detail, current, total, indeterminate);
     });
     connect(runner_, &CommandRunner::started, this, [this](const QString& title) {
         stopRequested_ = false;
@@ -1044,6 +1744,105 @@ MainWindow::MainWindow(const AppPreferences& preferences, QWidget* parent)
     applyPreferences();
     qApp->installEventFilter(this);
     resize(1800, 1040);
+}
+
+void MainWindow::appendStartupReport(const StartupCheckResult& startupCheck) {
+    ensureCenterWorkspaceCreated();
+    if (!console_) {
+        return;
+    }
+
+    console_->setCollapsed(false);
+    if (centerSplitter_) {
+        centerSplitter_->setVisible(true);
+    }
+    syncWorkflowChromeButtons();
+
+    int packageFailures = 0;
+    for (const PythonImportCheck& check : startupCheck.packageChecks) {
+        if (!check.success) {
+            ++packageFailures;
+        }
+    }
+
+    QStringList lines;
+    lines << "[Startup] ---- Runtime Summary ----";
+    lines << "[Startup] Software: LatticeUrbanWind Studio";
+    lines << QString("[Startup] Software version: %1").arg(buildinfo::kStudioVersion);
+    lines << QString("[Startup] GUI version: %1").arg(buildinfo::kStudioVersion);
+    lines << QString("[Startup] FluidX3D core: %1").arg(buildinfo::kCfdCoreVersion);
+    lines << QString("[Startup] Build timestamp: %1").arg(buildinfo::kBuildTimestamp);
+    lines << QString("[Startup] Repository root: %1").arg(QDir::toNativeSeparators(startupCheck.repoRoot));
+    lines << QString("[Startup] Host platform: %1").arg(startupCheck.hostPlatform.isEmpty() ? QStringLiteral("unknown") : startupCheck.hostPlatform);
+    lines << QString("[Startup] Python: %1 | %2")
+                 .arg(startupCheck.pythonVersion.isEmpty() ? QStringLiteral("unknown") : startupCheck.pythonVersion,
+                      startupCheck.pythonExecutable.isEmpty() ? QStringLiteral("unresolved") : QDir::toNativeSeparators(startupCheck.pythonExecutable));
+    lines << QString("[Startup] Python environment: %1")
+                 .arg(startupCheck.pythonSummary.isEmpty()
+                          ? QStringLiteral("summary unavailable")
+                          : startupCheck.pythonSummary);
+
+    if (packageFailures > 0) {
+        lines << QString("[Startup] Python import failures: %1").arg(packageFailures);
+        for (const PythonImportCheck& check : startupCheck.packageChecks) {
+            if (!check.success) {
+                lines << QString("[Startup]   - %1 -> %2").arg(check.packageName, check.errorText);
+            }
+        }
+    }
+
+    QString cudaLine = startupCheck.cuda.summary;
+    if (cudaLine.isEmpty()) {
+        cudaLine = startupCheck.cuda.available
+            ? QStringLiteral("CUDA available")
+            : QStringLiteral("CUDA unavailable");
+    }
+    if (!startupCheck.cuda.runtimeVersion.isEmpty()) {
+        cudaLine += QString(" | runtime %1").arg(startupCheck.cuda.runtimeVersion);
+    }
+    if (!startupCheck.cuda.driverVersion.isEmpty()) {
+        cudaLine += QString(" | driver %1").arg(startupCheck.cuda.driverVersion);
+    }
+    if (!startupCheck.cuda.numbaVersion.isEmpty()) {
+        cudaLine += QString(" | numba %1").arg(startupCheck.cuda.numbaVersion);
+    }
+    lines << (QStringLiteral("[Startup] CUDA: ") + cudaLine);
+    if (!startupCheck.cuda.devices.isEmpty()) {
+        const AcceleratorDeviceCheck& device = startupCheck.cuda.devices.front();
+        QString deviceLine = QString("[Startup] CUDA primary device: %1").arg(device.name);
+        if (!device.computeCapability.isEmpty()) {
+            deviceLine += QString(" | cc %1").arg(device.computeCapability);
+        }
+        lines << deviceLine;
+    }
+    if (!startupCheck.cuda.errorText.isEmpty()) {
+        lines << (QStringLiteral("[Startup] CUDA details: ") + startupCheck.cuda.errorText);
+    }
+
+    QString openclLine = startupCheck.opencl.summary;
+    if (openclLine.isEmpty()) {
+        openclLine = startupCheck.opencl.available
+            ? QStringLiteral("OpenCL available")
+            : QStringLiteral("OpenCL unavailable");
+    }
+    if (!startupCheck.opencl.version.isEmpty()) {
+        openclLine += QString(" | %1").arg(startupCheck.opencl.version);
+    }
+    lines << (QStringLiteral("[Startup] OpenCL: ") + openclLine);
+    if (!startupCheck.opencl.devices.isEmpty()) {
+        const AcceleratorDeviceCheck& device = startupCheck.opencl.devices.front();
+        QString deviceLine = QString("[Startup] OpenCL primary device: %1").arg(device.name);
+        if (!device.driverVersion.isEmpty()) {
+            deviceLine += QString(" | driver %1").arg(device.driverVersion);
+        }
+        lines << deviceLine;
+    }
+    if (!startupCheck.opencl.errorText.isEmpty()) {
+        lines << (QStringLiteral("[Startup] OpenCL details: ") + startupCheck.opencl.errorText);
+    }
+
+    lines << "[Startup] -------------------------";
+    console_->appendText(lines.join('\n') + '\n');
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -1309,13 +2108,10 @@ void MainWindow::buildUi() {
     auto* centerHostLayout = new QVBoxLayout(centerHost_);
     centerHostLayout->setContentsMargins(0, 0, 0, 0);
     centerHostLayout->setSpacing(0);
-    centerPlaceholder_ = buildShellPlaceholderPage();
-    centerPlaceholder_->setObjectName("centerPlaceholder");
-    centerPlaceholderShell_ = createPanelShell(centerHost_, centerPlaceholder_, "centerPlaceholderShell");
-    centerHostLayout->addWidget(centerPlaceholderShell_, 1);
     // Create the OpenGL-backed viewer before the top-level window is first shown.
     // On Windows, adding it lazily later can force the native window to be recreated.
     ensureCenterWorkspaceCreated();
+    centerHostLayout->setStretch(0, 1);
     workspaceSplitter_->addWidget(centerHost_);
 
     rightHost_ = new QWidget(workspaceSplitter_);
@@ -1340,7 +2136,7 @@ void MainWindow::buildUi() {
     rebuildSectionPages();
     resetWorkspaceSplitters(rootSplitter_, workspaceSplitter_);
     syncWorkflowChromeButtons();
-    setActiveTrackedPanel(centerPlaceholderShell_);
+    setActiveTrackedPanel(viewerPanelShell_);
 }
 
 void MainWindow::configureStatusBarGeometry() {
@@ -1357,6 +2153,7 @@ void MainWindow::configureStatusBarGeometry() {
         statusLayout->setContentsMargins(8, 1, 8, 0);
         statusLayout->setSpacing(0);
     }
+
 }
 
 void MainWindow::buildMenus() {
@@ -1422,8 +2219,8 @@ void MainWindow::buildMenus() {
     importMenu->addAction("Building Database", this, [this] {
         importProjectAsset("building_db", "Import Building Database");
     });
-    importMenu->addAction("Wind Database", this, [this] {
-        importProjectAsset("wind_bc", "Import Wind Database");
+    importMenu->addAction("Wind Data", this, [this] {
+        importProjectAsset("wind_bc", "Import Wind Data");
     });
     auto* exportMenu = fileMenu->addMenu("Export");
     exportMenu->addAction("Generate visualization data", this, &MainWindow::runVisLuwExport);
@@ -1449,6 +2246,21 @@ void MainWindow::buildMenus() {
         }
     });
 
+    auto* toolsMenu = new QMenu("Tools", this);
+    toolsMenu->addAction("Fix deck file", this, &MainWindow::fixDeckFile);
+    toolsMenu->addAction("Crop region (interactive)", this, [this] {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Reserved", "crop region");
+        }
+        statusBar()->showMessage("Crop region (interactive) is reserved but not wired yet.", 4000);
+    });
+    toolsMenu->addAction("Inspect domain (interactive)", this, [this] {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Reserved", "inspect domain");
+        }
+        statusBar()->showMessage("Inspect domain (interactive) is reserved but not wired yet.", 4000);
+    });
+
     auto* helpMenu = new QMenu("About", this);
     helpMenu->addAction("Preferences", this, &MainWindow::showPreferencesDialog);
     helpMenu->addAction("About LatticeUrbanWind Studio", this, &MainWindow::showAboutDialog);
@@ -1456,6 +2268,7 @@ void MainWindow::buildMenus() {
     addTitleMenuButton("File", fileMenu);
     addTitleMenuButton("Run", runMenu);
     addTitleMenuButton("View", viewMenu);
+    addTitleMenuButton("Tools", toolsMenu);
     addTitleMenuButton("About", helpMenu);
 
     projectScopedActions_ << saveAction
@@ -1463,7 +2276,8 @@ void MainWindow::buildMenus() {
                           << importMenu->menuAction()
                           << exportMenu->menuAction()
                           << runMenu->menuAction()
-                          << viewMenu->menuAction();
+                          << viewMenu->menuAction()
+                          << toolsMenu->menuAction();
 }
 
 void MainWindow::applyTitleBarStyle() {
@@ -1797,7 +2611,6 @@ QWidget* MainWindow::buildWorkflowBar() {
                           << validateButton
                           << solveButton
                           << stopButton
-                          << consoleToggleButton_
                           << sidePanelToggleButton_;
 
     return bar;
@@ -1810,9 +2623,25 @@ bool MainWindow::isFieldCompatible(const FieldSpec& spec) const {
 QString MainWindow::fieldDisplayLabel(const QString& nodeId, const FieldSpec& spec, bool propertyField) const {
     Q_UNUSED(nodeId)
     Q_UNUSED(propertyField)
+    if (spec.key == "terr_voxel_grid_resolution") {
+        return QStringLiteral("Grid resolution (m)");
+    }
+    if (spec.key == "terr_voxel_idw_neighbors") {
+        return QStringLiteral("Neighboring points (N)");
+    }
+    if (spec.key == "terr_voxel_idw_sigma") {
+        const QString approach = document_
+            ? document_->typedValue("terr_voxel_approach").toString().trimmed().toLower()
+            : QString();
+        if (approach == "kriging" || approach == "kriging_gpu") {
+            return QStringLiteral("Kriging sigma");
+        }
+        return QStringLiteral("IDW sigma");
+    }
     static const QHash<QString, QString> abbreviations = {
         {"geometry_mode", "Geometry mode"},
-        {"high_order", "High-order interp."},
+        {"terr_voxel_approach", "Interpolation"},
+        {"high_order", "High-order interpolation"},
         {"research_output", "Research stride"},
         {"unsteady_output", "Unsteady stride"},
         {"probes_output", "Probe stride"},
@@ -1835,9 +2664,9 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     }
 
     const QString rawCaseName = document_->typedValue("casename").toString().trimmed();
-    const QString caseName = rawCaseName.isEmpty()
-        ? QStringLiteral("Case name")
-        : QString("Case name: %1").arg(rawCaseName);
+    const QString caseName = QString("%1 (%2)")
+        .arg(rawCaseName.isEmpty() ? QStringLiteral("Case name") : rawCaseName,
+             runModeDisplayName(document_->mode()));
     const auto boolEnabled = [this](const QString& key) {
         return rawValueTruthy(document_->rawValue(key));
     };
@@ -1847,6 +2676,9 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     const auto hasRawText = [this](const QString& key) {
         return !document_->rawValue(key).trimmed().isEmpty();
     };
+    const QString geometryMode = document_->typedValue("geometry_mode").toString().trimmed();
+    const bool showBuildingRepresentation = geometryMode == "0" || geometryMode == "2";
+    const bool showTerrainRepresentation = geometryMode == "0" || geometryMode == "1" || geometryMode == "2";
     const auto pushNode = [&nodes](const QString& id,
                                    const QString& title,
                                    const QString& description,
@@ -1855,7 +2687,10 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
                                    const QStringList& propertyKeys = {},
                                    bool caseRoot = false,
                                    bool toolsRoot = false,
-                                   bool toolLeaf = false) {
+                                   bool resultsRoot = false,
+                                   bool managedLeaf = false,
+                                   const QString& managedRole = {},
+                                   bool managedLeafTrashed = false) {
         TreeNodeInfo node;
         node.id = id;
         node.title = title;
@@ -1865,31 +2700,61 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
         node.propertyKeys = propertyKeys;
         node.caseRoot = caseRoot;
         node.toolsRoot = toolsRoot;
-        node.toolLeaf = toolLeaf;
+        node.resultsRoot = resultsRoot;
+        node.managedLeaf = managedLeaf;
+        node.managedRole = managedRole;
+        node.managedLeafTrashed = managedLeafTrashed;
         nodes.push_back(node);
+    };
+    const auto managedDescription = [](const ManagedNode& node) {
+        if (node.trashed) {
+            return QString("This %1 is mounted read-only from gui_properties because it is trashed.")
+                .arg(managedRoleDisplayName(node.role));
+        }
+        if (node.role == kManagedRoleTool) {
+            return QStringLiteral("Tool configuration will be added here in a later pass.");
+        }
+        if (node.role == kManagedRoleDisplay) {
+            return QStringLiteral("Display configuration will be added here in a later pass.");
+        }
+        if (node.role == kManagedRoleDataProcessor) {
+            return QStringLiteral("Data processor configuration will be added here in a later pass.");
+        }
+        return QStringLiteral("Node configuration will be added here in a later pass.");
     };
 
     pushNode("case_root", caseName, "Project-level case identity and timestamp.", {}, {"casename", "datetime"}, {}, true);
 
     pushNode("domain", "Domain", "Domain clipping, elevation limits, geometry representation, and derived coordinate metadata.", "case_root",
-             {"cut_lon_manual", "cut_lat_manual", "base_height", "z_limit", "geometry_mode"},
+             {"cut_lon_manual", "cut_lat_manual", "base_height", "z_limit", "geometry_mode", "x_exp_rat", "y_exp_rat"},
              {"si_x_cfd", "si_y_cfd", "si_z_cfd", "utm_crs", "rotate_deg", "origin_shift_applied", "validation"});
-    pushNode("domain_building", "Building", "Building-related geometry inputs and expansion settings.", "domain",
-             {"x_exp_rat", "y_exp_rat"});
-    pushNode("domain_terrain", "Terrain", "Terrain-related inputs are reserved here.", "domain");
+    if (showBuildingRepresentation) {
+        pushNode(
+            "domain_building",
+            "Building representation",
+            "Building voxelization settings that control how building heights are read and filtered before extrusion.",
+            "domain",
+            {"terr_voxel_height_field", "terr_voxel_ignore_under"});
+    }
+    if (showTerrainRepresentation) {
+        pushNode(
+            "domain_terrain",
+            "Terrain representation",
+            "Terrain interpolation and smoothing settings used when generating terrain-aware voxel geometry and building base elevations.",
+            "domain",
+            {"terr_voxel_approach", "terr_voxel_grid_resolution", "terr_voxel_idw_sigma", "terr_voxel_idw_power", "terr_voxel_idw_neighbors"});
+    }
     pushNode("domain_wind", "Wind", "Wind-domain inputs are grouped here when the selected mode supports them.", "domain",
              {"inflow", "angle"});
 
     pushNode("cfd_control", "CFD control", "Solver setup, numerical controls, boundary handling, and output configuration.", "case_root");
-    pushNode("cfd_numerical", "Numerical methods", "Numerical-method groups and solver options.", "cfd_control");
+    pushNode("cfd_numerical", "Numerical methods", "Numerical-method groups and solver controls.", "cfd_control");
     pushNode("cfd_physics_model", "Physics model", "Physical source-term switches.", "cfd_numerical",
              {"buoyancy", "coriolis_term"});
-    pushNode("cfd_solver_options", "Solver options", "Extra numerical-method controls inherited from the existing GUI.", "cfd_numerical",
-             {"high_order", "flux_correction"});
     pushNode("cfd_boundary_conditions", "Boundary conditions",
              "Boundary-condition switches live here. Enabled features expose dedicated child nodes with their detailed settings.",
              "cfd_numerical",
-             {"turb_inflow_enable", "downstream_open_face", "ibm_enabler", "enable_buffer_nudging", "enable_top_sponge"},
+             {"high_order", "flux_correction", "turb_inflow_enable", "downstream_open_face", "ibm_enabler", "enable_buffer_nudging", "enable_top_sponge"},
              {"um_vol", "um_bc", "downstream_bc", "downstream_bc_yaw"});
     if (boolEnabled("turb_inflow_enable")) {
         pushNode("bc_turbulence_inflow", "Turbulence inflow", "Synthetic turbulence inflow parameters.", "cfd_boundary_conditions",
@@ -1941,11 +2806,36 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     }
 
     pushNode("tools", "Tools", "Tool instances can be added here.", "case_root", {}, {}, false, true);
-    for (const ToolNode& tool : toolNodes_) {
-        pushNode(tool.id, tool.title, "Tool configuration will be added here in a later pass.", "tools", {}, {}, false, false, true);
+    for (const ManagedNode& tool : toolNodes_) {
+        if (tool.trashed) {
+            continue;
+        }
+        pushNode(tool.id, tool.title, managedDescription(tool), "tools", {}, {}, false, false, false, true, tool.role, false);
+    }
+    if (viewTrashedTools_) {
+        for (const ManagedNode& tool : toolNodes_) {
+            if (!tool.trashed) {
+                continue;
+            }
+            pushNode(tool.id, tool.title, managedDescription(tool), "tools", {}, {}, false, false, false, true, tool.role, true);
+        }
     }
 
-    pushNode("results", "Results", "Results integration is reserved here for future work.", "case_root");
+    pushNode("results", "Results", "Display and data-processing nodes can be added here.", "case_root", {}, {}, false, false, true);
+    for (const ManagedNode& result : resultNodes_) {
+        if (result.trashed) {
+            continue;
+        }
+        pushNode(result.id, result.title, managedDescription(result), "results", {}, {}, false, false, false, true, result.role, false);
+    }
+    if (viewTrashedResults_) {
+        for (const ManagedNode& result : resultNodes_) {
+            if (!result.trashed) {
+                continue;
+            }
+            pushNode(result.id, result.title, managedDescription(result), "results", {}, {}, false, false, false, true, result.role, true);
+        }
+    }
 
     QHash<QString, TreeNodeInfo> nodeById;
     QHash<QString, QStringList> childIdsByParent;
@@ -1976,7 +2866,10 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
             return keepCache.value(nodeId);
         }
         const TreeNodeInfo node = nodeById.value(nodeId);
-        bool keep = node.caseRoot || node.toolsRoot || node.toolLeaf || hasVisibleFields(node);
+        const bool explicitDomainRepresentationNode =
+            node.id == "domain_building" || node.id == "domain_terrain";
+        bool keep = node.caseRoot || node.toolsRoot || node.resultsRoot || node.managedLeaf
+            || explicitDomainRepresentationNode || hasVisibleFields(node);
         const QStringList childIds = childIdsByParent.value(nodeId);
         for (const QString& childId : childIds) {
             if (shouldKeepNode(childId)) {
@@ -1998,18 +2891,32 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     return visibleNodes;
 }
 
-void MainWindow::syncToolStateWithProject() {
+void MainWindow::syncManagedStateWithProject() {
     const QString projectKey = hasLoadedProject() ? QFileInfo(document_->filePath()).absoluteFilePath() : QString();
-    if (toolStateProjectKey_ == projectKey) {
+    if (managedStateProjectKey_ == projectKey) {
         return;
     }
-    toolStateProjectKey_ = projectKey;
+
+    managedStateProjectKey_ = projectKey;
     toolNodes_.clear();
-    nextToolSerial_ = 1;
+    resultNodes_.clear();
+    viewTrashedTools_ = false;
+    viewTrashedResults_ = false;
+
+    if (!hasLoadedProject()) {
+        return;
+    }
+
+    if (!ensureGuiPropertiesDirectory()) {
+        return;
+    }
+
+    reloadToolNodesFromGuiProperties();
+    reloadResultNodesFromGuiProperties();
 }
 
 void MainWindow::rebuildSectionPages(const QString& preferredNodeId) {
-    syncToolStateWithProject();
+    syncManagedStateWithProject();
 
     QString selectedNodeId = preferredNodeId;
     if (selectedNodeId.isEmpty() && navTree_ && navTree_->currentItem()) {
@@ -2047,6 +2954,7 @@ void MainWindow::rebuildSectionPages(const QString& preferredNodeId) {
         widget->deleteLater();
     }
     if (navTree_) {
+        const QSignalBlocker blocker(navTree_);
         navTree_->clear();
     }
 
@@ -2069,6 +2977,14 @@ void MainWindow::rebuildSectionPages(const QString& preferredNodeId) {
 
         auto* item = new QTreeWidgetItem(QStringList{node.title});
         item->setData(0, Qt::UserRole, node.id);
+        if (node.managedLeafTrashed) {
+            item->setData(0, Qt::ForegroundRole, navTree_->palette().color(QPalette::Disabled, QPalette::Text));
+        }
+        if (node.managedLeaf
+            && !node.managedLeafTrashed
+            && (node.managedRole == kManagedRoleTool || node.managedRole == kManagedRoleDisplay)) {
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+        }
         treeItemById_.insert(node.id, item);
         if (!node.parentId.isEmpty() && treeItemById_.contains(node.parentId)) {
             treeItemById_.value(node.parentId)->addChild(item);
@@ -2077,13 +2993,20 @@ void MainWindow::rebuildSectionPages(const QString& preferredNodeId) {
         }
     }
 
+    QSet<QString> pathNodeIds;
+    QString cursorId = treeItemById_.contains(selectedNodeId) ? selectedNodeId : QString();
+    while (!cursorId.isEmpty() && nodeById_.contains(cursorId)) {
+        pathNodeIds.insert(cursorId);
+        cursorId = nodeById_.value(cursorId).parentId;
+    }
+
     for (auto it = treeItemById_.cbegin(); it != treeItemById_.cend(); ++it) {
         QTreeWidgetItem* item = it.value();
-        int depth = 0;
-        for (QTreeWidgetItem* parent = item->parent(); parent; parent = parent->parent()) {
-            ++depth;
-        }
-        item->setExpanded(expandedNodeIds.contains(it.key()) || depth < 2);
+        const TreeNodeInfo treeNode = nodeById_.value(it.key());
+        const bool keepExpanded = treeNode.caseRoot
+            || expandedNodeIds.contains(it.key())
+            || pathNodeIds.contains(it.key());
+        item->setExpanded(keepExpanded);
     }
 
     const QString fallbackNodeId = treeItemById_.contains("case_root") ? QStringLiteral("case_root") : pageById_.isEmpty() ? QString() : pageById_.cbegin().key();
@@ -2215,7 +3138,104 @@ QWidget* MainWindow::buildNodePage(const TreeNodeInfo& node) {
     pageLayout->setContentsMargins(0, 0, 0, 0);
     pageLayout->setSpacing(4);
 
-    if (compatibleFieldKeys.isEmpty() && compatiblePropertyKeys.isEmpty()) {
+    const bool hasManagedRootControls = node.toolsRoot || node.resultsRoot;
+    auto buildManagedRootControlsSection = [this, &node, page]() -> QWidget* {
+        auto* section = new QWidget(page);
+        auto* sectionLayout = new QVBoxLayout(section);
+        sectionLayout->setContentsMargins(0, 0, 0, 0);
+        sectionLayout->setSpacing(0);
+
+        auto* header = new QLabel("Configurations", section);
+        header->setContentsMargins(6, 0, 0, 0);
+        sectionLayout->addWidget(header);
+
+        const bool toolsRoot = node.toolsRoot;
+        const QString targetNodeId = node.id;
+        auto* scroll = new QScrollArea(section);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        sectionLayout->addWidget(scroll, 1);
+
+        auto* container = new FormGridWidget(false, scroll);
+        auto* containerLayout = new QVBoxLayout(container);
+        containerLayout->setContentsMargins(6, 6, 6, 0);
+        containerLayout->setSpacing(0);
+        const QString dividerColor = cssColor(sectionGridColor(container->palette()));
+
+        auto* rowWidget = new QWidget(container);
+        rowWidget->setProperty("formRow", 0);
+        rowWidget->setMinimumWidth(0);
+        rowWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto* rowLayout = new QHBoxLayout(rowWidget);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(0);
+
+        auto* label = new QLabel(
+            toolsRoot ? "View trashed tools" : "View trashed displays",
+            rowWidget);
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        label->setMinimumWidth(0);
+        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
+        auto* labelHost = new QWidget(rowWidget);
+        labelHost->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        labelHost->setMinimumWidth(0);
+        auto* labelLayout = new QHBoxLayout(labelHost);
+        labelLayout->setContentsMargins(0, 0, 5, 0);
+        labelLayout->setSpacing(0);
+        labelLayout->addWidget(label, 1, Qt::AlignLeft | Qt::AlignVCenter);
+
+        auto* dividerFrame = new QFrame(rowWidget);
+        dividerFrame->setFrameShape(QFrame::NoFrame);
+        dividerFrame->setFixedWidth(1);
+        dividerFrame->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        dividerFrame->setStyleSheet(
+            QString("QFrame { background-color: %1; border: none; }").arg(dividerColor));
+
+        auto* host = new QWidget(rowWidget);
+        host->setMinimumWidth(0);
+        host->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto* hostLayout = new QHBoxLayout(host);
+        hostLayout->setContentsMargins(5, 0, 0, 0);
+        hostLayout->setSpacing(0);
+
+        auto* trashedToggle = new QCheckBox(host);
+        trashedToggle->setText({});
+        trashedToggle->setChecked(toolsRoot ? viewTrashedTools_ : viewTrashedResults_);
+        connect(trashedToggle, &QCheckBox::toggled, this, [this, toolsRoot, targetNodeId](bool checked) {
+            if (toolsRoot) {
+                viewTrashedTools_ = checked;
+                reloadToolNodesFromGuiProperties();
+            } else {
+                viewTrashedResults_ = checked;
+                reloadResultNodesFromGuiProperties();
+            }
+            rebuildSectionPages(targetNodeId);
+            refreshEditors();
+        });
+        trashedToggle->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        hostLayout->addWidget(trashedToggle, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        hostLayout->addStretch(1);
+
+        rowLayout->addWidget(labelHost, 1);
+        rowLayout->addWidget(dividerFrame, 0);
+        rowLayout->addWidget(host, 1);
+        containerLayout->addWidget(rowWidget);
+
+        auto* rowDivider = new QFrame(container);
+        rowDivider->setFrameShape(QFrame::NoFrame);
+        rowDivider->setFixedHeight(1);
+        rowDivider->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        rowDivider->setStyleSheet(
+            QString("QFrame { background-color: %1; border: none; }").arg(dividerColor));
+        containerLayout->addWidget(rowDivider);
+        containerLayout->addStretch(1);
+        scroll->setWidget(container);
+
+        return section;
+    };
+
+    if (compatibleFieldKeys.isEmpty() && compatiblePropertyKeys.isEmpty() && !hasManagedRootControls) {
         auto* emptyPage = buildEmptyPropertiesPage(node.title);
         pageLayout->addWidget(emptyPage, 1);
         return page;
@@ -2310,7 +3330,12 @@ QWidget* MainWindow::buildNodePage(const TreeNodeInfo& node) {
                         spec->kind == FieldKind::Multiline ? QSizePolicy::Expanding : QSizePolicy::Fixed;
                     editor->setSizePolicy(QSizePolicy::Expanding, verticalPolicy);
                     if (auto* combo = qobject_cast<QComboBox*>(editor)) {
-                        combo->setSizeAdjustPolicy(QComboBox::AdjustToContentsOnFirstShow);
+                        if (spec->key == "terr_voxel_approach") {
+                            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                            combo->setMinimumContentsLength(8);
+                        } else {
+                            combo->setSizeAdjustPolicy(QComboBox::AdjustToContentsOnFirstShow);
+                        }
                     }
                     hostLayout->addWidget(editor, 1);
                 } else {
@@ -2360,7 +3385,11 @@ QWidget* MainWindow::buildNodePage(const TreeNodeInfo& node) {
         return section;
     };
 
-    pageLayout->addWidget(buildFormSection("Configurations", compatibleFieldKeys, false), 1);
+    if (hasManagedRootControls && compatibleFieldKeys.isEmpty()) {
+        pageLayout->addWidget(buildManagedRootControlsSection(), 1);
+    } else {
+        pageLayout->addWidget(buildFormSection("Configurations", compatibleFieldKeys, false), 1);
+    }
     if (!compatiblePropertyKeys.isEmpty()) {
         auto* propertyToggle = new QToolButton(page);
         propertyToggle->setText("Properties");
@@ -2455,31 +3484,515 @@ void MainWindow::renameCase() {
     document_->setTypedValue("casename", nextName);
 }
 
-void MainWindow::addToolNode(const QString& type) {
-    if (type != "crop_region") {
+void MainWindow::revealProjectInExplorer() {
+    if (!hasLoadedProject()) {
         return;
     }
 
-    ToolNode tool;
-    tool.type = type;
-    tool.id = QString("tool_crop_region_%1").arg(nextToolSerial_++);
+    const QUrl projectUrl = QUrl::fromLocalFile(document_->projectDirectory());
+    if (!QDesktopServices::openUrl(projectUrl)) {
+        QMessageBox::warning(
+            this,
+            "Reveal in explorer",
+            "Failed to open the project folder in the system file browser.");
+    }
+}
 
-    int cropCount = 0;
-    for (const ToolNode& existing : toolNodes_) {
-        if (existing.type == type) {
-            ++cropCount;
+QString MainWindow::guiPropertiesDirectory() const {
+    if (!hasLoadedProject()) {
+        return {};
+    }
+    return QDir(document_->projectDirectory()).filePath(kGuiPropertiesDirName);
+}
+
+bool MainWindow::ensureGuiPropertiesDirectory() {
+    const QString directoryPath = guiPropertiesDirectory();
+    if (directoryPath.isEmpty()) {
+        return false;
+    }
+
+    QDir directory(directoryPath);
+    if (directory.exists()) {
+        return true;
+    }
+
+    if (QDir().mkpath(directoryPath)) {
+        return true;
+    }
+
+    const QString message = "Failed to create gui_properties under the project folder.";
+    statusBar()->showMessage(message, 5000);
+    if (console_) {
+        console_->appendText("[GUI] " + message + "\n");
+    }
+    return false;
+}
+
+void MainWindow::reloadToolNodesFromGuiProperties() {
+    toolNodes_.clear();
+    if (!hasLoadedProject() || !ensureGuiPropertiesDirectory()) {
+        return;
+    }
+
+    const QDir guiPropertiesDir(guiPropertiesDirectory());
+    const QFileInfoList entries = guiPropertiesDir.entryInfoList(QDir::Files, QDir::Name | QDir::IgnoreCase);
+    for (const QFileInfo& entry : entries) {
+        ManagedFileNameInfo fileInfo;
+        if (!parseManagedFileName(entry.fileName(), kToolFileExtension, &fileInfo)) {
+            continue;
+        }
+
+        const QHash<QString, QString> values = readLooseKeyValueFile(entry.absoluteFilePath());
+        ManagedNode node;
+        node.name = fileInfo.baseName;
+        node.title = managedNodeDisplayTitle(node.name, fileInfo.trashed, fileInfo.trashIndex);
+        node.filePath = entry.absoluteFilePath();
+        node.role = kManagedRoleTool;
+        node.storageType = values.value(QStringLiteral("tool_type")).trimmed().toLower();
+        node.trashed = fileInfo.trashed;
+        node.trashIndex = fileInfo.trashIndex;
+        node.id = managedNodeId(node.role, node.filePath);
+        toolNodes_.push_back(node);
+    }
+
+    std::sort(toolNodes_.begin(), toolNodes_.end(), [](const ManagedNode& lhs, const ManagedNode& rhs) {
+        if (lhs.trashed != rhs.trashed) {
+            return !lhs.trashed;
+        }
+        const int nameCompare = lhs.name.compare(rhs.name, Qt::CaseInsensitive);
+        if (nameCompare != 0) {
+            return nameCompare < 0;
+        }
+        return lhs.trashIndex < rhs.trashIndex;
+    });
+}
+
+void MainWindow::reloadResultNodesFromGuiProperties() {
+    resultNodes_.clear();
+    if (!hasLoadedProject() || !ensureGuiPropertiesDirectory()) {
+        return;
+    }
+
+    bool activeDataProcessorLoaded = false;
+    QStringList skippedDataProcessorNames;
+    const QDir guiPropertiesDir(guiPropertiesDirectory());
+    const QFileInfoList entries = guiPropertiesDir.entryInfoList(QDir::Files, QDir::Name | QDir::IgnoreCase);
+    for (const QFileInfo& entry : entries) {
+        ManagedFileNameInfo fileInfo;
+        QString role;
+        QString storageType;
+
+        if (parseManagedFileName(entry.fileName(), kVisFileExtension, &fileInfo)) {
+            role = kManagedRoleDisplay;
+            const QHash<QString, QString> values = readLooseKeyValueFile(entry.absoluteFilePath());
+            storageType = values.value(QStringLiteral("vis_type")).trimmed().toLower();
+        } else if (parseManagedFileName(entry.fileName(), kProcessorFileExtension, &fileInfo)) {
+            role = kManagedRoleDataProcessor;
+            if (!fileInfo.trashed) {
+                if (activeDataProcessorLoaded) {
+                    skippedDataProcessorNames.push_back(entry.fileName());
+                    continue;
+                }
+                activeDataProcessorLoaded = true;
+            }
+        } else {
+            continue;
+        }
+
+        ManagedNode node;
+        node.name = fileInfo.baseName;
+        node.title = managedNodeDisplayTitle(node.name, fileInfo.trashed, fileInfo.trashIndex);
+        node.filePath = entry.absoluteFilePath();
+        node.role = role;
+        node.storageType = storageType;
+        node.trashed = fileInfo.trashed;
+        node.trashIndex = fileInfo.trashIndex;
+        node.id = managedNodeId(node.role, node.filePath);
+        resultNodes_.push_back(node);
+    }
+
+    std::sort(resultNodes_.begin(), resultNodes_.end(), [](const ManagedNode& lhs, const ManagedNode& rhs) {
+        const auto rank = [](const ManagedNode& node) {
+            if (!node.trashed && node.role == kManagedRoleDisplay) {
+                return 0;
+            }
+            if (!node.trashed && node.role == kManagedRoleDataProcessor) {
+                return 1;
+            }
+            if (node.trashed && node.role == kManagedRoleDisplay) {
+                return 2;
+            }
+            return 3;
+        };
+
+        const int leftRank = rank(lhs);
+        const int rightRank = rank(rhs);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
+        }
+        const int nameCompare = lhs.name.compare(rhs.name, Qt::CaseInsensitive);
+        if (nameCompare != 0) {
+            return nameCompare < 0;
+        }
+        return lhs.trashIndex < rhs.trashIndex;
+    });
+
+    if (!skippedDataProcessorNames.isEmpty()) {
+        statusBar()->showMessage(
+            "Multiple active data processors were detected; only the first was loaded.",
+            5000);
+    }
+}
+
+const MainWindow::ManagedNode* MainWindow::findToolNode(const QString& nodeId) const {
+    for (const ManagedNode& node : toolNodes_) {
+        if (node.id == nodeId) {
+            return &node;
         }
     }
-    tool.title = cropCount == 0 ? QStringLiteral("Crop region") : QString("Crop region %1").arg(cropCount + 1);
-    toolNodes_.push_back(tool);
+    return nullptr;
+}
 
-    rebuildSectionPages(tool.id);
+const MainWindow::ManagedNode* MainWindow::findResultNode(const QString& nodeId) const {
+    for (const ManagedNode& node : resultNodes_) {
+        if (node.id == nodeId) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+const MainWindow::ManagedNode* MainWindow::findManagedNode(const QString& nodeId) const {
+    if (const ManagedNode* toolNode = findToolNode(nodeId)) {
+        return toolNode;
+    }
+    return findResultNode(nodeId);
+}
+
+bool MainWindow::hasActiveDataProcessor() const {
+    return std::any_of(resultNodes_.cbegin(), resultNodes_.cend(), [](const ManagedNode& node) {
+        return node.role == kManagedRoleDataProcessor && !node.trashed;
+    });
+}
+
+void MainWindow::addManagedNode(const QString& role, const QString& type) {
+    if (!hasLoadedProject() || !ensureGuiPropertiesDirectory()) {
+        return;
+    }
+
+    if (role == kManagedRoleDataProcessor && hasActiveDataProcessor()) {
+        QMessageBox::warning(
+            this,
+            "Add data processor",
+            "Active data processor detected: only one data processor is allowed.");
+        return;
+    }
+
+    const QString baseTitle = managedNodeDefaultTitle(role, type);
+    QString preferredName = baseTitle;
+    if (role != kManagedRoleDataProcessor) {
+        int sameTypeCount = 0;
+        const QVector<ManagedNode>& nodes = role == kManagedRoleTool ? toolNodes_ : resultNodes_;
+        for (const ManagedNode& existing : nodes) {
+            if (!existing.trashed && existing.role == role && existing.storageType == type) {
+                ++sameTypeCount;
+            }
+        }
+        if (sameTypeCount > 0) {
+            preferredName = QString("%1 %2").arg(baseTitle).arg(sameTypeCount + 1);
+        }
+    }
+
+    const QString filePath = nextAvailableManagedPath(
+        guiPropertiesDirectory(),
+        preferredName,
+        managedFileExtension(role));
+    QString error;
+    if (!writeManagedNodeFile(filePath, role, type, &error)) {
+        const QString roleName = managedRoleDisplayName(role);
+        QMessageBox::critical(
+            this,
+            QString("Add %1").arg(roleName),
+            QString("Failed to create %1 file:\n%2").arg(roleName, error));
+        return;
+    }
+
+    if (role == kManagedRoleTool) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(role, filePath));
+    } else {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(role, filePath));
+    }
     refreshEditors();
+    refreshFileTree();
+}
+
+void MainWindow::renameManagedNode(const QString& nodeId) {
+    const ManagedNode* node = findManagedNode(nodeId);
+    if (!node || node->trashed
+        || (node->role != kManagedRoleTool && node->role != kManagedRoleDisplay)) {
+        return;
+    }
+
+    if (!navTree_ || !treeItemById_.contains(nodeId)) {
+        return;
+    }
+
+    QTreeWidgetItem* item = treeItemById_.value(nodeId);
+    navTree_->setCurrentItem(item);
+    navTree_->editItem(item, 0);
+}
+
+bool MainWindow::commitManagedNodeRename(const QString& nodeId, const QString& nextName, QString* errorMessage) {
+    const ManagedNode* node = findManagedNode(nodeId);
+    if (!node || node->trashed
+        || (node->role != kManagedRoleTool && node->role != kManagedRoleDisplay)) {
+        return false;
+    }
+
+    if (nextName == node->name) {
+        return true;
+    }
+
+    QString validationError;
+    if (!isValidManagedNodeName(nextName, &validationError)) {
+        if (errorMessage) {
+            *errorMessage = validationError;
+        }
+        return false;
+    }
+
+    const QString targetPath = QDir(QFileInfo(node->filePath).absolutePath())
+        .filePath(nextName + managedFileExtension(node->role));
+    if (sameProjectDeckPath(targetPath, node->filePath)) {
+        return true;
+    }
+    if (QFileInfo::exists(targetPath)) {
+        if (errorMessage) {
+            *errorMessage = "A node with this name already exists.";
+        }
+        return false;
+    }
+
+    QFile file(node->filePath);
+    if (!file.rename(targetPath)) {
+        if (errorMessage) {
+            *errorMessage = "Failed to rename file:\n" + file.errorString();
+        }
+        return false;
+    }
+
+    if (node->role == kManagedRoleTool) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(node->role, targetPath));
+    } else {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(node->role, targetPath));
+    }
+    refreshEditors();
+    refreshFileTree();
+
+    return true;
+}
+
+void MainWindow::removeManagedNode(const QString& nodeId) {
+    const ManagedNode* node = findManagedNode(nodeId);
+    if (!node || node->trashed) {
+        return;
+    }
+
+    const QString trashPath = nextAvailableTrashPath(node->filePath);
+    const QString roleName = managedRoleDisplayName(node->role);
+    QFile file(node->filePath);
+    if (!file.rename(trashPath)) {
+        QMessageBox::critical(
+            this,
+            QString("Remove %1").arg(roleName),
+            "Failed to trash file:\n" + file.errorString());
+        return;
+    }
+
+    if (node->role == kManagedRoleTool) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages("tools");
+    } else {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages("results");
+    }
+    refreshEditors();
+    refreshFileTree();
+}
+
+void MainWindow::removeAllToolNodes() {
+    const bool hasActiveTools = std::any_of(toolNodes_.cbegin(), toolNodes_.cend(), [](const ManagedNode& node) {
+        return !node.trashed;
+    });
+    if (!hasActiveTools) {
+        return;
+    }
+
+    const auto answer = QMessageBox::question(
+        this,
+        "Remove all tools",
+        "Remove all tool nodes from the project tree?",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    QStringList errors;
+    const QVector<ManagedNode> activeTools = toolNodes_;
+    for (const ManagedNode& node : activeTools) {
+        if (node.trashed) {
+            continue;
+        }
+        QFile file(node.filePath);
+        if (!file.rename(nextAvailableTrashPath(node.filePath))) {
+            errors.push_back(node.name + ": " + file.errorString());
+        }
+    }
+
+    reloadToolNodesFromGuiProperties();
+    rebuildSectionPages("tools");
+    refreshEditors();
+    refreshFileTree();
+
+    if (!errors.isEmpty()) {
+        QMessageBox::warning(
+            this,
+            "Remove all tools",
+            "Some tools could not be removed:\n" + errors.join('\n'));
+    }
+}
+
+void MainWindow::removeAllResultNodes() {
+    const bool hasActiveResults = std::any_of(resultNodes_.cbegin(), resultNodes_.cend(), [](const ManagedNode& node) {
+        return !node.trashed && node.role == kManagedRoleDisplay;
+    });
+    if (!hasActiveResults) {
+        return;
+    }
+
+    const auto answer = QMessageBox::question(
+        this,
+        "Remove all displays",
+        "Remove all display nodes from the project tree?",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    QStringList errors;
+    const QVector<ManagedNode> activeResults = resultNodes_;
+    for (const ManagedNode& node : activeResults) {
+        if (node.trashed || node.role != kManagedRoleDisplay) {
+            continue;
+        }
+        QFile file(node.filePath);
+        if (!file.rename(nextAvailableTrashPath(node.filePath))) {
+            errors.push_back(node.name + ": " + file.errorString());
+        }
+    }
+
+    reloadResultNodesFromGuiProperties();
+    rebuildSectionPages("results");
+    refreshEditors();
+    refreshFileTree();
+
+    if (!errors.isEmpty()) {
+        QMessageBox::warning(
+            this,
+            "Remove all displays",
+            "Some display nodes could not be removed:\n" + errors.join('\n'));
+    }
+}
+
+void MainWindow::recoverManagedNode(const QString& nodeId) {
+    const ManagedNode* node = findManagedNode(nodeId);
+    if (!node || !node->trashed) {
+        return;
+    }
+    if (node->role == kManagedRoleDataProcessor && hasActiveDataProcessor()) {
+        QMessageBox::warning(
+            this,
+            "Recover data processor",
+            "Active data processor detected: only one data processor is allowed.");
+        return;
+    }
+
+    QString preferredBaseName = node->name + "_recovery";
+    if (node->trashIndex > 0) {
+        preferredBaseName += QString::number(node->trashIndex);
+    }
+    const QString targetPath = nextAvailableManagedPath(
+        guiPropertiesDirectory(),
+        preferredBaseName,
+        managedFileExtension(node->role));
+
+    QFile file(node->filePath);
+    if (!file.rename(targetPath)) {
+        QMessageBox::critical(
+            this,
+            QString("Recover %1").arg(managedRoleDisplayName(node->role)),
+            "Failed to recover file:\n" + file.errorString());
+        return;
+    }
+
+    if (node->role == kManagedRoleTool) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(node->role, targetPath));
+    } else {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages(managedNodeId(node->role, targetPath));
+    }
+    refreshEditors();
+    refreshFileTree();
+}
+
+void MainWindow::permanentlyDeleteManagedNode(const QString& nodeId) {
+    const ManagedNode* node = findManagedNode(nodeId);
+    if (!node || !node->trashed) {
+        return;
+    }
+
+    const QString roleName = managedRoleDisplayName(node->role);
+    const auto answer = QMessageBox::warning(
+        this,
+        QString("Delete %1 permanently").arg(roleName),
+        QString("Delete this trashed %1 permanently?").arg(roleName),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    QFile file(node->filePath);
+    if (!file.remove()) {
+        QMessageBox::critical(
+            this,
+            QString("Delete %1 permanently").arg(roleName),
+            "Failed to delete file:\n" + file.errorString());
+        return;
+    }
+
+    if (node->role == kManagedRoleTool) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages("tools");
+    } else {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages("results");
+    }
+    refreshEditors();
+    refreshFileTree();
 }
 
 bool MainWindow::keyRequiresTreeRebuild(const QString& key) const {
     static const QStringList keys{
         "casename",
+        "geometry_mode",
         "enable_buffer_nudging",
         "buffer_nudge_vertical",
         "enable_top_sponge",
@@ -2527,39 +4040,96 @@ void MainWindow::showNavTreeContextMenu(const QPoint& pos) {
     }
 
     QTreeWidgetItem* item = navTree_->itemAt(pos);
-    if (!item) {
-        return;
+    if (item) {
+        navTree_->setCurrentItem(item);
     }
-    navTree_->setCurrentItem(item);
 
-    const QString nodeId = item->data(0, Qt::UserRole).toString();
-    const TreeNodeInfo node = nodeById_.value(nodeId);
+    const QString nodeId = item ? item->data(0, Qt::UserRole).toString() : QString();
+    const TreeNodeInfo node = item ? nodeById_.value(nodeId) : TreeNodeInfo{};
 
     QMenu menu(this);
-    QAction* expandAction = menu.addAction("Expand");
-    QAction* collapseAction = menu.addAction("Collapse");
-    QAction* expandAllAction = menu.addAction("Expand all");
-    QAction* collapseAllAction = menu.addAction("Collapse all");
-    expandAction->setEnabled(item->childCount() > 0);
-    collapseAction->setEnabled(item->childCount() > 0);
-    expandAllAction->setEnabled(item->childCount() > 0);
-    collapseAllAction->setEnabled(item->childCount() > 0);
+    QAction* expandAction = nullptr;
+    QAction* collapseAction = nullptr;
+    QAction* expandAllAction = nullptr;
+    QAction* collapseAllAction = nullptr;
 
     QAction* renameAction = nullptr;
+    QAction* revealInExplorerAction = nullptr;
     QAction* runAllToolsAction = nullptr;
     QAction* addCropRegionAction = nullptr;
+    QAction* addMultiMomentAction = nullptr;
+    QAction* removeToolAction = nullptr;
+    QAction* removeAllToolsAction = nullptr;
+    QAction* refreshToolsAction = nullptr;
+    QAction* addGeometryDisplayAction = nullptr;
+    QAction* add2dVisualizationAction = nullptr;
+    QAction* add3dVisualizationAction = nullptr;
+    QAction* addDataPlotAction = nullptr;
+    QAction* addSpreadsheetAction = nullptr;
+    QAction* addDataProcessorAction = nullptr;
+    QAction* removeAllResultsAction = nullptr;
+    QAction* refreshResultsAction = nullptr;
+    QAction* renameManagedAction = nullptr;
+    QAction* recoverManagedAction = nullptr;
+    QAction* permanentlyDeleteManagedAction = nullptr;
 
-    if (node.caseRoot || node.toolsRoot) {
+    if (item && (node.caseRoot || node.toolsRoot || node.resultsRoot || node.managedLeaf)) {
         menu.addSeparator();
     }
-    if (node.caseRoot) {
+    if (item && node.caseRoot) {
         renameAction = menu.addAction("Rename case...");
+        revealInExplorerAction = menu.addAction("Reveal in explorer");
     }
-    if (node.toolsRoot) {
+    if (item && node.toolsRoot) {
         auto* addToolMenu = menu.addMenu("Add a tool");
         addCropRegionAction = addToolMenu->addAction("Crop region");
+        addMultiMomentAction = addToolMenu->addAction("Multi-moment automation");
         runAllToolsAction = menu.addAction("Run all tools");
+        removeAllToolsAction = menu.addAction("Remove all tools");
+        removeAllToolsAction->setEnabled(std::any_of(toolNodes_.cbegin(), toolNodes_.cend(), [](const ManagedNode& managedNode) {
+            return !managedNode.trashed;
+        }));
+        refreshToolsAction = menu.addAction("Refresh changes");
     }
+    if (item && node.resultsRoot) {
+        auto* addDisplayMenu = menu.addMenu("Add a display");
+        addGeometryDisplayAction = addDisplayMenu->addAction("Geometry display");
+        add2dVisualizationAction = addDisplayMenu->addAction("2D visualization");
+        add3dVisualizationAction = addDisplayMenu->addAction("3D visualization");
+        addDataPlotAction = addDisplayMenu->addAction("Data plot");
+        addSpreadsheetAction = addDisplayMenu->addAction("Spreadsheet view");
+        addDataProcessorAction = menu.addAction("Add data processor");
+        addDataProcessorAction->setEnabled(!hasActiveDataProcessor());
+        removeAllResultsAction = menu.addAction("Remove all displays");
+        removeAllResultsAction->setEnabled(std::any_of(resultNodes_.cbegin(), resultNodes_.cend(), [](const ManagedNode& managedNode) {
+            return !managedNode.trashed && managedNode.role == kManagedRoleDisplay;
+        }));
+        refreshResultsAction = menu.addAction("Refresh changes");
+    }
+    if (item && node.managedLeaf) {
+        const ManagedNode* managedNode = findManagedNode(nodeId);
+        if (managedNode && managedNode->trashed) {
+            recoverManagedAction = menu.addAction(managedNodeRecoverLabel(managedNode->role));
+            permanentlyDeleteManagedAction = menu.addAction("Delete (permanent)");
+        } else if (managedNode) {
+            if (managedNode->role == kManagedRoleTool || managedNode->role == kManagedRoleDisplay) {
+                renameManagedAction = menu.addAction("Rename");
+            }
+            removeToolAction = menu.addAction("Remove");
+        }
+    }
+
+    if (!menu.actions().isEmpty()) {
+        menu.addSeparator();
+    }
+    if (item && !node.caseRoot) {
+        expandAction = menu.addAction("Expand");
+        collapseAction = menu.addAction("Collapse");
+        expandAction->setEnabled(item->childCount() > 0);
+        collapseAction->setEnabled(item->childCount() > 0);
+    }
+    expandAllAction = menu.addAction("Expand all");
+    collapseAllAction = menu.addAction("Collapse all");
 
     QAction* chosen = menu.exec(navTree_->viewport()->mapToGlobal(pos));
     if (!chosen) {
@@ -2575,24 +4145,97 @@ void MainWindow::showNavTreeContextMenu(const QPoint& pos) {
         return;
     }
     if (chosen == expandAllAction) {
-        expandNodeRecursive(item, true);
+        navTree_->expandAll();
         return;
     }
     if (chosen == collapseAllAction) {
-        expandNodeRecursive(item, false);
-        item->setExpanded(false);
+        navTree_->collapseAll();
+        if (treeItemById_.contains("case_root")) {
+            treeItemById_.value("case_root")->setExpanded(true);
+        }
         return;
     }
     if (chosen == renameAction) {
         renameCase();
         return;
     }
+    if (chosen == revealInExplorerAction) {
+        revealProjectInExplorer();
+        return;
+    }
     if (chosen == addCropRegionAction) {
-        addToolNode("crop_region");
+        addManagedNode(kManagedRoleTool, "crop");
+        return;
+    }
+    if (chosen == addMultiMomentAction) {
+        addManagedNode(kManagedRoleTool, "multimoment");
+        return;
+    }
+    if (chosen == removeToolAction) {
+        removeManagedNode(nodeId);
+        return;
+    }
+    if (chosen == removeAllToolsAction) {
+        removeAllToolNodes();
+        return;
+    }
+    if (chosen == refreshToolsAction) {
+        reloadToolNodesFromGuiProperties();
+        rebuildSectionPages("tools");
+        refreshEditors();
+        refreshFileTree();
         return;
     }
     if (chosen == runAllToolsAction) {
         statusBar()->showMessage("Run all tools is reserved but not wired yet.", 4000);
+        return;
+    }
+    if (chosen == addGeometryDisplayAction) {
+        addManagedNode(kManagedRoleDisplay, "geometry");
+        return;
+    }
+    if (chosen == add2dVisualizationAction) {
+        addManagedNode(kManagedRoleDisplay, "2d");
+        return;
+    }
+    if (chosen == add3dVisualizationAction) {
+        addManagedNode(kManagedRoleDisplay, "3d");
+        return;
+    }
+    if (chosen == addDataPlotAction) {
+        addManagedNode(kManagedRoleDisplay, "plot");
+        return;
+    }
+    if (chosen == addSpreadsheetAction) {
+        addManagedNode(kManagedRoleDisplay, "sheet");
+        return;
+    }
+    if (chosen == addDataProcessorAction) {
+        addManagedNode(kManagedRoleDataProcessor);
+        return;
+    }
+    if (chosen == removeAllResultsAction) {
+        removeAllResultNodes();
+        return;
+    }
+    if (chosen == refreshResultsAction) {
+        reloadResultNodesFromGuiProperties();
+        rebuildSectionPages("results");
+        refreshEditors();
+        refreshFileTree();
+        return;
+    }
+    if (chosen == renameManagedAction) {
+        renameManagedNode(nodeId);
+        return;
+    }
+    if (chosen == recoverManagedAction) {
+        recoverManagedNode(nodeId);
+        return;
+    }
+    if (chosen == permanentlyDeleteManagedAction) {
+        permanentlyDeleteManagedNode(nodeId);
+        return;
     }
 }
 
@@ -2719,6 +4362,14 @@ QWidget* MainWindow::createEditor(const FieldSpec& spec) {
         for (const QString& value : spec.enumValues) {
             combo->addItem(displayEnumLabel(spec.key, value), value);
         }
+        if (spec.key == "terr_voxel_approach" && combo->view()) {
+            const QFontMetrics metrics(combo->font());
+            int popupWidth = 0;
+            for (int index = 0; index < combo->count(); ++index) {
+                popupWidth = std::max(popupWidth, metrics.horizontalAdvance(combo->itemText(index)));
+            }
+            combo->view()->setMinimumWidth(popupWidth + 36);
+        }
         connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, spec, combo](int index) {
             if (index < 0) {
                 return;
@@ -2738,14 +4389,11 @@ QWidget* MainWindow::createEditor(const FieldSpec& spec) {
         break;
     }
     case FieldKind::Float: {
-        auto* spin = new QDoubleSpinBox();
-        spin->setRange(-1.0e9, 1.0e9);
-        spin->setDecimals(6);
-        spin->setSingleStep(0.1);
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec](double value) {
-            document_->setTypedValue(spec.key, value);
+        auto* line = new PrecisionNumericLineEdit(PrecisionNumericLineEdit::Mode::Scalar);
+        connect(line, &QLineEdit::editingFinished, this, [this, spec, line] {
+            document_->setRawValue(spec.key, line->commitVisibleText());
         });
-        editor = spin;
+        editor = line;
         break;
     }
     case FieldKind::Multiline: {
@@ -2757,17 +4405,55 @@ QWidget* MainWindow::createEditor(const FieldSpec& spec) {
         editor = text;
         break;
     }
+    case FieldKind::UIntTriplet:
+        if (usesSplitTripletEditor(spec)) {
+            auto* triplet = new SplitTripletEditor(SplitTripletEditor::ValueMode::Integer);
+            for (QLineEdit* line : triplet->lineEdits()) {
+                connect(line, &QLineEdit::editingFinished, this, [this, spec, triplet] {
+                    document_->setRawValue(spec.key, triplet->rawTextForDeck());
+                });
+            }
+            editor = triplet;
+            break;
+        }
+        [[fallthrough]];
     case FieldKind::FloatPair:
     case FieldKind::FloatTriplet:
-    case FieldKind::UIntTriplet:
+        if (usesSplitTripletEditor(spec)) {
+            auto* triplet = new SplitTripletEditor(SplitTripletEditor::ValueMode::Float);
+            for (QLineEdit* line : triplet->lineEdits()) {
+                connect(line, &QLineEdit::editingFinished, this, [this, spec, triplet] {
+                    document_->setRawValue(spec.key, triplet->rawTextForDeck());
+                });
+            }
+            editor = triplet;
+            break;
+        }
+        [[fallthrough]];
     case FieldKind::FloatList:
     case FieldKind::TokenList:
     case FieldKind::String: {
         auto* line = new QLineEdit();
-        connect(line, &QLineEdit::editingFinished, this, [this, spec, line] {
-            document_->setTypedValue(spec.key, readEditorValue({spec, line}));
-        });
-        editor = line;
+        if (spec.kind == FieldKind::FloatPair
+            || spec.kind == FieldKind::FloatTriplet
+            || spec.kind == FieldKind::FloatList) {
+            delete line;
+            auto* precisionLine = new PrecisionNumericLineEdit(PrecisionNumericLineEdit::Mode::Vector);
+            connect(precisionLine, &QLineEdit::editingFinished, this, [this, spec, precisionLine] {
+                document_->setRawValue(spec.key, renderBracketedListText(precisionLine->commitVisibleText()));
+            });
+            editor = precisionLine;
+        } else if (spec.kind == FieldKind::UIntTriplet) {
+            connect(line, &QLineEdit::editingFinished, this, [this, spec, line] {
+                document_->setRawValue(spec.key, renderBracketedListText(line->text()));
+            });
+            editor = line;
+        } else {
+            connect(line, &QLineEdit::editingFinished, this, [this, spec, line] {
+                document_->setTypedValue(spec.key, readEditorValue({spec, line}));
+            });
+            editor = line;
+        }
         break;
     }
     }
@@ -2786,8 +4472,14 @@ void MainWindow::ensureCenterWorkspaceCreated() {
     }
 
     centerSplitter_ = new QSplitter(Qt::Vertical, centerHost_);
+    viewerStack_ = new QStackedWidget(centerSplitter_);
+    centerPlaceholder_ = buildShellPlaceholderPage();
+    centerPlaceholder_->setObjectName("centerPlaceholder");
     vtkView_ = new VtkViewWidget();
-    viewerPanelShell_ = createPanelShell(centerSplitter_, vtkView_, "viewerPanelShell");
+    viewerStack_->addWidget(centerPlaceholder_);
+    viewerStack_->addWidget(vtkView_);
+    viewerStack_->setCurrentWidget(centerPlaceholder_);
+    viewerPanelShell_ = createPanelShell(centerSplitter_, viewerStack_, "viewerPanelShell");
     console_ = new ConsolePanel();
     consolePanelShell_ = createPanelShell(centerSplitter_, console_, "consolePanelShell");
     centerSplitter_->addWidget(viewerPanelShell_);
@@ -2795,9 +4487,9 @@ void MainWindow::ensureCenterWorkspaceCreated() {
     centerSplitter_->setStretchFactor(0, 3);
     centerSplitter_->setStretchFactor(1, 1);
     allowHorizontalCompression(centerSplitter_);
+    allowHorizontalCompression(viewerStack_);
     allowHorizontalCompression(vtkView_);
     allowHorizontalCompression(console_);
-    centerSplitter_->hide();
     centerSplitter_->setSizes(consoleExpandedSizes_.size() == 2 ? consoleExpandedSizes_ : QList<int>{820, 160});
     centerHostLayout->addWidget(centerSplitter_, 1);
 
@@ -2849,20 +4541,68 @@ void MainWindow::ensureProjectWorkspaceLoaded() {
         navTree_->setRootIsDecorated(true);
         navTree_->setItemsExpandable(true);
         navTree_->setExpandsOnDoubleClick(true);
+        navTree_->setEditTriggers(QAbstractItemView::SelectedClicked | QAbstractItemView::EditKeyPressed);
         navTree_->setIndentation(22);
         navTree_->setUniformRowHeights(true);
         navTree_->setContextMenuPolicy(Qt::CustomContextMenu);
         navPanelShell_ = createPanelShell(leftSplitter_, navTree_, "navPanelShell");
         leftSplitter_->insertWidget(0, navPanelShell_);
-        leftSplitter_->setStretchFactor(0, 3);
+        leftSplitter_->setStretchFactor(0, 1);
         leftSplitter_->setStretchFactor(1, 0);
-        leftSplitter_->setStretchFactor(2, 5);
-        leftSplitter_->setSizes({220, 18, 660});
+        leftSplitter_->setStretchFactor(2, 1);
+        leftSplitter_->setSizes({440, 18, 440});
         connect(navTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* current) {
             if (!current) {
                 return;
             }
             setCurrentPage(current->data(0, Qt::UserRole).toString());
+        });
+        connect(navTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
+            if (!item || column != 0) {
+                return;
+            }
+
+            const QString nodeId = item->data(0, Qt::UserRole).toString();
+            const TreeNodeInfo node = nodeById_.value(nodeId);
+            if (!node.managedLeaf
+                || node.managedLeafTrashed
+                || (node.managedRole != kManagedRoleTool && node.managedRole != kManagedRoleDisplay)) {
+                return;
+            }
+
+            const ManagedNode* managedNode = findManagedNode(nodeId);
+            if (!managedNode) {
+                return;
+            }
+
+            const QString nextName = item->text(0).trimmed();
+            if (nextName == managedNode->name) {
+                return;
+            }
+
+            QString error;
+            if (commitManagedNodeRename(nodeId, nextName, &error)) {
+                return;
+            }
+
+            const QSignalBlocker blocker(navTree_);
+            item->setText(0, managedNode->title);
+            if (!error.trimmed().isEmpty()) {
+                QMessageBox::warning(this,
+                                     QString("Rename %1").arg(managedRoleDisplayName(managedNode->role)),
+                                     error);
+            }
+        });
+        connect(navTree_, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem* item) {
+            if (!item) {
+                return;
+            }
+            const QString nodeId = item->data(0, Qt::UserRole).toString();
+            if (!nodeById_.value(nodeId).caseRoot) {
+                return;
+            }
+            const QSignalBlocker blocker(navTree_);
+            item->setExpanded(true);
         });
         connect(navTree_, &QWidget::customContextMenuRequested, this, &MainWindow::showNavTreeContextMenu);
     }
@@ -2902,11 +4642,11 @@ void MainWindow::ensureProjectWorkspaceLoaded() {
         });
     }
 
-    if (centerPlaceholder_) {
-        centerPlaceholder_->hide();
-    }
     if (centerSplitter_) {
         centerSplitter_->show();
+    }
+    if (viewerStack_ && vtkView_) {
+        viewerStack_->setCurrentWidget(vtkView_);
     }
     if (navTree_) {
         navPanelShell_->show();
@@ -3512,7 +5252,7 @@ void MainWindow::createProjectWizard() {
         }
     }
 
-    for (const QString& subdirectory : {"building_db", "proj_temp", "RESULTS", "terrain_db", "wind_bc"}) {
+    for (const QString& subdirectory : {"building_db", "gui_properties", "proj_temp", "RESULTS", "terrain_db", "wind_bc"}) {
         if (!QDir().mkpath(QDir(caseDirectory).filePath(subdirectory))) {
             QMessageBox::critical(this, "New project", "Failed to create " + subdirectory + ".");
             return;
@@ -3541,8 +5281,37 @@ void MainWindow::importProjectAsset(const QString& targetSubdirectory, const QSt
         return;
     }
 
-    const QStringList selectedFiles = QFileDialog::getOpenFileNames(this, dialogTitle, document_->projectDirectory(), "All files (*.*)");
-    if (selectedFiles.isEmpty()) {
+    const ProjectImportKind importKind = importKindForSubdirectory(targetSubdirectory);
+    if (importKind == ProjectImportKind::Unknown) {
+        QMessageBox::critical(this, "Import", "Unsupported import target: " + targetSubdirectory + ".");
+        return;
+    }
+
+    const QString selectedFile = QFileDialog::getOpenFileName(
+        this,
+        dialogTitle,
+        document_->projectDirectory(),
+        importDialogFilter(importKind));
+    if (selectedFile.isEmpty()) {
+        return;
+    }
+
+    const QString suffix = QFileInfo(selectedFile).suffix().toLower();
+    if (importKind == ProjectImportKind::Building && suffix != "shp") {
+        QMessageBox::warning(this, "Import", "Building Database import requires a .shp file.");
+        return;
+    }
+    if (importKind == ProjectImportKind::Terrain
+        && suffix != "shp"
+        && suffix != "tif"
+        && suffix != "tiff") {
+        QMessageBox::warning(this, "Import", "Terrain Database import supports .shp, .tif, or .tiff.");
+        return;
+    }
+    if (importKind == ProjectImportKind::Wind
+        && suffix != "nc"
+        && suffix != "out") {
+        QMessageBox::warning(this, "Import", "Wind Data import supports .nc or .out.");
         return;
     }
 
@@ -3552,43 +5321,44 @@ void MainWindow::importProjectAsset(const QString& targetSubdirectory, const QSt
         return;
     }
 
-    std::set<QString> copiedFiles;
-    for (const QString& selectedFile : selectedFiles) {
-        const QFileInfo sourceInfo(selectedFile);
-        const QString baseName = sourceInfo.completeBaseName();
-        const QDir sourceDir = sourceInfo.dir();
-        QStringList candidates;
-        const QString lowerFileName = sourceInfo.fileName().toLower();
-        for (const QString& extension : companionExtensionsFor(sourceInfo.suffix())) {
-            if (extension.contains('.')) {
-                const QString sidecarName = sourceInfo.fileName() + "." + extension;
-                if (sourceDir.exists(sidecarName)) {
-                    candidates.push_back(sourceDir.filePath(sidecarName));
-                }
-                continue;
-            }
-            const QStringList matches = sourceDir.entryList({baseName + "." + extension}, QDir::Files);
-            for (const QString& match : matches) {
-                candidates.push_back(sourceDir.filePath(match));
-            }
+    const QStringList existingFiles = existingImportArtifacts(targetDirectory, importKind);
+    if (!existingFiles.isEmpty()) {
+        const auto answer = QMessageBox::question(
+            this,
+            dialogTitle,
+            QString("The project already contains %1 files under %2.\n\nReplace the existing files?")
+                .arg(importKindDisplayName(importKind), QDir::toNativeSeparators(targetDirectory)),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
         }
-        if (candidates.isEmpty()) {
-            candidates.push_back(selectedFile);
+        QString removeError;
+        if (!removeFilesReplacing(existingFiles, &removeError)) {
+            QMessageBox::critical(this, "Import", removeError);
+            return;
         }
+    }
 
-        for (const QString& candidate : candidates) {
-            copiedFiles.insert(QFileInfo(candidate).absoluteFilePath());
-        }
-
-        if (lowerFileName.endsWith(".aux.xml")) {
-            copiedFiles.insert(sourceInfo.absoluteFilePath());
-        }
+    const QStringList sourceFiles = sourceFilesForImport(selectedFile);
+    QString canonicalBaseName;
+    QString canonicalWindName;
+    if (importKind == ProjectImportKind::Wind) {
+        canonicalWindName = canonicalWindFileName(selectedFile, document_);
+    } else {
+        canonicalBaseName = canonicalImportBaseName(importKind, selectedFile, document_);
     }
 
     QString error;
     int copiedCount = 0;
-    for (const QString& sourcePath : copiedFiles) {
-        const QString targetPath = QDir(targetDirectory).filePath(QFileInfo(sourcePath).fileName());
+    for (const QString& sourcePath : sourceFiles) {
+        QString targetFileName;
+        if (importKind == ProjectImportKind::Wind) {
+            targetFileName = canonicalWindName;
+        } else {
+            targetFileName = targetFileNameForBaseName(sourcePath, canonicalBaseName);
+        }
+        const QString targetPath = QDir(targetDirectory).filePath(targetFileName);
         if (!copyFileReplacing(sourcePath, targetPath, &error)) {
             QMessageBox::critical(this, "Import", error);
             return;
@@ -3596,7 +5366,11 @@ void MainWindow::importProjectAsset(const QString& targetSubdirectory, const QSt
         ++copiedCount;
     }
 
-    logGuiAction(QString("Imported %1 file(s) into %2").arg(copiedCount).arg(targetSubdirectory));
+    const QString successMessage = QString("Imported %1 file(s) into %2.")
+        .arg(copiedCount)
+        .arg(QDir::toNativeSeparators(targetDirectory));
+    statusBar()->showMessage(successMessage, 5000);
+    logGuiAction(successMessage);
     refreshFileTree();
 }
 
@@ -3725,6 +5499,13 @@ QString MainWindow::buildSkeletonText(RunMode mode, const QString& caseName) con
     lines << "z_limit = 500.000000";
     if (mode == RunMode::Luw || mode == RunMode::Luwpf) {
         lines << "geometry_mode = 2";
+        lines << "terr_voxel_height_field = auto";
+        lines << "terr_voxel_ignore_under = 0.000000";
+        lines << "terr_voxel_approach = idw";
+        lines << "terr_voxel_grid_resolution = 50.000000";
+        lines << "terr_voxel_idw_sigma = 1.000000";
+        lines << "terr_voxel_idw_power = 2.000000";
+        lines << "terr_voxel_idw_neighbors = 12";
     }
     lines << "si_x_cfd = [0.000000, 1000.000000]";
     lines << "si_y_cfd = [0.000000, 1000.000000]";
@@ -3799,6 +5580,11 @@ void MainWindow::refreshEditors() {
     }
 
     for (const EditorBinding& binding : bindings_) {
+        if (auto* label = qobject_cast<QLabel*>(binding.label)) {
+            const QString displayLabel = fieldDisplayLabel(binding.nodeId, binding.spec, binding.propertyField);
+            label->setText(displayLabel);
+            label->setToolTip(displayLabel);
+        }
         writeEditorValue(binding, binding.propertyField ? QVariant(document_->rawValue(binding.spec.key))
                                                        : document_->typedValue(binding.spec.key));
     }
@@ -3886,14 +5672,20 @@ void MainWindow::updateProjectAvailability() {
         centerPlaceholderShell_->setVisible(!active);
     }
     if (centerSplitter_) {
-        centerSplitter_->setVisible(active);
-        centerSplitter_->setEnabled(active);
+        centerSplitter_->setVisible(true);
+        centerSplitter_->setEnabled(true);
+    }
+    if (viewerStack_ && centerPlaceholder_ && vtkView_) {
+        viewerStack_->setCurrentWidget(active ? static_cast<QWidget*>(vtkView_) : centerPlaceholder_);
+    }
+    if (viewerPanelShell_) {
+        viewerPanelShell_->setVisible(true);
     }
     if (vtkView_) {
         vtkView_->setEnabled(active);
     }
     if (console_) {
-        console_->setEnabled(active);
+        console_->setEnabled(true);
     }
     if (rightTopTabs_) {
         rightTopTabs_->setEnabled(active);
@@ -3906,7 +5698,7 @@ void MainWindow::updateProjectAvailability() {
         progressPanel_->setIdle();
     }
     if (!active) {
-        setActiveTrackedPanel(centerPlaceholderShell_);
+        setActiveTrackedPanel(viewerPanelShell_ ? viewerPanelShell_ : centerPlaceholderShell_);
         statusBar()->showMessage("Open or create a project to enable editing.", 5000);
         resetWorkspaceSplitters(rootSplitter_, workspaceSplitter_);
     }
@@ -4431,6 +6223,135 @@ void MainWindow::loadViewerFile(const QString& filePath) {
     }
 }
 
+void MainWindow::fixDeckFile() {
+    if (!hasLoadedProject()) {
+        statusBar()->showMessage("Create or open a project first.", 4000);
+        return;
+    }
+    if (runner_->isRunning()) {
+        QMessageBox::information(this,
+                                 "Fix deck file",
+                                 "Stop the active backend job before fixing the deck file.");
+        return;
+    }
+
+    const QString sourceText = rawDeckEdit_ ? rawDeckEdit_->toPlainText() : document_->rawText();
+    if (sourceText.trimmed().isEmpty()) {
+        statusBar()->showMessage("The current raw deck is empty.", 4000);
+        return;
+    }
+
+    const QMessageBox::StandardButton confirmed = QMessageBox::question(
+        this,
+        "Fix deck file",
+        "This will reorganize the current raw deck using canonical ordering, fill any missing required "
+        "fields with defaults, print the before/after deck to the console, and save the fixed deck back "
+        "to disk.\n\nContinue?",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirmed != QMessageBox::Yes) {
+        return;
+    }
+
+    auto appendConsoleBlock = [this](const QString& title, const QString& text) {
+        if (!console_) {
+            return;
+        }
+        QString block = text;
+        if (!block.endsWith('\n')) {
+            block += '\n';
+        }
+        console_->appendText("[GUI] ---- " + title + " ----\n");
+        console_->appendText(block);
+        console_->appendText("[GUI] ---- end " + title + " ----\n");
+    };
+
+    if (console_) {
+        console_->appendText("[GUI] Fix deck file requested for "
+                             + QDir::toNativeSeparators(document_->filePath()) + "\n");
+    }
+    appendConsoleBlock("original deck", sourceText);
+
+    if (progressPanel_) {
+        progressPanel_->setBusy("Fix deck file", "Scanning raw deck");
+    }
+    statusBar()->showMessage("Fixing deck file...");
+    QCoreApplication::processEvents();
+
+    QString fixedText;
+    QStringList operations;
+    QString error;
+    if (!document_->repairRawText(sourceText, &fixedText, &operations, &error)) {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Failed", "deck fix");
+        }
+        const QString detail = error.trimmed().isEmpty() ? "Failed to reorganize the current deck." : error;
+        if (console_) {
+            console_->appendText("[GUI] Fix deck file failed: " + detail + "\n");
+        }
+        QMessageBox::critical(this, "Fix deck file", detail);
+        statusBar()->showMessage("Fix deck file failed.", 5000);
+        return;
+    }
+
+    if (console_) {
+        if (operations.isEmpty()) {
+            console_->appendText("[GUI] Deck fix actions: none. Deck is already canonical.\n");
+        } else {
+            console_->appendText("[GUI] Deck fix actions:\n");
+            for (const QString& operation : operations) {
+                console_->appendText("  - " + operation + "\n");
+            }
+        }
+    }
+
+    if (operations.isEmpty()) {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Completed", "deck already clean");
+        }
+        statusBar()->showMessage("Deck is already canonical; no fix actions were needed.", 5000);
+        return;
+    }
+
+    if (!document_->applyRawText(fixedText, &error)) {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Failed", "deck fix");
+        }
+        const QString detail = error.trimmed().isEmpty() ? "Failed to apply the fixed deck text." : error;
+        if (console_) {
+            console_->appendText("[GUI] Fix deck file failed while applying the repaired deck: "
+                                 + detail + "\n");
+        }
+        QMessageBox::critical(this, "Fix deck file", detail);
+        statusBar()->showMessage("Fix deck file failed.", 5000);
+        return;
+    }
+
+    appendConsoleBlock("fixed deck", fixedText);
+
+    QString saveError;
+    if (!document_->save(&saveError)) {
+        if (progressPanel_) {
+            progressPanel_->showTerminalStatus("Completed", "save pending");
+        }
+        const QString detail = saveError.trimmed().isEmpty() ? "Unknown save error." : saveError;
+        if (console_) {
+            console_->appendText("[GUI] Deck fix completed, but saving failed: " + detail + "\n");
+        }
+        QMessageBox::warning(this,
+                             "Fix deck file",
+                             "The deck was fixed in the editor, but saving to disk failed:\n\n" + detail);
+        statusBar()->showMessage("Deck fixed in the editor, but saving failed.", 7000);
+        return;
+    }
+
+    if (progressPanel_) {
+        progressPanel_->showTerminalStatus("Completed", "deck file fixed");
+    }
+    statusBar()->showMessage("Deck file fixed and saved.", 5000);
+    logGuiAction("Fixed deck file " + QFileInfo(document_->filePath()).fileName());
+}
+
 QVariant MainWindow::readEditorValue(const EditorBinding& binding) const {
     switch (binding.spec.kind) {
     case FieldKind::Boolean:
@@ -4442,13 +6363,29 @@ QVariant MainWindow::readEditorValue(const EditorBinding& binding) const {
     }
     case FieldKind::Integer:
         return qobject_cast<QSpinBox*>(binding.editor)->value();
-    case FieldKind::Float:
+    case FieldKind::Float: {
+        if (auto* line = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            bool ok = false;
+            const QString text = line->canonicalText();
+            const double value = text.toDouble(&ok);
+            return ok ? QVariant(value) : QVariant(text);
+        }
         return qobject_cast<QDoubleSpinBox*>(binding.editor)->value();
+    }
     case FieldKind::FloatPair:
     case FieldKind::FloatTriplet:
     case FieldKind::FloatList:
+        if (auto* triplet = dynamic_cast<SplitTripletEditor*>(binding.editor)) {
+            return parseLooseList(triplet->rawTextForDeck(), false);
+        }
+        if (auto* line = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            return parseLooseList(line->canonicalText(), false);
+        }
         return parseLooseList(qobject_cast<QLineEdit*>(binding.editor)->text(), false);
     case FieldKind::UIntTriplet:
+        if (auto* triplet = dynamic_cast<SplitTripletEditor*>(binding.editor)) {
+            return parseLooseList(triplet->rawTextForDeck(), true);
+        }
         return parseLooseList(qobject_cast<QLineEdit*>(binding.editor)->text(), true);
     case FieldKind::TokenList: {
         const QStringList tokens = qobject_cast<QLineEdit*>(binding.editor)->text().split(QRegularExpression(R"([,\s]+)"), Qt::SkipEmptyParts);
@@ -4457,6 +6394,9 @@ QVariant MainWindow::readEditorValue(const EditorBinding& binding) const {
     case FieldKind::Multiline:
         return qobject_cast<QPlainTextEdit*>(binding.editor)->toPlainText();
     case FieldKind::String:
+        if (binding.spec.key == "terr_voxel_height_field") {
+            return normalizeTerrainHeightFieldValue(qobject_cast<QLineEdit*>(binding.editor)->text());
+        }
         return qobject_cast<QLineEdit*>(binding.editor)->text();
     }
     return {};
@@ -4492,6 +6432,10 @@ bool MainWindow::isFieldActive(const QString& key) const {
         normalized.startsWith("vk_inlet_")) {
         return document_->typedValue("turb_inflow_enable").toBool();
     }
+    if (normalized == "terr_voxel_idw_power") {
+        const QString approach = document_->typedValue("terr_voxel_approach").toString().trimmed().toLower();
+        return approach != "kriging" && approach != "kriging_gpu";
+    }
     return true;
 }
 
@@ -4523,9 +6467,13 @@ void MainWindow::clearEditorDisplay(const EditorBinding& binding) {
         break;
     }
     case FieldKind::Float: {
-        auto* widget = qobject_cast<QDoubleSpinBox*>(binding.editor);
-        const QSignalBlocker blocker(widget);
-        widget->clear();
+        if (auto* precisionWidget = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            precisionWidget->setRawText({});
+        } else {
+            auto* spinWidget = qobject_cast<QDoubleSpinBox*>(binding.editor);
+            const QSignalBlocker blocker(spinWidget);
+            spinWidget->clear();
+        }
         break;
     }
     case FieldKind::FloatPair:
@@ -4534,9 +6482,15 @@ void MainWindow::clearEditorDisplay(const EditorBinding& binding) {
     case FieldKind::FloatList:
     case FieldKind::TokenList:
     case FieldKind::String: {
-        auto* widget = qobject_cast<QLineEdit*>(binding.editor);
-        const QSignalBlocker blocker(widget);
-        widget->clear();
+        if (auto* triplet = dynamic_cast<SplitTripletEditor*>(binding.editor)) {
+            triplet->setRawText({});
+        } else if (auto* precision = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            precision->setRawText({});
+        } else {
+            auto* widget = qobject_cast<QLineEdit*>(binding.editor);
+            const QSignalBlocker blocker(widget);
+            widget->clear();
+        }
         break;
     }
     case FieldKind::Multiline: {
@@ -4568,9 +6522,13 @@ void MainWindow::writeEditorValue(const EditorBinding& binding, const QVariant& 
     case FieldKind::Enum: {
         auto* widget = qobject_cast<QComboBox*>(binding.editor);
         const QSignalBlocker blocker(widget);
-        int index = widget->findData(value.toString());
+        QString targetValue = value.toString();
+        if (binding.spec.key == "turb_inflow_approach" && targetValue.trimmed().isEmpty()) {
+            targetValue = "vonkarman";
+        }
+        int index = widget->findData(targetValue);
         if (index < 0) {
-            index = widget->findText(value.toString());
+            index = widget->findText(targetValue);
         }
         widget->setCurrentIndex(index);
         break;
@@ -4586,31 +6544,45 @@ void MainWindow::writeEditorValue(const EditorBinding& binding, const QVariant& 
         break;
     }
     case FieldKind::Float: {
-        auto* widget = qobject_cast<QDoubleSpinBox*>(binding.editor);
-        const QSignalBlocker blocker(widget);
-        if (value.metaType().id() == QMetaType::QString && value.toString().trimmed().isEmpty()) {
-            widget->clear();
+        if (auto* precisionWidget = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            precisionWidget->setRawText(document_ ? document_->rawValue(binding.spec.key) : QString());
         } else {
-            widget->setValue(value.toDouble());
+            auto* spinWidget = qobject_cast<QDoubleSpinBox*>(binding.editor);
+            const QSignalBlocker blocker(spinWidget);
+            if (value.metaType().id() == QMetaType::QString && value.toString().trimmed().isEmpty()) {
+                spinWidget->clear();
+            } else {
+                spinWidget->setValue(value.toDouble());
+            }
         }
         break;
     }
     case FieldKind::FloatPair:
     case FieldKind::FloatTriplet:
     case FieldKind::FloatList: {
-        auto* widget = qobject_cast<QLineEdit*>(binding.editor);
-        const QSignalBlocker blocker(widget);
-        widget->setText(renderVariantList(value.toList(), false));
-        widget->deselect();
-        widget->setCursorPosition(0);
+        if (auto* triplet = dynamic_cast<SplitTripletEditor*>(binding.editor)) {
+            triplet->setRawText(document_ ? document_->rawValue(binding.spec.key) : QString());
+        } else if (auto* precisionWidget = dynamic_cast<PrecisionNumericLineEdit*>(binding.editor)) {
+            precisionWidget->setRawText(document_ ? document_->rawValue(binding.spec.key) : QString());
+        } else {
+            auto* lineWidget = qobject_cast<QLineEdit*>(binding.editor);
+            const QSignalBlocker blocker(lineWidget);
+            lineWidget->setText(renderVariantList(value.toList(), false));
+            lineWidget->deselect();
+            lineWidget->setCursorPosition(0);
+        }
         break;
     }
     case FieldKind::UIntTriplet: {
-        auto* widget = qobject_cast<QLineEdit*>(binding.editor);
-        const QSignalBlocker blocker(widget);
-        widget->setText(renderVariantList(value.toList(), true));
-        widget->deselect();
-        widget->setCursorPosition(0);
+        if (auto* triplet = dynamic_cast<SplitTripletEditor*>(binding.editor)) {
+            triplet->setRawText(document_ ? document_->rawValue(binding.spec.key) : QString());
+        } else {
+            auto* lineWidget = qobject_cast<QLineEdit*>(binding.editor);
+            const QSignalBlocker blocker(lineWidget);
+            lineWidget->setText(renderVariantList(value.toList(), true));
+            lineWidget->deselect();
+            lineWidget->setCursorPosition(0);
+        }
         break;
     }
     case FieldKind::TokenList: {
@@ -4630,7 +6602,10 @@ void MainWindow::writeEditorValue(const EditorBinding& binding, const QVariant& 
     case FieldKind::String: {
         auto* widget = qobject_cast<QLineEdit*>(binding.editor);
         const QSignalBlocker blocker(widget);
-        widget->setText(value.toString());
+        const QString displayValue = binding.spec.key == "terr_voxel_height_field"
+            ? displayTerrainHeightFieldValue(value.toString())
+            : value.toString();
+        widget->setText(displayValue);
         widget->deselect();
         widget->setCursorPosition(0);
         break;

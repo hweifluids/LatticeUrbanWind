@@ -2,6 +2,7 @@ C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compi
 C:\1_Development\LatticeUrbanWind\gui\src\main.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\main.obj
 C:\1_Development\LatticeUrbanWind\gui\src\Theme.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\Theme.obj
 C:\1_Development\LatticeUrbanWind\gui\src\Preferences.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\Preferences.obj
+C:\1_Development\LatticeUrbanWind\gui\src\RuntimePaths.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\RuntimePaths.obj
 C:\1_Development\LatticeUrbanWind\gui\src\ConfigSchema.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ConfigSchema.obj
 C:\1_Development\LatticeUrbanWind\gui\src\ConfigDocument.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\ConfigDocument.obj
 C:\1_Development\LatticeUrbanWind\gui\src\CommandRunner.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\CommandRunner.obj
@@ -14,3 +15,5 @@ C:\1_Development\LatticeUrbanWind\gui\src\VtkViewWidget.cpp;C:\1_Development\Lat
 C:\1_Development\LatticeUrbanWind\gui\src\WavenumberPanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\WavenumberPanel.obj
 C:\1_Development\LatticeUrbanWind\gui\src\BuildingScalePanel.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\BuildingScalePanel.obj
 C:\1_Development\LatticeUrbanWind\gui\src\MainWindow.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\MainWindow.obj
+C:\1_Development\LatticeUrbanWind\gui\src\StartupDiagnostics.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\StartupDiagnostics.obj
+C:\1_Development\LatticeUrbanWind\gui\src\StartupSplash.cpp;C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio.dir\Debug\StartupSplash.obj

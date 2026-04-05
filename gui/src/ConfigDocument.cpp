@@ -5,7 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
-#include <QRegularExpression>
+#include <QProcess>
 #include <QStringBuilder>
 #include <QTextStream>
 #include <QTimer>
@@ -74,6 +74,20 @@ QVariantList parseNumberList(const QString& raw, bool integerMode, int exactCoun
     return out;
 }
 
+QString renderFloatingPointValue(double value) {
+    QString text = QString::number(value, 'f', 15);
+    while (text.contains('.') && text.endsWith('0')) {
+        text.chop(1);
+    }
+    if (text.endsWith('.')) {
+        text.chop(1);
+    }
+    if (text == "-0") {
+        text = "0";
+    }
+    return text;
+}
+
 QString renderList(const QVariantList& values, bool integerMode) {
     QStringList parts;
     parts.reserve(values.size());
@@ -81,10 +95,34 @@ QString renderList(const QVariantList& values, bool integerMode) {
         if (integerMode) {
             parts.push_back(QString::number(value.toInt()));
         } else {
-            parts.push_back(QString::number(value.toDouble(), 'f', 6));
+            parts.push_back(renderFloatingPointValue(value.toDouble()));
         }
     }
-    return "[" % parts.join(",   ") % "]";
+    return "[" % parts.join(", ") % "]";
+}
+
+int defaultGpuMemoryMiB() {
+    QProcess process;
+    process.start(QStringLiteral("nvidia-smi"),
+                  {QStringLiteral("--query-gpu=memory.total"),
+                   QStringLiteral("--format=csv,noheader,nounits")});
+    if (!process.waitForStarted(1000) || !process.waitForFinished(3000)) {
+        return 20000;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        return 20000;
+    }
+
+    const QString output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    const QString firstLine = output.section('\n', 0, 0).trimmed();
+    bool ok = false;
+    const int totalMemoryMiB = firstLine.toInt(&ok);
+    if (!ok || totalMemoryMiB <= 0) {
+        return 20000;
+    }
+
+    const int recommended = (totalMemoryMiB * 85) / 100;
+    return recommended > 0 ? recommended : 20000;
 }
 
 QString normalizeSectionLabel(QString text) {
@@ -99,77 +137,29 @@ QString normalizeSectionLabel(QString text) {
 }
 
 QStringList sectionOrder() {
-    return {
-        "project",
-        "domain",
-        "generated",
-        "cfd",
-        "output",
-        "physics",
-        "vk",
-        "batch",
-        "custom",
-    };
+    QStringList out;
+    const QVector<SectionSpec>& specs = sectionSpecs();
+    out.reserve(specs.size());
+    for (const SectionSpec& spec : specs) {
+        out.push_back(spec.id);
+    }
+    return out;
 }
 
 QString sectionTitle(const QString& sectionId) {
-    if (sectionId == "project") {
-        return "Project";
-    }
-    if (sectionId == "domain") {
-        return "Domain";
-    }
-    if (sectionId == "generated") {
-        return "Generated";
-    }
-    if (sectionId == "cfd") {
-        return "CFD Controls";
-    }
-    if (sectionId == "output") {
-        return "Output & Probes";
-    }
-    if (sectionId == "physics") {
-        return "Physics";
-    }
-    if (sectionId == "vk") {
-        return "Turbulence inflow";
-    }
-    if (sectionId == "batch") {
-        return "Batch";
-    }
-    if (sectionId == "custom") {
-        return "Custom";
+    for (const SectionSpec& spec : sectionSpecs()) {
+        if (spec.id == sectionId) {
+            return spec.title;
+        }
     }
     return sectionId;
 }
 
 QStringList sectionAliases(const QString& sectionId) {
-    if (sectionId == "project") {
-        return {"project", "project info", "case"};
-    }
-    if (sectionId == "domain") {
-        return {"domain", "projected si range after rotation", "wrf data range in lon/lat"};
-    }
-    if (sectionId == "generated") {
-        return {"generated", "generated info", "volume-mean uvw and downstream boundary with yaw angle"};
-    }
-    if (sectionId == "cfd") {
-        return {"cfd control", "cfd controls"};
-    }
-    if (sectionId == "output") {
-        return {"output", "output and probes", "output & probes"};
-    }
-    if (sectionId == "physics") {
-        return {"physics"};
-    }
-    if (sectionId == "vk") {
-        return {"turbulence inflow", "vk inlet", "von karman inlet"};
-    }
-    if (sectionId == "batch") {
-        return {"batch", "batch modes", "dataset generation", "inflow directions"};
-    }
-    if (sectionId == "custom") {
-        return {"custom"};
+    for (const SectionSpec& spec : sectionSpecs()) {
+        if (spec.id == sectionId) {
+            return spec.aliases;
+        }
     }
     return {};
 }
@@ -341,6 +331,138 @@ bool ConfigDocument::applyRawText(const QString& text, QString* errorMessage) {
     return true;
 }
 
+bool ConfigDocument::repairRawText(const QString& text,
+                                   QString* repairedText,
+                                   QStringList* operations,
+                                   QString* errorMessage) const {
+    ConfigDocument temp;
+    temp.mode_ = mode_;
+
+    if (!temp.parseDocument(text, false, errorMessage)) {
+        return false;
+    }
+
+    QStringList localOperations;
+    const QString canonicalText = temp.renderedText();
+    if (!temp.duplicateKeys_.isEmpty()) {
+        localOperations.push_back(
+            QStringLiteral("Collapsed duplicate keys by keeping the last value: %1.")
+                .arg(temp.duplicateKeys_.join(QStringLiteral(", "))));
+    }
+    if (normalizeText(text) != normalizeText(canonicalText)) {
+        localOperations.push_back(QStringLiteral("Reordered deck into canonical section/key order."));
+    }
+
+    const QString datetimeValue = temp.typedValue(QStringLiteral("datetime")).toString().trimmed();
+    if (datetimeValue.isEmpty()) {
+        temp.setTypedValue(QStringLiteral("datetime"), QStringLiteral("20990101120000"));
+        localOperations.push_back(QStringLiteral("Added missing 'datetime' with default 20990101120000."));
+    }
+
+    const QVariantList nGpu = temp.typedValue(QStringLiteral("n_gpu")).toList();
+    if (nGpu.size() != 3) {
+        temp.setTypedValue(QStringLiteral("n_gpu"), QVariantList{1, 1, 1});
+        localOperations.push_back(QStringLiteral("Added missing 'n_gpu' with default [1, 1, 1]."));
+    }
+
+    QString meshControl = temp.typedValue(QStringLiteral("mesh_control")).toString().trimmed().toLower();
+    const QString cellSizeRaw = temp.rawValue(QStringLiteral("cell_size")).trimmed();
+    const bool hasCellSizeValue = !cellSizeRaw.isEmpty();
+    if (meshControl.isEmpty()) {
+        temp.setTypedValue(QStringLiteral("mesh_control"), QStringLiteral("gpu_memory"));
+        meshControl = QStringLiteral("gpu_memory");
+        localOperations.push_back(QStringLiteral("Added missing 'mesh_control' with default \"gpu_memory\"."));
+    } else if (meshControl == QStringLiteral("cell_size") && !hasCellSizeValue) {
+        temp.setTypedValue(QStringLiteral("mesh_control"), QStringLiteral("gpu_memory"));
+        meshControl = QStringLiteral("gpu_memory");
+        localOperations.push_back(
+            QStringLiteral("Changed 'mesh_control' to \"gpu_memory\" because 'cell_size' is empty."));
+    }
+
+    const QString legacyMemoryKey = normalizeKey(QStringLiteral("memory_lbm"));
+    const bool hadLegacyMemory = temp.values_.contains(legacyMemoryKey);
+    const QString legacyMemory = trimQuotes(temp.values_.value(legacyMemoryKey));
+    if (meshControl == QStringLiteral("gpu_memory")) {
+        bool gpuMemoryOk = false;
+        temp.rawValue(QStringLiteral("gpu_memory")).trimmed().toInt(&gpuMemoryOk);
+        if (!gpuMemoryOk) {
+            int ensuredMemory = defaultGpuMemoryMiB();
+            if (!legacyMemory.isEmpty()) {
+                bool legacyOk = false;
+                const int migrated = static_cast<int>(legacyMemory.toDouble(&legacyOk));
+                if (legacyOk && migrated > 0) {
+                    ensuredMemory = migrated;
+                }
+            }
+            temp.setTypedValue(QStringLiteral("gpu_memory"), ensuredMemory);
+            localOperations.push_back(
+                QStringLiteral("Added missing 'gpu_memory' with default %1.").arg(ensuredMemory));
+        }
+    }
+
+    if (!temp.hasKey(QStringLiteral("cell_size"))) {
+        temp.setRawValue(QStringLiteral("cell_size"), QString());
+        localOperations.push_back(QStringLiteral("Inserted placeholder 'cell_size'."));
+    }
+
+    if (!temp.hasKey(QStringLiteral("high_order"))) {
+        temp.setTypedValue(QStringLiteral("high_order"), true);
+        localOperations.push_back(QStringLiteral("Added missing 'high_order' with default true."));
+    }
+    if (!temp.hasKey(QStringLiteral("flux_correction"))) {
+        temp.setTypedValue(QStringLiteral("flux_correction"), true);
+        localOperations.push_back(QStringLiteral("Added missing 'flux_correction' with default true."));
+    }
+
+    if (temp.mode_ != RunMode::Luwdg) {
+        if (!temp.hasKey(QStringLiteral("terr_voxel_height_field"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_height_field"), QStringLiteral("auto"));
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_height_field' with default \"auto\"."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_ignore_under"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_ignore_under"), 0.0);
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_ignore_under' with default 0.0."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_approach"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_approach"), QStringLiteral("idw"));
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_approach' with default \"idw\"."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_grid_resolution"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_grid_resolution"), 50.0);
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_grid_resolution' with default 50.0."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_idw_sigma"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_idw_sigma"), 1.0);
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_idw_sigma' with default 1.0."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_idw_power"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_idw_power"), 2.0);
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_idw_power' with default 2.0."));
+        }
+        if (!temp.hasKey(QStringLiteral("terr_voxel_idw_neighbors"))) {
+            temp.setTypedValue(QStringLiteral("terr_voxel_idw_neighbors"), 12);
+            localOperations.push_back(QStringLiteral("Added missing 'terr_voxel_idw_neighbors' with default 12."));
+        }
+    }
+
+    if (hadLegacyMemory) {
+        temp.entries_.remove(legacyMemoryKey);
+        temp.values_.remove(legacyMemoryKey);
+        temp.duplicateKeys_.removeAll(legacyMemoryKey);
+        temp.forgetUnknownKey(legacyMemoryKey);
+        temp.rawText_ = temp.renderedText();
+        localOperations.push_back(QStringLiteral("Removed legacy 'memory_lbm'."));
+    }
+
+    if (repairedText) {
+        *repairedText = temp.renderedText();
+    }
+    if (operations) {
+        *operations = localOperations;
+    }
+    return true;
+}
+
 QString ConfigDocument::filePath() const {
     return filePath_;
 }
@@ -365,7 +487,29 @@ QString ConfigDocument::rawText() const {
 }
 
 QString ConfigDocument::renderEntry(const DeckEntry& entry) {
-    QString line = entry.key % " = " % entry.value;
+    QString renderedValue = entry.value.trimmed();
+    if (entry.known) {
+        const FieldSpec* spec = findFieldSpec(entry.key);
+        bool parsed = false;
+        if (spec) {
+            if (spec->kind == FieldKind::Boolean && tryParseDeckBool(renderedValue, &parsed)) {
+                renderedValue = parsed ? "true" : "false";
+            } else if (!renderedValue.isEmpty() && (spec->kind == FieldKind::FloatPair
+                       || spec->kind == FieldKind::FloatTriplet
+                       || spec->kind == FieldKind::UIntTriplet
+                       || spec->kind == FieldKind::FloatList
+                       || spec->kind == FieldKind::TokenList)) {
+                renderedValue = "[" % splitList(renderedValue).join(", ") % "]";
+            } else if (spec->quoted && !renderedValue.isEmpty()) {
+                renderedValue = "\"" % trimQuotes(renderedValue) % "\"";
+            }
+        }
+    }
+
+    QString line = entry.key % " =";
+    if (!renderedValue.isEmpty()) {
+        line += " " % renderedValue;
+    }
     if (!entry.comment.trimmed().isEmpty()) {
         line += " " % entry.comment.trimmed();
     }
@@ -581,11 +725,7 @@ QString ConfigDocument::normalizeText(const QString& text) {
 }
 
 QString ConfigDocument::normalizeKey(const QString& key) {
-    const QString normalized = key.trimmed().toLower();
-    if (normalized == "vk_inlet_enable") {
-        return "turb_inflow_enable";
-    }
-    return normalized;
+    return normalizeDeckKey(key);
 }
 
 QVariant ConfigDocument::parseValue(const FieldSpec& spec, const QString& rawValue) {
@@ -606,14 +746,11 @@ QVariant ConfigDocument::parseValue(const FieldSpec& spec, const QString& rawVal
         return ok ? QVariant(value) : QVariant(trimQuotes(raw));
     }
     case FieldKind::Boolean: {
-        const QString normalized = trimQuotes(raw).toLower();
-        if (normalized == "true" || normalized == "1") {
-            return true;
+        bool parsed = false;
+        if (tryParseDeckBool(raw, &parsed)) {
+            return parsed;
         }
-        if (normalized == "false" || normalized == "0") {
-            return false;
-        }
-        return QVariant(false);
+        return QVariant();
     }
     case FieldKind::FloatPair:
         return parseNumberList(raw, false, 2);
@@ -643,7 +780,7 @@ QString ConfigDocument::serializeValue(const FieldSpec& spec, const QVariant& va
     case FieldKind::Integer:
         return QString::number(value.toInt());
     case FieldKind::Float:
-        return QString::number(value.toDouble(), 'f', 6);
+        return renderFloatingPointValue(value.toDouble());
     case FieldKind::Boolean:
         return value.toBool() ? "true" : "false";
     case FieldKind::FloatPair:
@@ -774,7 +911,6 @@ bool ConfigDocument::parseDocument(const QString& text, bool strictDuplicates, Q
         rawLines.removeLast();
     }
 
-    const QRegularExpression kvPattern(R"(^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$)");
     QString currentSection;
     bool sawStructuredContent = false;
 
@@ -790,10 +926,13 @@ bool ConfigDocument::parseDocument(const QString& text, bool strictDuplicates, Q
         const int cmtIndex = commentIndex(originalLine);
         const QString content = (cmtIndex >= 0) ? originalLine.left(cmtIndex) : originalLine;
         const QString comment = (cmtIndex >= 0) ? originalLine.mid(cmtIndex).trimmed() : QString();
-        const QRegularExpressionMatch match = kvPattern.match(content);
-        if (match.hasMatch()) {
-            const QString key = normalizeKey(match.captured(1));
-            const QString value = match.captured(2).trimmed();
+        const int eqIndex = content.indexOf('=');
+        if (eqIndex >= 0) {
+            const QString key = normalizeKey(content.left(eqIndex));
+            const QString value = content.mid(eqIndex + 1).trimmed();
+            if (key.isEmpty()) {
+                continue;
+            }
             const bool known = findFieldSpec(key) != nullptr;
 
             if (entries.contains(key) && !duplicateKeys.contains(key)) {

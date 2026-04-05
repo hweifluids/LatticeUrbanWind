@@ -1,0 +1,628 @@
+{
+  "sections": [
+    {
+      "id": "project",
+      "title": "Project",
+      "description": "Case identity, file mode and working directories.",
+      "aliases": ["project", "project info", "case"]
+    },
+    {
+      "id": "domain",
+      "title": "Domain",
+      "description": "Spatial range, base height, clipping and coordinate controls.",
+      "aliases": ["domain", "projected si range after rotation", "wrf data range in lon/lat"]
+    },
+    {
+      "id": "generated",
+      "title": "Generated",
+      "description": "Derived domain information written back by the pipeline.",
+      "aliases": ["generated", "generated info", "volume-mean uvw and downstream boundary with yaw angle"]
+    },
+    {
+      "id": "cfd",
+      "title": "CFD Controls",
+      "description": "Mesh, GPU allocation and core solver controls.",
+      "aliases": ["cfd control", "cfd controls"]
+    },
+    {
+      "id": "output",
+      "title": "Output & Probes",
+      "description": "Output cadence, probe definitions and averaging products.",
+      "aliases": ["output", "output and probes", "output & probes"]
+    },
+    {
+      "id": "physics",
+      "title": "Physics",
+      "description": "Coriolis, buoyancy, immersed-boundary, nudging and sponge settings.",
+      "aliases": ["physics"]
+    },
+    {
+      "id": "vk",
+      "title": "Turbulence inflow",
+      "description": "Synthetic turbulence inflow parameters.",
+      "aliases": ["turbulence inflow", "vk inlet", "von karman inlet"]
+    },
+    {
+      "id": "batch",
+      "title": "Batch",
+      "description": "Dataset/profile batch boundary-condition controls.",
+      "aliases": ["batch", "batch modes", "dataset generation", "inflow directions"]
+    },
+    {
+      "id": "custom",
+      "title": "Custom",
+      "description": "Unknown or extension fields preserved by the editor.",
+      "aliases": ["custom"]
+    }
+  ],
+  "fields": [
+    {
+      "key": "casename",
+      "label": "Case name",
+      "section": "project",
+      "help": "Primary case identifier used by outputs.",
+      "kind": "string"
+    },
+    {
+      "key": "datetime",
+      "label": "Date & time",
+      "section": "project",
+      "help": "14-digit timestamp used by LUW workflows.",
+      "kind": "string"
+    },
+
+    {
+      "key": "cut_lon_manual",
+      "label": "Longitude range",
+      "section": "domain",
+      "help": "Manual clipping range in longitude.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "cut_lat_manual",
+      "label": "Latitude range",
+      "section": "domain",
+      "help": "Manual clipping range in latitude.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "cut_utm_x",
+      "label": "UTM X range",
+      "section": "domain",
+      "help": "Manual clipping range in projected UTM X.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "cut_utm_y",
+      "label": "UTM Y range",
+      "section": "domain",
+      "help": "Manual clipping range in projected UTM Y.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "si_x_cfd",
+      "label": "X range",
+      "section": "domain",
+      "help": "Projected X range of CFD domain in meters.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "si_y_cfd",
+      "label": "Y range",
+      "section": "domain",
+      "help": "Projected Y range of CFD domain in meters.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "si_z_cfd",
+      "label": "Z range",
+      "section": "domain",
+      "help": "Projected Z range of CFD domain in meters.",
+      "kind": "float_pair"
+    },
+    {
+      "key": "base_height",
+      "label": "Base height",
+      "section": "domain",
+      "help": "Ground/base slab thickness in meters.",
+      "kind": "float"
+    },
+    {
+      "key": "z_limit",
+      "label": "Height limit",
+      "section": "domain",
+      "help": "Low-altitude vertical target range in meters.",
+      "kind": "float"
+    },
+    {
+      "key": "geometry_mode",
+      "label": "Geometry representation",
+      "section": "domain",
+      "help": "Select whether buildings, terrain, or both are included.",
+      "kind": "enum",
+      "enum_values": ["0", "1", "2"],
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_height_field",
+      "label": "Height key",
+      "section": "domain",
+      "help": "Building shapefile field used as the extrusion height. Use \"Inferred\" to detect a standard height field automatically.",
+      "kind": "string",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_ignore_under",
+      "label": "Ignore under",
+      "section": "domain",
+      "help": "Ignore building features whose resolved height is less than or equal to this threshold in meters.",
+      "kind": "float",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_approach",
+      "label": "Terrain approach",
+      "section": "domain",
+      "help": "Terrain interpolation approach used during voxelization. kriging_gpu uses the Numba CUDA backend when available and falls back to CPU kriging otherwise.",
+      "kind": "enum",
+      "enum_values": ["idw", "kriging_gpu", "kriging"],
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_grid_resolution",
+      "label": "Grid resolution (m)",
+      "section": "domain",
+      "help": "Terrain interpolation grid spacing in meters for terrain voxelization.",
+      "kind": "float",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_idw_sigma",
+      "label": "IDW sigma",
+      "section": "domain",
+      "help": "Gaussian smoothing strength applied after terrain interpolation. Building-base lookup uses a lighter half-strength smoothing pass.",
+      "kind": "float",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_idw_power",
+      "label": "IDW power",
+      "section": "domain",
+      "help": "Inverse-distance weighting power used by terrain voxelization when the approach is IDW.",
+      "kind": "float",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "terr_voxel_idw_neighbors",
+      "label": "Neighboring points (N)",
+      "section": "domain",
+      "help": "Number of nearby DEM samples used by terrain voxel interpolation.",
+      "kind": "integer",
+      "modes": ["luw", "luwpf"]
+    },
+    {
+      "key": "midmesh_basesize",
+      "label": "Mid-mesh base size",
+      "section": "domain",
+      "help": "Base mesh size for preprocessing boundary construction.",
+      "kind": "float"
+    },
+    {
+      "key": "utm_crs",
+      "label": "UTM CRS",
+      "section": "domain",
+      "help": "Projected coordinate reference system.",
+      "kind": "string",
+      "quoted": true
+    },
+    {
+      "key": "utm_epsg",
+      "label": "UTM EPSG",
+      "section": "domain",
+      "help": "Projected EPSG code.",
+      "kind": "integer"
+    },
+    {
+      "key": "utm",
+      "label": "UTM string",
+      "section": "domain",
+      "help": "Legacy projected CRS string.",
+      "kind": "string"
+    },
+    {
+      "key": "utm_zone",
+      "label": "UTM zone",
+      "section": "domain",
+      "help": "UTM zone number.",
+      "kind": "integer"
+    },
+    {
+      "key": "utm_hemisphere",
+      "label": "UTM hemisphere",
+      "section": "domain",
+      "help": "UTM hemisphere indicator.",
+      "kind": "string"
+    },
+    {
+      "key": "rotate_deg",
+      "label": "Rotate angle",
+      "section": "domain",
+      "help": "Rotation applied to align the CFD box.",
+      "kind": "float"
+    },
+    {
+      "key": "center_lon",
+      "label": "Center longitude",
+      "section": "domain",
+      "help": "Reference longitude of the domain center.",
+      "kind": "float"
+    },
+    {
+      "key": "center_lat",
+      "label": "Center latitude",
+      "section": "domain",
+      "help": "Reference latitude of the domain center.",
+      "kind": "float"
+    },
+
+    {
+      "key": "origin_shift_applied",
+      "label": "Origin shift applied",
+      "section": "generated",
+      "help": "Whether origin shift has been applied.",
+      "kind": "boolean"
+    },
+    {
+      "key": "um_vol",
+      "label": "Volume mean velocity",
+      "section": "generated",
+      "help": "Volume-mean uvw written by preprocessing.",
+      "kind": "float_triplet"
+    },
+    {
+      "key": "um_bc",
+      "label": "Boundary mean velocity",
+      "section": "generated",
+      "help": "Boundary mean uvw written by preprocessing.",
+      "kind": "float_triplet"
+    },
+    {
+      "key": "downstream_bc",
+      "label": "Downstream face",
+      "section": "generated",
+      "help": "Computed downstream boundary face.",
+      "kind": "string",
+      "quoted": true
+    },
+    {
+      "key": "downstream_bc_yaw",
+      "label": "Downstream yaw",
+      "section": "generated",
+      "help": "Computed downstream yaw angle.",
+      "kind": "float"
+    },
+
+    {
+      "key": "n_gpu",
+      "label": "GPU split",
+      "section": "cfd",
+      "help": "Triplet of GPU partition counts.",
+      "kind": "uint_triplet"
+    },
+    {
+      "key": "mesh_control",
+      "label": "Mesh control",
+      "section": "cfd",
+      "help": "Choose between GPU memory target and explicit cell size.",
+      "kind": "enum",
+      "enum_values": ["gpu_memory", "cell_size"],
+      "quoted": true
+    },
+    {
+      "key": "gpu_memory",
+      "label": "GPU memory (MiB)",
+      "section": "cfd",
+      "help": "Target GPU memory for automatic resolution sizing.",
+      "kind": "integer"
+    },
+    {
+      "key": "cell_size",
+      "label": "Cell size (m)",
+      "section": "cfd",
+      "help": "Explicit cell size in meters when mesh_control=cell_size.",
+      "kind": "float"
+    },
+    {
+      "key": "validation",
+      "label": "Validation status",
+      "section": "cfd",
+      "help": "Validation flag written by prerun validation.",
+      "kind": "string"
+    },
+    {
+      "key": "high_order",
+      "label": "High order interpolation",
+      "section": "cfd",
+      "help": "Enable higher-order interpolation.",
+      "kind": "boolean"
+    },
+    {
+      "key": "flux_correction",
+      "label": "Flux correction",
+      "section": "cfd",
+      "help": "Enable post-voxel flux correction.",
+      "kind": "boolean"
+    },
+    {
+      "key": "downstream_open_face",
+      "label": "Downstream open",
+      "section": "cfd",
+      "help": "Use special downstream outlet handling instead of a fixed velocity face.",
+      "kind": "boolean"
+    },
+    {
+      "key": "run_nstep",
+      "label": "Run steps override",
+      "section": "cfd",
+      "help": "Force solver run length in steps.",
+      "kind": "integer"
+    },
+    {
+      "key": "research_output",
+      "label": "Research output stride",
+      "section": "cfd",
+      "help": "Snapshot output cadence for research runs.",
+      "kind": "integer"
+    },
+
+    {
+      "key": "unsteady_output",
+      "label": "Unsteady output stride",
+      "section": "output",
+      "help": "Write unsteady VTK every N steps.",
+      "kind": "integer"
+    },
+    {
+      "key": "probes_output",
+      "label": "Probe output stride",
+      "section": "output",
+      "help": "Sampling interval for probe outputs.",
+      "kind": "integer"
+    },
+    {
+      "key": "purge_avg",
+      "label": "Average purge stride",
+      "section": "output",
+      "help": "Average purge cadence.",
+      "kind": "integer"
+    },
+    {
+      "key": "purge_avg_stride",
+      "label": "Average purge sub-stride",
+      "section": "output",
+      "help": "Subsampling stride for purge-avg.",
+      "kind": "integer"
+    },
+    {
+      "key": "output_tke_ti_tls",
+      "label": "Averaged scalar outputs",
+      "section": "output",
+      "help": "Comma-separated subset from tke, ti, tls.",
+      "kind": "token_list"
+    },
+    {
+      "key": "probes",
+      "label": "Probe definitions",
+      "section": "output",
+      "help": "Raw probe definition tokens.",
+      "kind": "multiline"
+    },
+
+    {
+      "key": "coriolis_term",
+      "label": "Coriolis term",
+      "section": "physics",
+      "help": "Enable the Coriolis source term.",
+      "kind": "boolean"
+    },
+    {
+      "key": "buoyancy",
+      "label": "Buoyancy",
+      "section": "physics",
+      "help": "Enable buoyancy-driven temperature coupling.",
+      "kind": "boolean"
+    },
+    {
+      "key": "ibm_enabler",
+      "label": "Immersed boundary",
+      "section": "physics",
+      "help": "Enable immersed-boundary handling.",
+      "kind": "boolean"
+    },
+    {
+      "key": "enable_buffer_nudging",
+      "label": "Buffer nudging",
+      "section": "physics",
+      "help": "Enable outer-domain buffer nudging.",
+      "kind": "boolean"
+    },
+    {
+      "key": "buffer_thickness_m",
+      "label": "Buffer thickness",
+      "section": "physics",
+      "help": "Nudging thickness in meters.",
+      "kind": "float"
+    },
+    {
+      "key": "buffer_tau_s",
+      "label": "Buffer tau",
+      "section": "physics",
+      "help": "Nudging timescale in seconds.",
+      "kind": "float"
+    },
+    {
+      "key": "buffer_nudge_vertical",
+      "label": "Vertical nudging",
+      "section": "physics",
+      "help": "Include vertical velocity in buffer nudging.",
+      "kind": "boolean"
+    },
+    {
+      "key": "enable_top_sponge",
+      "label": "Top sponge layer",
+      "section": "physics",
+      "help": "Enable top sponge layer damping.",
+      "kind": "boolean"
+    },
+    {
+      "key": "sponge_thickness_m",
+      "label": "Sponge thickness",
+      "section": "physics",
+      "help": "Top sponge thickness in meters.",
+      "kind": "float"
+    },
+    {
+      "key": "sponge_tau_s",
+      "label": "Sponge tau",
+      "section": "physics",
+      "help": "Top sponge timescale in seconds.",
+      "kind": "float"
+    },
+    {
+      "key": "sponge_ref_mode",
+      "label": "Sponge reference mode",
+      "section": "physics",
+      "help": "0/mode0 or 1/geostrophic.",
+      "kind": "string"
+    },
+
+    {
+      "key": "turb_inflow_enable",
+      "label": "Turbulence inflow",
+      "section": "vk",
+      "help": "Enable synthetic turbulence inflow.",
+      "kind": "boolean",
+      "aliases": ["vk_inlet_enable"]
+    },
+    {
+      "key": "turb_inflow_approach",
+      "label": "Synthetic approach",
+      "section": "vk",
+      "help": "Select the synthetic turbulence approach.",
+      "kind": "enum",
+      "enum_values": ["vonkarman", "smirnov"]
+    },
+    {
+      "key": "vk_inlet_ti",
+      "label": "Turbulence intensity",
+      "section": "vk",
+      "help": "Turbulence intensity fraction.",
+      "kind": "float"
+    },
+    {
+      "key": "vk_inlet_sigma",
+      "label": "Fluctuation sigma",
+      "section": "vk",
+      "help": "Velocity fluctuation sigma in m/s.",
+      "kind": "float"
+    },
+    {
+      "key": "vk_inlet_l",
+      "label": "Length scale",
+      "section": "vk",
+      "help": "Integral length scale in meters.",
+      "kind": "float"
+    },
+    {
+      "key": "vk_inlet_nmodes",
+      "label": "Mode count",
+      "section": "vk",
+      "help": "Mode count.",
+      "kind": "integer"
+    },
+    {
+      "key": "vk_inlet_seed",
+      "label": "Random seed",
+      "section": "vk",
+      "help": "Random seed.",
+      "kind": "string"
+    },
+    {
+      "key": "vk_inlet_update_stride",
+      "label": "Update stride",
+      "section": "vk",
+      "help": "Update interval in solver steps.",
+      "kind": "integer"
+    },
+    {
+      "key": "vk_inlet_uc_mode",
+      "label": "Characteristic speed mode",
+      "section": "vk",
+      "help": "Characteristic speed for turbulence intensity scaling.",
+      "kind": "enum",
+      "enum_values": ["NORMAL_COMPONENT", "NORM_MEAN"]
+    },
+    {
+      "key": "vk_inlet_same_realization_all_faces",
+      "label": "Same realization on all faces",
+      "section": "vk",
+      "help": "Use the same random realization on every inflow face.",
+      "kind": "boolean"
+    },
+    {
+      "key": "vk_inlet_stride_interpolation",
+      "label": "Stride interpolation",
+      "section": "vk",
+      "help": "Enable stride interpolation.",
+      "kind": "boolean"
+    },
+    {
+      "key": "vk_inlet_inflow_only",
+      "label": "Inflow only",
+      "section": "vk",
+      "help": "Filter turbulence to inflow cells only.",
+      "kind": "boolean"
+    },
+    {
+      "key": "vk_inlet_anisotropy",
+      "label": "Anisotropy",
+      "section": "vk",
+      "help": "Anisotropy scale triplet [x,y,z].",
+      "kind": "float_triplet",
+      "aliases": ["vk_inlet_anisotropy_scale", "vk_inlet_aniso_scale"]
+    },
+
+    {
+      "key": "x_exp_rat",
+      "label": "X expansion ratio",
+      "section": "batch",
+      "help": "Batch STL base expansion ratio along X.",
+      "kind": "float",
+      "modes": ["luwdg", "luwpf"]
+    },
+    {
+      "key": "y_exp_rat",
+      "label": "Y expansion ratio",
+      "section": "batch",
+      "help": "Batch STL base expansion ratio along Y.",
+      "kind": "float",
+      "modes": ["luwdg", "luwpf"]
+    },
+    {
+      "key": "inflow",
+      "label": "Inflow list",
+      "section": "batch",
+      "help": "Dataset-generation inflow magnitudes in m/s.",
+      "kind": "float_list",
+      "modes": ["luwdg"]
+    },
+    {
+      "key": "angle",
+      "label": "Angle list",
+      "section": "batch",
+      "help": "Batch inflow direction angles in degrees.",
+      "kind": "float_list",
+      "modes": ["luwdg", "luwpf"]
+    }
+  ]
+}

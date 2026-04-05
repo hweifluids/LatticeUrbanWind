@@ -1,96 +1,163 @@
 #include "luwgui/ConfigSchema.h"
+#include "luwgui/RuntimePaths.h"
 
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
+
+#include <cmath>
 
 namespace luwgui {
 
 namespace {
 
-QVector<SectionSpec> buildSections() {
-    return {
-        {"project", "Project", "Case identity, file mode and working directories."},
-        {"domain", "Domain", "Spatial range, base height, clipping and coordinate controls."},
-        {"generated", "Generated", "Derived domain information written back by the pipeline."},
-        {"cfd", "CFD Controls", "Mesh, GPU allocation and core solver controls."},
-        {"output", "Output & Probes", "Output cadence, probe definitions and averaging products."},
-        {"physics", "Physics", "Coriolis, buoyancy, immersed-boundary, nudging and sponge settings."},
-        {"vk", "Turbulence inflow", "Synthetic turbulence inflow parameters."},
-        {"batch", "Batch", "Dataset/profile batch boundary-condition controls."},
-        {"custom", "Custom", "Unknown or extension fields preserved by the editor."}
-    };
+QString sanitizeDeckKey(QString key) {
+    key = key.trimmed().toLower();
+    key.replace(QRegularExpression(R"([\s\-]+)"), "_");
+    key.replace(QRegularExpression(R"(_+)"), "_");
+    while (key.startsWith('_')) {
+        key.remove(0, 1);
+    }
+    while (key.endsWith('_')) {
+        key.chop(1);
+    }
+    return key;
 }
 
-QVector<FieldSpec> buildFields() {
-    return {
-        {"casename", "Case name", "project", "Primary case identifier used by outputs.", FieldKind::String},
-        {"datetime", "Data & time", "project", "14-digit timestamp used by LUW workflows.", FieldKind::String},
+FieldKind parseFieldKind(const QString& text) {
+    const QString normalized = text.trimmed().toLower();
+    if (normalized == "integer") {
+        return FieldKind::Integer;
+    }
+    if (normalized == "float") {
+        return FieldKind::Float;
+    }
+    if (normalized == "boolean") {
+        return FieldKind::Boolean;
+    }
+    if (normalized == "enum") {
+        return FieldKind::Enum;
+    }
+    if (normalized == "float_pair") {
+        return FieldKind::FloatPair;
+    }
+    if (normalized == "float_triplet") {
+        return FieldKind::FloatTriplet;
+    }
+    if (normalized == "uint_triplet") {
+        return FieldKind::UIntTriplet;
+    }
+    if (normalized == "float_list") {
+        return FieldKind::FloatList;
+    }
+    if (normalized == "token_list") {
+        return FieldKind::TokenList;
+    }
+    if (normalized == "multiline") {
+        return FieldKind::Multiline;
+    }
+    return FieldKind::String;
+}
 
-        {"cut_lon_manual", "Longitude range", "domain", "Manual clipping range in longitude.", FieldKind::FloatPair},
-        {"cut_lat_manual", "Latitude range", "domain", "Manual clipping range in latitude.", FieldKind::FloatPair},
-        {"si_x_cfd", "X range", "domain", "Projected X range of CFD domain in meters.", FieldKind::FloatPair},
-        {"si_y_cfd", "Y range", "domain", "Projected Y range of CFD domain in meters.", FieldKind::FloatPair},
-        {"si_z_cfd", "Z range", "domain", "Projected Z range of CFD domain in meters.", FieldKind::FloatPair},
-        {"base_height", "Base height", "domain", "Ground/base slab thickness in meters.", FieldKind::Float},
-        {"z_limit", "Height limit", "domain", "Low-altitude vertical target range in meters.", FieldKind::Float},
-        {"geometry_mode", "Geometry representation", "domain", "Select whether buildings, terrain, or both are included.", FieldKind::Enum, {"0", "1", "2"}, ModeMaskLuw | ModeMaskLuwpf},
-        {"utm_crs", "UTM CRS", "domain", "Projected coordinate reference system.", FieldKind::String, {}, ModeMaskAll, true},
-        {"rotate_deg", "Rotate angle", "domain", "Rotation applied to align the CFD box.", FieldKind::Float},
-        {"x_exp_rat", "X expansion ratio", "domain", "Batch STL base expansion ratio along X.", FieldKind::Float, {}, ModeMaskLuwdg | ModeMaskLuwpf},
-        {"y_exp_rat", "Y expansion ratio", "domain", "Batch STL base expansion ratio along Y.", FieldKind::Float, {}, ModeMaskLuwdg | ModeMaskLuwpf},
+int parseModeMask(const QJsonValue& value) {
+    if (!value.isArray()) {
+        return ModeMaskAll;
+    }
 
-        {"n_gpu", "GPU split", "cfd", "Triplet of GPU partition counts.", FieldKind::UIntTriplet},
-        {"mesh_control", "Mesh control", "cfd", "Choose between GPU memory target and explicit cell size.", FieldKind::Enum, {"gpu_memory", "cell_size"}, ModeMaskAll, true},
-        {"gpu_memory", "GPU memory (MiB)", "cfd", "Target GPU memory for automatic resolution sizing.", FieldKind::Integer},
-        {"cell_size", "Cell size (m)", "cfd", "Explicit cell size in meters when mesh_control=cell_size.", FieldKind::Float},
-        {"validation", "Validation status", "cfd", "Validation flag written by prerun validation.", FieldKind::String},
-        {"high_order", "High order interpolation", "cfd", "Enable higher-order interpolation.", FieldKind::Boolean},
-        {"flux_correction", "Flux correction", "cfd", "Enable post-voxel flux correction.", FieldKind::Boolean},
-        {"downstream_open_face", "Downstream open", "cfd", "When true, apply special downstream outlet handling instead of a fixed velocity face.", FieldKind::Boolean},
-        {"run_nstep", "Run steps override", "cfd", "Force solver run length in steps.", FieldKind::Integer},
-        {"research_output", "Research output stride", "cfd", "Snapshot output cadence for research runs.", FieldKind::Integer},
+    int mask = 0;
+    const QJsonArray modes = value.toArray();
+    for (const QJsonValue& item : modes) {
+        const QString mode = item.toString().trimmed().toLower();
+        if (mode == "luw") {
+            mask |= ModeMaskLuw;
+        } else if (mode == "luwdg") {
+            mask |= ModeMaskLuwdg;
+        } else if (mode == "luwpf") {
+            mask |= ModeMaskLuwpf;
+        }
+    }
+    return mask == 0 ? ModeMaskAll : mask;
+}
 
-        {"unsteady_output", "Unsteady output stride", "output", "Write unsteady VTK every N steps.", FieldKind::Integer},
-        {"probes_output", "Probe output stride", "output", "Sampling interval for probe outputs.", FieldKind::Integer},
-        {"purge_avg", "Average purge stride", "output", "Average purge cadence.", FieldKind::Integer},
-        {"purge_avg_stride", "Average purge sub-stride", "output", "Subsampling stride for purge-avg.", FieldKind::Integer},
-        {"output_tke_ti_tls", "Averaged scalar outputs", "output", "Comma-separated subset from tke, ti, tls.", FieldKind::TokenList},
-        {"probes", "Probe definitions", "output", "Raw probe definition tokens.", FieldKind::Multiline},
+QStringList jsonStringList(const QJsonValue& value) {
+    QStringList out;
+    if (!value.isArray()) {
+        return out;
+    }
+    const QJsonArray array = value.toArray();
+    out.reserve(array.size());
+    for (const QJsonValue& item : array) {
+        out.push_back(item.toString());
+    }
+    return out;
+}
 
-        {"coriolis_term", "Coriolis term", "physics", "Enable the Coriolis source term.", FieldKind::Boolean},
-        {"buoyancy", "Buoyancy", "physics", "Enable buoyancy-driven temperature coupling.", FieldKind::Boolean},
-        {"ibm_enabler", "Immersed boundary", "physics", "Enable immersed-boundary handling.", FieldKind::Boolean},
-        {"enable_buffer_nudging", "Buffer nudging", "physics", "Enable outer-domain buffer nudging.", FieldKind::Boolean},
-        {"buffer_thickness_m", "Buffer thickness", "physics", "Nudging thickness in meters.", FieldKind::Float},
-        {"buffer_tau_s", "Buffer tau", "physics", "Nudging timescale in seconds.", FieldKind::Float},
-        {"buffer_nudge_vertical", "Vertical nudging", "physics", "Include vertical velocity in buffer nudging.", FieldKind::Boolean},
-        {"enable_top_sponge", "Top sponge layer", "physics", "Enable top sponge layer damping.", FieldKind::Boolean},
-        {"sponge_thickness_m", "Sponge thickness", "physics", "Top sponge thickness in meters.", FieldKind::Float},
-        {"sponge_tau_s", "Sponge tau", "physics", "Top sponge timescale in seconds.", FieldKind::Float},
-        {"sponge_ref_mode", "Sponge reference mode", "physics", "0/mode0 or 1/geostrophic.", FieldKind::String},
+struct SchemaData {
+    QVector<SectionSpec> sections;
+    QVector<FieldSpec> fields;
+    QHash<QString, FieldSpec> canonicalFieldMap;
+    QHash<QString, QString> keyAliasMap;
+};
 
-        {"turb_inflow_enable", "Turbulence inflow", "vk", "Enable synthetic turbulence inflow.", FieldKind::Boolean},
-        {"turb_inflow_approach", "Synthetic approach", "vk", "Select the synthetic turbulence approach.", FieldKind::Enum, {"vonkarman", "smirnov"}},
-        {"vk_inlet_ti", "Turbulence intensity", "vk", "Turbulence intensity fraction.", FieldKind::Float},
-        {"vk_inlet_sigma", "Fluctuation sigma", "vk", "Velocity fluctuation sigma in m/s.", FieldKind::Float},
-        {"vk_inlet_l", "Length scale", "vk", "Integral length scale in meters.", FieldKind::Float},
-        {"vk_inlet_nmodes", "Mode count", "vk", "Mode count.", FieldKind::Integer},
-        {"vk_inlet_seed", "Random seed", "vk", "Random seed.", FieldKind::String},
-        {"vk_inlet_update_stride", "Update stride", "vk", "Update interval in solver steps.", FieldKind::Integer},
-        {"vk_inlet_uc_mode", "Characteristic speed mode", "vk", "Characteristic speed for turbulence intensity scaling: face-normal |U.n| or mean-speed |U|.", FieldKind::Enum, {"NORMAL_COMPONENT", "NORM_MEAN"}},
-        {"vk_inlet_same_realization_all_faces", "Same realization on all faces", "vk", "Use the same random realization on every inflow face.", FieldKind::Boolean},
-        {"vk_inlet_stride_interpolation", "Stride interpolation", "vk", "Enable stride interpolation.", FieldKind::Boolean},
-        {"vk_inlet_inflow_only", "Inflow only", "vk", "Filter turbulence to inflow cells only.", FieldKind::Boolean},
-        {"vk_inlet_anisotropy", "Anisotropy", "vk", "Anisotropy scale triplet [x,y,z].", FieldKind::FloatTriplet},
+SchemaData loadSchemaData() {
+    SchemaData data;
+    const QString path = resolveRepoFilePath(detectRepoRoot(), "core/deck_schema.json");
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return data;
+    }
 
-        {"inflow", "Inflow list", "batch", "Dataset-generation inflow magnitudes in m/s.", FieldKind::FloatList, {}, ModeMaskLuwdg},
-        {"angle", "Angle list", "batch", "Batch inflow direction angles in degrees.", FieldKind::FloatList, {}, ModeMaskLuwdg | ModeMaskLuwpf},
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) {
+        return data;
+    }
 
-        {"um_vol", "Volume mean velocity", "generated", "Volume-mean uvw written by preprocessing.", FieldKind::FloatTriplet},
-        {"um_bc", "Boundary mean velocity", "generated", "Boundary mean uvw written by preprocessing.", FieldKind::FloatTriplet},
-        {"downstream_bc", "Downstream face", "generated", "Computed downstream boundary face.", FieldKind::String, {}, ModeMaskAll, true},
-        {"downstream_bc_yaw", "Downstream yaw", "generated", "Computed downstream yaw angle.", FieldKind::Float},
-        {"origin_shift_applied", "Origin shift applied", "generated", "Whether origin shift has been applied.", FieldKind::Boolean}
-    };
+    const QJsonObject root = doc.object();
+    const QJsonArray sections = root.value("sections").toArray();
+    data.sections.reserve(sections.size());
+    for (const QJsonValue& value : sections) {
+        const QJsonObject object = value.toObject();
+        SectionSpec spec;
+        spec.id = object.value("id").toString();
+        spec.title = object.value("title").toString(spec.id);
+        spec.description = object.value("description").toString();
+        spec.aliases = jsonStringList(object.value("aliases"));
+        data.sections.push_back(spec);
+    }
+
+    const QJsonArray fields = root.value("fields").toArray();
+    data.fields.reserve(fields.size());
+    for (const QJsonValue& value : fields) {
+        const QJsonObject object = value.toObject();
+        FieldSpec spec;
+        spec.key = sanitizeDeckKey(object.value("key").toString());
+        spec.label = object.value("label").toString(spec.key);
+        spec.sectionId = object.value("section").toString("custom");
+        spec.help = object.value("help").toString();
+        spec.kind = parseFieldKind(object.value("kind").toString("string"));
+        spec.enumValues = jsonStringList(object.value("enum_values"));
+        spec.aliases = jsonStringList(object.value("aliases"));
+        spec.modeMask = parseModeMask(object.value("modes"));
+        spec.quoted = object.value("quoted").toBool(false);
+        spec.readOnly = object.value("read_only").toBool(false);
+
+        data.fields.push_back(spec);
+        data.canonicalFieldMap.insert(spec.key, spec);
+        data.keyAliasMap.insert(spec.key, spec.key);
+        for (const QString& alias : spec.aliases) {
+            data.keyAliasMap.insert(sanitizeDeckKey(alias), spec.key);
+        }
+    }
+
+    return data;
+}
+
+const SchemaData& schemaData() {
+    static const SchemaData data = loadSchemaData();
+    return data;
 }
 
 } // namespace
@@ -135,28 +202,25 @@ QString defaultDeckName(RunMode mode) {
 }
 
 const QVector<SectionSpec>& sectionSpecs() {
-    static const QVector<SectionSpec> specs = buildSections();
-    return specs;
+    return schemaData().sections;
 }
 
 const QVector<FieldSpec>& fieldSpecs() {
-    static const QVector<FieldSpec> specs = buildFields();
-    return specs;
+    return schemaData().fields;
 }
 
 const QHash<QString, FieldSpec>& fieldSpecMap() {
-    static const QHash<QString, FieldSpec> map = [] {
-        QHash<QString, FieldSpec> out;
-        for (const FieldSpec& spec : fieldSpecs()) {
-            out.insert(spec.key.toLower(), spec);
-        }
-        return out;
-    }();
-    return map;
+    return schemaData().canonicalFieldMap;
+}
+
+QString normalizeDeckKey(const QString& key) {
+    const QString sanitized = sanitizeDeckKey(key);
+    return schemaData().keyAliasMap.value(sanitized, sanitized);
 }
 
 const FieldSpec* findFieldSpec(const QString& key) {
-    auto it = fieldSpecMap().constFind(key.toLower());
+    const QString canonical = normalizeDeckKey(key);
+    auto it = fieldSpecMap().constFind(canonical);
     if (it == fieldSpecMap().cend()) {
         return nullptr;
     }
@@ -176,12 +240,49 @@ QVector<FieldSpec> fieldsForSection(const QString& sectionId, RunMode mode) {
 
 QStringList knownKeys() {
     QStringList out;
-    out.reserve(fieldSpecMap().size());
-    for (auto it = fieldSpecMap().cbegin(); it != fieldSpecMap().cend(); ++it) {
-        out.push_back(it.key());
+    out.reserve(fieldSpecs().size());
+    for (const FieldSpec& spec : fieldSpecs()) {
+        out.push_back(spec.key);
     }
     out.sort();
     return out;
 }
 
+bool tryParseDeckBool(const QString& raw, bool* value) {
+    QString normalized = raw.trimmed().toLower();
+    if ((normalized.startsWith('"') && normalized.endsWith('"'))
+        || (normalized.startsWith('\'') && normalized.endsWith('\''))) {
+        normalized = normalized.mid(1, normalized.size() - 2).trimmed();
+    }
+    if (normalized.isEmpty()) {
+        return false;
+    }
+
+    static const QStringList trueTokens = {
+        "1", "true", "t", "yes", "y", "on", "enable", "enabled"
+    };
+    static const QStringList falseTokens = {
+        "0", "false", "f", "no", "n", "off", "disable", "disabled"
+    };
+
+    bool parsed = false;
+    if (trueTokens.contains(normalized)) {
+        parsed = true;
+    } else if (falseTokens.contains(normalized)) {
+        parsed = false;
+    } else {
+        bool ok = false;
+        const double numeric = normalized.toDouble(&ok);
+        if (!ok || !std::isfinite(numeric)) {
+            return false;
+        }
+        parsed = numeric != 0.0;
+    }
+
+    if (value) {
+        *value = parsed;
+    }
+    return true;
 }
+
+} // namespace luwgui

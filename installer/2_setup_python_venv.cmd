@@ -13,6 +13,7 @@ setlocal
 rem Target directory and files
 set "VENV_DIR=%LUW_HOME%\.venv"
 set "REQ_FILE=%~dp0requirements.txt"
+set "ACCEL_SCRIPT=%LUW_HOME%\core\accelerator_runtime.py"
 
 rem Ensure LUW_HOME directory exists
 if not exist "%LUW_HOME%" (
@@ -59,6 +60,13 @@ if exist "%REQ_FILE%" (
   "%VENV_DIR%\Scripts\python.exe" -m pip install -r "%REQ_FILE%"
 ) else (
   echo requirements.txt not found next to this script. Skipping dependency installation.
+)
+
+if exist "%ACCEL_SCRIPT%" (
+  echo Preparing CUDA runtime layout for the virtual environment.
+  "%VENV_DIR%\Scripts\python.exe" "%ACCEL_SCRIPT%" --prepare-cuda-runtime --json
+) else (
+  echo accelerator_runtime.py not found. Skipping CUDA runtime preparation.
 )
 
 echo Done. Virtual environment is at "%VENV_DIR%"

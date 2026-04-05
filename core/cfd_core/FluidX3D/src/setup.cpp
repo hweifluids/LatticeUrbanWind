@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_map>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -33,6 +34,150 @@
 #include "interpolation_hd.hpp"
 #include "fluxcorrection.hpp"
 extern float coriolis_f_lbmu;
+
+namespace {
+
+std::string deck_trim(std::string s) {
+    const char* ws = " \t\r\n";
+    const size_t begin = s.find_first_not_of(ws);
+    if (begin == std::string::npos) {
+        return std::string();
+    }
+    const size_t end = s.find_last_not_of(ws);
+    return s.substr(begin, end - begin + 1u);
+}
+
+std::string deck_unquote(std::string s) {
+    s = deck_trim(std::move(s));
+    if (s.size() >= 2u) {
+        const char q = s.front();
+        if ((q == '"' || q == '\'') && s.back() == q) {
+            s = deck_trim(s.substr(1u, s.size() - 2u));
+        }
+    }
+    return s;
+}
+
+size_t deck_comment_index(const std::string& line) {
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+    for (size_t i = 0u; i + 1u < line.size(); ++i) {
+        const char ch = line[i];
+        const char next = line[i + 1u];
+        if (ch == '\'' && !in_double_quote) {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if (ch == '"' && !in_single_quote) {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        if (!in_single_quote && !in_double_quote && ch == '/' && next == '/') {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+std::string deck_normalize_key(std::string key) {
+    key = deck_trim(std::move(key));
+    std::string normalized;
+    normalized.reserve(key.size());
+    bool last_was_separator = false;
+    for (unsigned char ch : key) {
+        if (ch == '-' || std::isspace(ch)) {
+            if (!normalized.empty() && !last_was_separator) {
+                normalized.push_back('_');
+            }
+            last_was_separator = true;
+            continue;
+        }
+        normalized.push_back((char)std::tolower(ch));
+        last_was_separator = false;
+    }
+    while (!normalized.empty() && normalized.front() == '_') {
+        normalized.erase(normalized.begin());
+    }
+    while (!normalized.empty() && normalized.back() == '_') {
+        normalized.pop_back();
+    }
+
+    static const std::unordered_map<std::string, std::string> aliases = {
+        {"vk_inlet_enable", "turb_inflow_enable"},
+        {"vk_inlet_anisotropy_scale", "vk_inlet_anisotropy"},
+        {"vk_inlet_aniso_scale", "vk_inlet_anisotropy"},
+    };
+    const auto alias_it = aliases.find(normalized);
+    return alias_it != aliases.end() ? alias_it->second : normalized;
+}
+
+bool deck_try_parse_bool(const std::string& raw, bool& out) {
+    std::string normalized = deck_unquote(raw);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    if (normalized.empty()) {
+        return false;
+    }
+
+    static const std::unordered_map<std::string, bool> bool_tokens = {
+        {"1", true},
+        {"true", true},
+        {"t", true},
+        {"yes", true},
+        {"y", true},
+        {"on", true},
+        {"enable", true},
+        {"enabled", true},
+        {"0", false},
+        {"false", false},
+        {"f", false},
+        {"no", false},
+        {"n", false},
+        {"off", false},
+        {"disable", false},
+        {"disabled", false},
+    };
+    const auto token_it = bool_tokens.find(normalized);
+    if (token_it != bool_tokens.end()) {
+        out = token_it->second;
+        return true;
+    }
+
+    char* endptr = nullptr;
+    const double parsed = std::strtod(normalized.c_str(), &endptr);
+    if (endptr == normalized.c_str() || *endptr != '\0' || !std::isfinite(parsed)) {
+        return false;
+    }
+    out = parsed != 0.0;
+    return true;
+}
+
+struct ParsedDeck {
+    std::unordered_map<std::string, std::string> values;
+};
+
+ParsedDeck read_deck_entries(std::istream& in) {
+    ParsedDeck deck;
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t comment = deck_comment_index(line);
+        if (comment != std::string::npos) {
+            line.erase(comment);
+        }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+
+        const std::string key = deck_normalize_key(line.substr(0u, eq));
+        if (key.empty()) {
+            continue;
+        }
+        deck.values[key] = deck_trim(line.substr(eq + 1u));
+    }
+    return deck;
+}
+
+} // namespace
 
 // ────────────── Global configuration ───────────────
 std::string caseName = "example";
@@ -2560,50 +2705,21 @@ void main_setup() {
         }
 
         else {
-            std::string line;
+            const ParsedDeck deck = read_deck_entries(fin);
             std::string mesh_control_val, gpu_memory_val, cell_size_val;
             auto parse_bool_setting = [&](const std::string& txt, bool& out) -> bool {
-                std::string v = txt;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                if (v == "true" || v == "1") {
-                    out = true;
-                    return true;
-                }
-                if (v == "false" || v == "0") {
-                    out = false;
-                    return true;
-                }
-                return false;
+                return deck_try_parse_bool(txt, out);
             };
             auto parse_boolish_setting = [&](const std::string& txt, bool& out) -> bool {
-                if (parse_bool_setting(txt, out)) {
-                    return true;
-                }
-                char* endptr = nullptr;
-                const long parsed = std::strtol(txt.c_str(), &endptr, 10);
-                if (endptr != txt.c_str() && *endptr == '\0') {
-                    out = parsed != 0;
-                    return true;
-                }
-                return false;
+                return deck_try_parse_bool(txt, out);
             };
-            while (std::getline(fin, line)) {
-                size_t cmt = line.find("//"); if (cmt != std::string::npos) line.erase(cmt);
-                size_t eq = line.find('=');  if (eq == std::string::npos) continue;
-
-                std::string key = trim(line.substr(0, eq));
-                std::string val = trim(line.substr(eq + 1));
-                std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-
+            // Deck entries are already normalized here, so handlers stay insensitive
+            // to original line order, section order, key aliases, and quoted bool tokens.
+            for (const auto& entry : deck.values) {
+                const std::string& key = entry.first;
+                const std::string& val = entry.second;
                 auto unquote = [&](std::string s) {
-                    s = trim(s);
-                    if (!s.empty()) {
-                        char q = s.front();
-                        if ((q == '"' || q == '\'') && s.size() >= 2 && s.back() == q) {
-                            s = trim(s.substr(1, s.size() - 2));
-                        }
-                    }
-                    return s;
+                    return deck_unquote(std::move(s));
                     };
 
                 if (key == "casename")        caseName = unquote(val);
@@ -2613,51 +2729,82 @@ void main_setup() {
                 }
                 else if (key == "downstream_bc") downstream_bc = unquote(val);
                 else if (key == "high_order") {
+                    bool parsed = false;
                     std::string v = unquote(val);
-                    if (v == "true" || v == "1") use_high_order = true;
+                    if (!v.empty() && parse_bool_setting(v, parsed)) use_high_order = parsed;
                 }
                 else if (key == "flux_correction") {
+                    bool parsed = false;
                     std::string v = unquote(val);
-                    if (v == "true" || v == "1") flux_correction = true;
+                    if (!v.empty() && parse_bool_setting(v, parsed)) flux_correction = parsed;
                 }
                 else if (key == "buoyancy") {
                     std::string v = unquote(val);
+                    if (v.empty()) continue;
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     buoyancy_explicit = true;
-                    if (v == "false" || v == "0") buoyancy_enabled = false;
+                    bool parsed = true;
+                    if (parse_bool_setting(v, parsed)) buoyancy_enabled = parsed;
                     else buoyancy_enabled = true; // keep default behavior for any non-false explicit value
                 }
                 else if (key == "downstream_bc_yaw") downstream_bc_yaw = unquote(val);
                 else if (key == "downstream_open_face") {
                     bool parsed = false;
-                    if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: downstream_open_face expects true/false/1/0. Keep default false.    |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_bool_setting(raw, parsed)) {
+                        println("| WARNING: downstream_open_face expects a bool-like value. Keep default false.  |");
                     }
                     else {
                         downstream_open_face = parsed;
                     }
                 }
-                else if (key == "base_height") z_si_offset = (float)atof(val.c_str());
-                else if (key == "z_limit")     z_limit_override = (float)atof(val.c_str());
-                else if (key == "memory_lbm")  memory = (uint)atoi(val.c_str());
-                else if (key == "si_x_cfd")    si_size.x = second_val(val);
-                else if (key == "si_y_cfd")    si_size.y = second_val(val);
-                else if (key == "si_z_cfd")    si_size.z = second_val(val);
+                else if (key == "base_height") {
+                    if (!unquote(val).empty()) z_si_offset = (float)atof(val.c_str());
+                }
+                else if (key == "z_limit") {
+                    if (!unquote(val).empty()) z_limit_override = (float)atof(val.c_str());
+                }
+                else if (key == "memory_lbm") {
+                    if (!unquote(val).empty()) memory = (uint)atoi(val.c_str());
+                }
+                else if (key == "si_x_cfd") {
+                    if (!unquote(val).empty()) si_size.x = second_val(val);
+                }
+                else if (key == "si_y_cfd") {
+                    if (!unquote(val).empty()) si_size.y = second_val(val);
+                }
+                else if (key == "si_z_cfd") {
+                    if (!unquote(val).empty()) si_size.z = second_val(val);
+                }
                 else if (key == "enable_buffer_nudging") {
                     bool parsed = false;
-                    if (!parse_boolish_setting(unquote(val), parsed)) {
-                        println("| WARNING: enable_buffer_nudging expects true/false/1/0. Keep current/default. |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_boolish_setting(raw, parsed)) {
+                        println("| WARNING: enable_buffer_nudging expects a bool-like value. Keep current/default.|");
                     }
                     else {
                         enable_buffer_nudging = parsed;
                     }
                 }
-                else if (key == "buffer_thickness_m") buffer_thickness_m = (float)atof(unquote(val).c_str());
-                else if (key == "buffer_tau_s") buffer_tau_s = (float)atof(unquote(val).c_str());
+                else if (key == "buffer_thickness_m") {
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) buffer_thickness_m = (float)atof(raw.c_str());
+                }
+                else if (key == "buffer_tau_s") {
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) buffer_tau_s = (float)atof(raw.c_str());
+                }
                 else if (key == "buffer_nudge_vertical") {
                     bool parsed = false;
-                    if (!parse_boolish_setting(unquote(val), parsed)) {
-                        println("| WARNING: buffer_nudge_vertical expects true/false/1/0. Keep current/default. |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_boolish_setting(raw, parsed)) {
+                        println("| WARNING: buffer_nudge_vertical expects a bool-like value. Keep current/default.|");
                     }
                     else {
                         buffer_nudge_vertical = parsed ? 1 : 0;
@@ -2665,15 +2812,24 @@ void main_setup() {
                 }
                 else if (key == "enable_top_sponge") {
                     bool parsed = false;
-                    if (!parse_boolish_setting(unquote(val), parsed)) {
-                        println("| WARNING: enable_top_sponge expects true/false/1/0. Keep current/default.     |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_boolish_setting(raw, parsed)) {
+                        println("| WARNING: enable_top_sponge expects a bool-like value. Keep current/default.   |");
                     }
                     else {
                         enable_top_sponge = parsed;
                     }
                 }
-                else if (key == "sponge_thickness_m") sponge_thickness_m = (float)atof(unquote(val).c_str());
-                else if (key == "sponge_tau_s") sponge_tau_s = (float)atof(unquote(val).c_str());
+                else if (key == "sponge_thickness_m") {
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) sponge_thickness_m = (float)atof(raw.c_str());
+                }
+                else if (key == "sponge_tau_s") {
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) sponge_tau_s = (float)atof(raw.c_str());
+                }
                 else if (key == "sponge_ref_mode") {
                     std::string raw = unquote(val);
                     std::string v = raw;
@@ -2699,97 +2855,128 @@ void main_setup() {
                 else if (key == "mesh_control") mesh_control_val = unquote(val);
                 else if (key == "gpu_memory")   gpu_memory_val = unquote(val);
                 else if (key == "cell_size")    cell_size_val = unquote(val);
-                else if (key == "n_gpu")        parse_triplet_uint(val, Dx, Dy, Dz);
-                else if (key == "research_output") research_output_steps = (uint)atoi(val.c_str());
+                else if (key == "n_gpu") {
+                    if (!unquote(val).empty()) parse_triplet_uint(val, Dx, Dy, Dz);
+                }
+                else if (key == "research_output") {
+                    if (!unquote(val).empty()) research_output_steps = (uint)atoi(val.c_str());
+                }
                 else if (key == "probes_output") {
-                    const int v = atoi(unquote(val).c_str());
-                    probes_output_defined = true;
-                    if (v > 0) probes_output_steps = (uint)v;
-                    else {
-                        probes_output_steps = 0u;
-                        println("| WARNING: probes_output must be > 0 to take effect. Fallback to legacy window.|");
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) {
+                        const int v = atoi(raw.c_str());
+                        probes_output_defined = true;
+                        if (v > 0) probes_output_steps = (uint)v;
+                        else {
+                            probes_output_steps = 0u;
+                            println("| WARNING: probes_output must be > 0 to take effect. Fallback to legacy window. |");
+                        }
                     }
                 }
                 else if (key == "unsteady_output") {
-                    const int v = atoi(unquote(val).c_str());
-                    unsteady_output_interval = v > 0 ? static_cast<uint>(v) : 0u;
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) {
+                        const int v = atoi(raw.c_str());
+                        unsteady_output_interval = v > 0 ? static_cast<uint>(v) : 0u;
+                    }
                 }
                 else if (key == "run_nstep") {
-                    const long long v = atoll(unquote(val).c_str());
-                    run_nstep_override = v > 0ll ? static_cast<ulong>(v) : 0ull;
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) {
+                        const long long v = atoll(raw.c_str());
+                        run_nstep_override = v > 0ll ? static_cast<ulong>(v) : 0ull;
+                    }
                 }
                 else if (key == "purge_avg") {
-                    const int v = atoi(val.c_str());
-                    purge_avg_steps = v > 0 ? static_cast<uint>(v) : 0u;
+                    if (!unquote(val).empty()) {
+                        const int v = atoi(val.c_str());
+                        purge_avg_steps = v > 0 ? static_cast<uint>(v) : 0u;
+                    }
                 }
                 else if (key == "purge_avg_stride") {
-                    const int v = atoi(unquote(val).c_str());
-                    if (v > 0) {
-                        purge_avg_stride = static_cast<uint>(v);
-                    }
-                    else {
-                        purge_avg_stride = 1u;
-                        println("| WARNING: purge_avg_stride must be > 0. Fallback to 1 (every step).          |");
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) {
+                        const int v = atoi(raw.c_str());
+                        if (v > 0) {
+                            purge_avg_stride = static_cast<uint>(v);
+                        }
+                        else {
+                            purge_avg_stride = 1u;
+                            println("| WARNING: purge_avg_stride must be > 0. Fallback to 1 (every step).            |");
+                        }
                     }
                 }
                 else if (key == "output_tke_ti_tls") {
                     const std::string list_text = trim(unquote(val));
-                    const size_t lb = list_text.find('[');
-                    const size_t rb = list_text.find(']', lb);
-                    if (lb == std::string::npos || rb == std::string::npos || rb <= lb) {
-                        println("| WARNING: output_tke_ti_tls expects [tke,ti,tls]. Keep default output set.   |");
+                    if (list_text.empty()) {
                     }
                     else {
-                        output_tke_in_avg_vtk = false;
-                        output_ti_in_avg_vtk = false;
-                        output_tls_in_avg_vtk = false;
-                        const std::string inside = list_text.substr(lb + 1u, rb - lb - 1u);
-                        std::stringstream ss(inside);
-                        std::string token;
-                        while (std::getline(ss, token, ',')) {
-                            std::string item = trim(token);
-                            std::transform(item.begin(), item.end(), item.begin(), ::tolower);
-                            if (item.empty()) continue;
-                            if (item == "tke") output_tke_in_avg_vtk = true;
-                            else if (item == "ti") output_ti_in_avg_vtk = true;
-                            else if (item == "tls") output_tls_in_avg_vtk = true;
-                            else println("| WARNING: output_tke_ti_tls token '" + item + "' is unknown and ignored.      |");
+                        const size_t lb = list_text.find('[');
+                        const size_t rb = list_text.find(']', lb);
+                        if (lb == std::string::npos || rb == std::string::npos || rb <= lb) {
+                            println("| WARNING: output_tke_ti_tls expects [tke,ti,tls]. Keep default output set.    |");
+                        }
+                        else {
+                            output_tke_in_avg_vtk = false;
+                            output_ti_in_avg_vtk = false;
+                            output_tls_in_avg_vtk = false;
+                            const std::string inside = list_text.substr(lb + 1u, rb - lb - 1u);
+                            std::stringstream ss(inside);
+                            std::string token;
+                            while (std::getline(ss, token, ',')) {
+                                std::string item = trim(token);
+                                std::transform(item.begin(), item.end(), item.begin(), ::tolower);
+                                if (item.empty()) continue;
+                                if (item == "tke") output_tke_in_avg_vtk = true;
+                                else if (item == "ti") output_ti_in_avg_vtk = true;
+                                else if (item == "tls") output_tls_in_avg_vtk = true;
+                                else println("| WARNING: output_tke_ti_tls token '" + item + "' is unknown and ignored.       |");
+                            }
                         }
                     }
                 }
                 else if (key == "validation") validation_status = unquote(val);
                 else if (key == "probes") {
-                    probes_defined = true;
                     probes_raw_text = trim(val);
+                    probes_defined = !probes_raw_text.empty();
                 }
                 else if (key == "coriolis_term") {
                     std::string v = unquote(val);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                    if (v == "true" || v == "1") enable_coriolis = true;
+                    bool parsed = false;
+                    if (!v.empty() && parse_bool_setting(v, parsed)) enable_coriolis = parsed;
                 }
                 else if (key == "turb_inflow_enable" || key == "vk_inlet_enable") {
                     bool parsed = false;
-                    if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: turb_inflow_enable expects true/false/1/0. Keep current/default value.|");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_bool_setting(raw, parsed)) {
+                        println("| WARNING: turb_inflow_enable expects a bool-like value. Keep current/default.  |");
                     }
                     else {
                         vk_inlet_settings.enable = parsed;
                     }
                 }
                 else if (key == "vk_inlet_ti") {
-                    vk_inlet_settings.ti = (float)atof(unquote(val).c_str());
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) vk_inlet_settings.ti = (float)atof(raw.c_str());
                 }
                 else if (key == "vk_inlet_sigma") {
-                    vk_inlet_settings.sigma_si = (float)atof(unquote(val).c_str());
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) vk_inlet_settings.sigma_si = (float)atof(raw.c_str());
                 }
                 else if (key == "vk_inlet_l") {
-                    vk_inlet_settings.L_si = (float)atof(unquote(val).c_str());
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) vk_inlet_settings.L_si = (float)atof(raw.c_str());
                 }
                 else if (key == "vk_inlet_nmodes") {
-                    vk_inlet_settings.nmodes = atoi(unquote(val).c_str());
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) vk_inlet_settings.nmodes = atoi(raw.c_str());
                 }
                 else if (key == "vk_inlet_seed") {
                     const std::string raw = unquote(val);
+                    if (raw.empty()) continue;
                     char* endptr = nullptr;
                     const unsigned long long parsed = std::strtoull(raw.c_str(), &endptr, 10);
                     if (endptr == raw.c_str()) {
@@ -2800,10 +2987,12 @@ void main_setup() {
                     }
                 }
                 else if (key == "vk_inlet_update_stride") {
-                    vk_inlet_settings.update_stride = atoi(unquote(val).c_str());
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) vk_inlet_settings.update_stride = atoi(raw.c_str());
                 }
                 else if (key == "vk_inlet_uc_mode") {
                     std::string v = unquote(val);
+                    if (v.empty()) continue;
                     std::transform(v.begin(), v.end(), v.begin(), ::toupper);
                     if (v == "NORM_MEAN") vk_inlet_settings.uc_mode = VkInletUcMode::NORM_MEAN;
                     else if (v == "NORMAL_COMPONENT") vk_inlet_settings.uc_mode = VkInletUcMode::NORMAL_COMPONENT;
@@ -2813,8 +3002,11 @@ void main_setup() {
                 }
                 else if (key == "vk_inlet_same_realization_all_faces") {
                     bool parsed = false;
-                    if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: vk_inlet_same_realization_all_faces expects true/false/1/0.         |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_bool_setting(raw, parsed)) {
+                        println("| WARNING: vk_inlet_same_realization_all_faces expects a bool-like value.       |");
                     }
                     else {
                         vk_inlet_settings.same_realization_all_faces = parsed;
@@ -2822,8 +3014,11 @@ void main_setup() {
                 }
                 else if (key == "vk_inlet_stride_interpolation") {
                     bool parsed = false;
-                    if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: vk_inlet_stride_interpolation expects true/false/1/0.               |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_bool_setting(raw, parsed)) {
+                        println("| WARNING: vk_inlet_stride_interpolation expects a bool-like value.             |");
                     }
                     else {
                         vk_inlet_settings.stride_interpolation = parsed;
@@ -2831,8 +3026,11 @@ void main_setup() {
                 }
                 else if (key == "vk_inlet_inflow_only") {
                     bool parsed = false;
-                    if (!parse_bool_setting(unquote(val), parsed)) {
-                        println("| WARNING: vk_inlet_inflow_only expects true/false/1/0.                        |");
+                    const std::string raw = unquote(val);
+                    if (raw.empty()) {
+                    }
+                    else if (!parse_bool_setting(raw, parsed)) {
+                        println("| WARNING: vk_inlet_inflow_only expects a bool-like value.                      |");
                     }
                     else {
                         vk_inlet_settings.inflow_only = parsed;
@@ -2841,6 +3039,7 @@ void main_setup() {
                 else if (key == "vk_inlet_anisotropy" ||
                          key == "vk_inlet_anisotropy_scale" ||
                          key == "vk_inlet_aniso_scale") {
+                    if (unquote(val).empty()) continue;
                     float ax = vk_inlet_settings.anisotropy_scale.x;
                     float ay = vk_inlet_settings.anisotropy_scale.y;
                     float az = vk_inlet_settings.anisotropy_scale.z;
@@ -2852,18 +3051,24 @@ void main_setup() {
                 }
 
                 else if (key == "cut_lon_manual") {
-                    parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
-                    has_cut_lon_manual = true;
+                    if (!unquote(val).empty()) {
+                        parse_pair_float(val, cut_lon_min_deg, cut_lon_max_deg);
+                        has_cut_lon_manual = true;
+                    }
                 }
                 else if (key == "cut_lat_manual") {
-                    parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
-                    has_cut_lat_manual = true;
+                    if (!unquote(val).empty()) {
+                        parse_pair_float(val, cut_lat_min_deg, cut_lat_max_deg);
+                        has_cut_lat_manual = true;
+                    }
                 }
                 else if (key == "utm_crs") {
-                    utm_crs_from_config = unquote(val);
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) utm_crs_from_config = raw;
                 }
                 else if (key == "rotate_deg") {
                     const std::string raw = unquote(val);
+                    if (raw.empty()) continue;
                     char* endptr = nullptr;
                     const double parsed = std::strtod(raw.c_str(), &endptr);
                     if (endptr != raw.c_str() && std::isfinite(parsed)) {
@@ -2871,8 +3076,12 @@ void main_setup() {
                         has_rotate_deg = true;
                     }
                 }
-                else if (key == "inflow") parse_float_list(val, inflow_list);
-                else if (key == "angle") parse_float_list(val, angle_list);
+                else if (key == "inflow") {
+                    if (!unquote(val).empty()) parse_float_list(val, inflow_list);
+                }
+                else if (key == "angle") {
+                    if (!unquote(val).empty()) parse_float_list(val, angle_list);
+                }
 
 
             }

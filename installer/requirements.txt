@@ -10,11 +10,17 @@ geopandas
 fiona
 rtree
 matplotlib
+numba
 vtk
 pyvista
 trimesh
 mapbox_earcut
 triangle
 pyopencl
+cuda-python
+nvidia-cuda-runtime
+nvidia-cuda-nvrtc
+nvidia-cuda-nvcc
+nvidia-nvvm
 rasterio
 manifold3d

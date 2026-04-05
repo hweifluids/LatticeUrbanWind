@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
@@ -26,13 +27,101 @@ namespace luwgui {
 
 namespace {
 
+QStringList splitLooseVectorTokens(QString text) {
+    text.replace('[', ' ');
+    text.replace(']', ' ');
+    return text.split(QRegularExpression(R"([,\s]+)"), Qt::SkipEmptyParts);
+}
+
+QString canonicalizeLooseVectorText(const QString& text) {
+    return splitLooseVectorTokens(text).join(", ");
+}
+
+QString formatFloatTokenForDisplay(const QString& token) {
+    bool ok = false;
+    const double value = token.trimmed().toDouble(&ok);
+    return ok ? QString::number(value, 'f', 2) : token.trimmed();
+}
+
 QString formatFloatList(const QVariantList& values) {
     QStringList parts;
     for (const QVariant& value : values) {
-        parts.push_back(QString::number(value.toDouble(), 'f', 3));
+        parts.push_back(QString::number(value.toDouble(), 'f', 2));
     }
     return parts.join(", ");
 }
+
+QString formatFloatVectorForDisplay(const QString& text) {
+    const QStringList tokens = splitLooseVectorTokens(text);
+    if (tokens.isEmpty()) {
+        return {};
+    }
+
+    QStringList displayTokens;
+    displayTokens.reserve(tokens.size());
+    for (const QString& token : tokens) {
+        displayTokens.push_back(formatFloatTokenForDisplay(token));
+    }
+    return displayTokens.join(", ");
+}
+
+QString renderBracketedListText(const QString& text) {
+    const QStringList tokens = splitLooseVectorTokens(text);
+    if (tokens.isEmpty()) {
+        return {};
+    }
+    return "[" + tokens.join(", ") + "]";
+}
+
+class PrecisionFloatListLineEdit final : public QLineEdit {
+public:
+    explicit PrecisionFloatListLineEdit(QWidget* parent = nullptr)
+        : QLineEdit(parent) {
+    }
+
+    void setRawText(const QString& rawText) {
+        fullText_ = canonicalizeLooseVectorText(rawText);
+        applyPresentation();
+    }
+
+    QString canonicalText() const {
+        if (hasFocus()) {
+            return text().trimmed();
+        }
+        return fullText_.isEmpty() ? text().trimmed() : fullText_;
+    }
+
+    QString commitVisibleText() {
+        fullText_ = canonicalizeLooseVectorText(text());
+        return fullText_;
+    }
+
+protected:
+    void focusInEvent(QFocusEvent* event) override {
+        QLineEdit::focusInEvent(event);
+        const QSignalBlocker blocker(this);
+        setText(fullText_);
+        selectAll();
+    }
+
+    void focusOutEvent(QFocusEvent* event) override {
+        fullText_ = canonicalizeLooseVectorText(text());
+        QLineEdit::focusOutEvent(event);
+        applyPresentation();
+    }
+
+private:
+    void applyPresentation() {
+        const QSignalBlocker blocker(this);
+        setText(hasFocus() ? fullText_ : formatFloatVectorForDisplay(fullText_));
+        if (!hasFocus()) {
+            deselect();
+            setCursorPosition(0);
+        }
+    }
+
+    QString fullText_;
+};
 
 QVector<QPointF> readProfileFile(const QString& filePath) {
     QFile file(filePath);
@@ -116,10 +205,10 @@ BatchBoundaryPanel::BatchBoundaryPanel(QWidget* parent)
     auto* dgInputs = new QWidget(dgBox);
     auto* dgInputsLayout = new QGridLayout(dgInputs);
     dgInputsLayout->addWidget(new QLabel("Inflow list (m/s)"), 0, 0);
-    dgInflowEdit_ = new QLineEdit(dgInputs);
+    dgInflowEdit_ = new PrecisionFloatListLineEdit(dgInputs);
     dgInputsLayout->addWidget(dgInflowEdit_, 0, 1);
     dgInputsLayout->addWidget(new QLabel("Angle list (deg)"), 1, 0);
-    dgAngleEdit_ = new QLineEdit(dgInputs);
+    dgAngleEdit_ = new PrecisionFloatListLineEdit(dgInputs);
     dgInputsLayout->addWidget(dgAngleEdit_, 1, 1);
     dgBoxLayout->addWidget(dgInputs);
     dgMatrix_ = new QTableWidget(dgBox);
@@ -136,7 +225,7 @@ BatchBoundaryPanel::BatchBoundaryPanel(QWidget* parent)
     auto* pfInputs = new QWidget(pfCasesBox);
     auto* pfInputsLayout = new QGridLayout(pfInputs);
     pfInputsLayout->addWidget(new QLabel("Angle list (deg)"), 0, 0);
-    pfAngleEdit_ = new QLineEdit(pfInputs);
+    pfAngleEdit_ = new PrecisionFloatListLineEdit(pfInputs);
     pfInputsLayout->addWidget(pfAngleEdit_, 0, 1);
     pfCasesBoxLayout->addWidget(pfInputs);
     pfCases_ = new QTableWidget(pfCasesBox);
@@ -221,8 +310,16 @@ void BatchBoundaryPanel::updateDatasetTab() {
     {
         const QSignalBlocker blockA(dgInflowEdit_);
         const QSignalBlocker blockB(dgAngleEdit_);
-        dgInflowEdit_->setText(formatFloatList(inflow));
-        dgAngleEdit_->setText(formatFloatList(angle));
+        if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(dgInflowEdit_)) {
+            edit->setRawText(document_ ? document_->rawValue("inflow") : QString());
+        } else {
+            dgInflowEdit_->setText(formatFloatList(inflow));
+        }
+        if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(dgAngleEdit_)) {
+            edit->setRawText(document_ ? document_->rawValue("angle") : QString());
+        } else {
+            dgAngleEdit_->setText(formatFloatList(angle));
+        }
     }
 
     dgMatrix_->clear();
@@ -261,7 +358,11 @@ void BatchBoundaryPanel::updateProfileTab() {
     const QVariantList angles = document_ ? document_->typedValue("angle").toList() : QVariantList{};
     {
         const QSignalBlocker blocker(pfAngleEdit_);
-        pfAngleEdit_->setText(formatFloatList(angles));
+        if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(pfAngleEdit_)) {
+            edit->setRawText(document_ ? document_->rawValue("angle") : QString());
+        } else {
+            pfAngleEdit_->setText(formatFloatList(angles));
+        }
     }
 
     pfCases_->setRowCount(angles.size());
@@ -299,15 +400,27 @@ void BatchBoundaryPanel::pushDatasetEdits() {
     if (!document_) {
         return;
     }
-    document_->setTypedValue("inflow", parseFloatListText(dgInflowEdit_->text()));
-    document_->setTypedValue("angle", parseFloatListText(dgAngleEdit_->text()));
+    if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(dgInflowEdit_)) {
+        document_->setRawValue("inflow", renderBracketedListText(edit->commitVisibleText()));
+    } else {
+        document_->setTypedValue("inflow", parseFloatListText(dgInflowEdit_->text()));
+    }
+    if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(dgAngleEdit_)) {
+        document_->setRawValue("angle", renderBracketedListText(edit->commitVisibleText()));
+    } else {
+        document_->setTypedValue("angle", parseFloatListText(dgAngleEdit_->text()));
+    }
 }
 
 void BatchBoundaryPanel::pushProfileEdits() {
     if (!document_) {
         return;
     }
-    document_->setTypedValue("angle", parseFloatListText(pfAngleEdit_->text()));
+    if (auto* edit = dynamic_cast<PrecisionFloatListLineEdit*>(pfAngleEdit_)) {
+        document_->setRawValue("angle", renderBracketedListText(edit->commitVisibleText()));
+    } else {
+        document_->setTypedValue("angle", parseFloatListText(pfAngleEdit_->text()));
+    }
 }
 
 QVariantList BatchBoundaryPanel::parseFloatListText(const QString& text) {

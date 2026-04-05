@@ -1,3 +1,4 @@
+#include "luwgui/BuildInfo.h"
 #include "luwgui/MainWindow.h"
 #include "luwgui/Preferences.h"
 #include "luwgui/RuntimePaths.h"
@@ -28,6 +29,7 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat());
     QApplication app(argc, argv);
     app.setApplicationName("LatticeUrbanWind Studio");
+    app.setApplicationVersion(QLatin1String(luwgui::buildinfo::kStudioVersion));
     app.setOrganizationName("LatticeUrbanWind");
 
     const QString repoRoot = luwgui::detectRepoRoot();
@@ -49,6 +51,7 @@ int main(int argc, char* argv[]) {
     splash.setStatusMessage(startupMessage(u8"Finalizing startup diagnostics and preparing the main workspace for display..."));
     window.show();
     splash.close();
+    window.appendStartupReport(startupCheck);
 
     if (startupCheck.hasWarnings()) {
         QTimer::singleShot(0, &window, [startupCheck, &window] {

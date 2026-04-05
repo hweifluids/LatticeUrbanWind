@@ -1033,6 +1033,7 @@ C:/1_Development/LatticeUrbanWind/gui/include/luwgui/MainWindow.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/MainWindow.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Preferences.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/ProgressPanel.h
+ mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/StartupDiagnostics.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Theme.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/VtkViewWidget.h
  mdp:C:/1_Development/LatticeUrbanWind/gui/include/luwgui/WavenumberPanel.h

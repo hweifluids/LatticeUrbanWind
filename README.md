@@ -125,23 +125,30 @@ Common configuration files:
 Example (from `project_template/conf.luw`):
 
 ```txt
+// Project
 casename = example
-cut_lon_manual=[121.3,121.7] (focus longitude range)
-cut_lat_manual=[31.1,31.4] (focus latitude range)
-datetime = 20251010120000 (should be 14 digits)
-z_limit = 500 (low-altitude focus upper range)
-base_height=50 (base layer thickness)
-midmesh_basesize=10 (Size of media mesh for bc construction)
+datetime = 20251010120000
 
-n_gpu = [2, 1, 1] (GPU counts for LBM)
-mesh_control = "gpu_memory" (select from gpu_memery and cell_size)
-gpu_memory = 20000 (in MB unit)
-cell_size = (in meter unit)
+// Domain
+cut_lon_manual = [121.3, 121.7]
+cut_lat_manual = [31.1, 31.4]
+base_height = 50
+z_limit = 500
+midmesh_basesize = 10
 
-high_order = true (interpolator order switch)
-flux_correction = true (flux correction enabler)
-coriolis_term = true (coriolis source term enabler)
+// CFD Controls
+n_gpu = [2, 1, 1]
+mesh_control = "gpu_memory"
+gpu_memory = 20000
+cell_size =
+high_order = true
+flux_correction = true
+
+// Physics
+coriolis_term = true
 ```
+
+Deck files are sectioned and order-insensitive. During parsing, common bool-like values such as `y/yes/t/true/1` and quoted variants are accepted and rewritten back to canonical `true/false`.
 
 ### 4) Run the preprocessing pipeline
 

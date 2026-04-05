@@ -6,6 +6,7 @@ set -euo pipefail
 
 VENV_DIR="$LUW_HOME/.venv"
 REQ_FILE="$LUW_HOME/installer/requirements.txt"
+ACCEL_SCRIPT="$LUW_HOME/core/accelerator_runtime.py"
 
 log() { printf '[setup-python] %s\n' "$*" >&2; }
 
@@ -61,6 +62,13 @@ log "Upgrading pip, setuptools, and wheel inside the virtual environment"
 # Install project requirements
 log "Installing requirements from $REQ_FILE"
 "$VENV_PIP" install -r "$REQ_FILE"
+
+if [[ -f "$ACCEL_SCRIPT" ]]; then
+  log "Preparing CUDA runtime layout inside the virtual environment"
+  "$VENV_PY" "$ACCEL_SCRIPT" --prepare-cuda-runtime --json
+else
+  log "accelerator_runtime.py not found; skipping CUDA runtime preparation"
+fi
 
 # Final confirmation
 log "Done. Virtual environment Python executable:"

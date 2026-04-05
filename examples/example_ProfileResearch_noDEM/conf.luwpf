@@ -1,33 +1,29 @@
+// LUW deck
+
+// Project
 casename = CaseE
 datetime = 20251222120000
 
-// Projected SI Range after rotation
+// Domain
 si_x_cfd = [0.000000, 2022.500153]
 si_y_cfd = [0.000000, 1996.500092]
 si_z_cfd = [0.000000, 270.000000]
 base_height = 20.0
 z_limit = 250
 
-x_exp_rat = 5
-y_exp_rat = 5
-
-// CFD control
+// CFD Controls
 n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
 gpu_memory = 4000
-cell_size = 
+cell_size =
 validation = pass
 high_order = true
 flux_correction = false
+
+// Physics
 coriolis_term = false
 
-// Inflow directions
-angle=[0,90,180,270]
-
-
-
-
-
-
-
-
+// Batch
+x_exp_rat = 5
+y_exp_rat = 5
+angle = [0, 90, 180, 270]

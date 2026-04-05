@@ -18,7 +18,6 @@ import numpy as np
 import trimesh
 from trimesh import boolean
 import re
-from scipy.interpolate import griddata
 from auto_UTM import get_utm_crs_from_conf_raw
 from dem_tif_to_shp import ensure_dem_shp_from_tif
 
@@ -28,6 +27,17 @@ if str(_CORE_DIR) not in sys.path:
 
 from deck_io import load_deck, parse_deck_text
 from luw_progress import ProgressEmitter
+from terr_voxel_gpu import (
+    TerrainGpuKrigingUnavailable,
+    gpu_kriging_backend_summary,
+    gpu_kriging_requires_warmup,
+    interpolate_points_kriging_cuda_chunk,
+    warmup_gpu_kriging_kernel,
+)
+from terr_voxel_config import (
+    ALLOWED_TERR_VOXEL_APPROACHES,
+    resolve_terrain_voxel_config,
+)
 
 _PROGRESS = ProgressEmitter("Generating Voxel Domain")
 
@@ -245,7 +255,612 @@ def load_dem_data(dem_shp_path: Path, work_crs):
     return points_xy, elevations
 
 
-def create_elevation_lookup_grid(base_poly, dem_points, dem_elevations, grid_resolution=10.0, elevation_scale=1.0, smooth_sigma=1.0, idw_power=2.0, idw_neighbors=12):
+def _query_neighbor_samples(dem_points: np.ndarray, query_points: np.ndarray, n_neighbors: int):
+    from scipy.spatial import cKDTree
+
+    if dem_points is None or len(dem_points) == 0:
+        raise ValueError("DEM points are required for terrain interpolation.")
+
+    k = max(1, min(int(n_neighbors), len(dem_points)))
+    tree = cKDTree(dem_points)
+    distances, indices = tree.query(query_points, k=k)
+
+    distances = np.asarray(distances, dtype=float)
+    indices = np.asarray(indices, dtype=int)
+    if distances.ndim == 1:
+        distances = distances[:, np.newaxis]
+        indices = indices[:, np.newaxis]
+    return distances, indices
+
+
+def _interpolate_points_idw(dem_elevations: np.ndarray, distances: np.ndarray, indices: np.ndarray, power: float) -> np.ndarray:
+    distances = np.maximum(np.asarray(distances, dtype=float), 1e-10)
+    weights = 1.0 / np.power(distances, float(power))
+    weights_sum = weights.sum(axis=1, keepdims=True)
+    weights_sum = np.where(weights_sum <= 0.0, 1.0, weights_sum)
+    weights = weights / weights_sum
+    return np.sum(weights * dem_elevations[indices], axis=1)
+
+
+def _estimate_kriging_model(dem_points: np.ndarray, dem_elevations: np.ndarray, neighbor_distances: np.ndarray) -> tuple[float, float, float]:
+    total_sill = float(np.var(dem_elevations))
+    if (not math.isfinite(total_sill)) or total_sill <= 1e-12:
+        elev_span = float(np.ptp(dem_elevations)) if len(dem_elevations) > 0 else 0.0
+        total_sill = max((elev_span * 0.25) ** 2, 1.0)
+
+    positive = np.asarray(neighbor_distances, dtype=float)
+    positive = positive[np.isfinite(positive) & (positive > 0.0)]
+    if positive.size > 0:
+        range_param = float(np.median(positive) * 3.0)
+    else:
+        span_x = float(np.ptp(dem_points[:, 0])) if len(dem_points) > 0 else 0.0
+        span_y = float(np.ptp(dem_points[:, 1])) if len(dem_points) > 0 else 0.0
+        range_param = math.hypot(span_x, span_y) / 6.0
+    range_param = max(range_param, 1.0)
+
+    nugget = max(total_sill * 0.02, 1e-9)
+    partial_sill = max(total_sill - nugget, 1e-9)
+    return range_param, partial_sill, nugget
+
+
+def _exponential_variogram(distances: np.ndarray, range_param: float, partial_sill: float, nugget: float) -> np.ndarray:
+    distances = np.asarray(distances, dtype=float)
+    gamma = partial_sill * (1.0 - np.exp(-np.maximum(distances, 0.0) / float(range_param)))
+    return gamma + np.where(distances > 0.0, float(nugget), 0.0)
+
+
+def _estimate_kriging_chunk_size(n_neighbors: int, *, target_bytes: int = 128 * 1024 * 1024) -> int:
+    neighbors = max(1, int(n_neighbors))
+    approx_bytes_per_query = 8 * (
+        (neighbors * 2)          # local points
+        + neighbors              # local elevations
+        + neighbors              # local distances
+        + (neighbors * neighbors) * 2
+        + ((neighbors + 1) * (neighbors + 1))
+        + (neighbors + 1)
+        + 32
+    )
+    chunk = max(256, int(target_bytes // max(approx_bytes_per_query, 1)))
+    return max(256, chunk)
+
+
+def _estimate_kriging_gpu_chunk_size(n_neighbors: int, *, target_bytes: int = 512 * 1024 * 1024) -> int:
+    neighbors = max(1, int(n_neighbors))
+    approx_bytes_per_query = 4 * (
+        (neighbors * 2)
+        + neighbors
+        + neighbors
+        + 24
+    )
+    chunk = max(8192, int(target_bytes // max(approx_bytes_per_query, 1)))
+    return max(8192, chunk)
+
+
+def _estimate_idw_chunk_size(n_neighbors: int, *, target_bytes: int = 128 * 1024 * 1024) -> int:
+    neighbors = max(1, int(n_neighbors))
+    approx_bytes_per_query = 8 * (
+        neighbors          # distances
+        + neighbors        # weights
+        + neighbors        # sampled elevations
+        + 12
+    )
+    chunk = max(512, int(target_bytes // max(approx_bytes_per_query, 1)))
+    return max(512, chunk)
+
+
+def _emit_interpolation_progress(
+    stage: str | None,
+    label: str | None,
+    surface_name: str,
+    approach: str,
+    current: int,
+    total: int,
+    *,
+    force: bool = False,
+) -> None:
+    if not stage or not _PROGRESS.enabled:
+        return
+
+    if approach == "kriging_gpu":
+        method_label = "ordinary kriging (GPU)"
+    elif approach == "kriging":
+        method_label = "ordinary kriging"
+    else:
+        method_label = "IDW"
+    total = max(total, 1)
+    _PROGRESS.progress(
+        stage,
+        current,
+        total,
+        f"Interpolating {surface_name} with {method_label} ({current}/{total} chunks)",
+        label=label,
+        force=force,
+    )
+
+
+def _interpolate_points_idw_chunked(
+    dem_points: np.ndarray,
+    dem_elevations: np.ndarray,
+    query_points: np.ndarray,
+    *,
+    n_neighbors: int,
+    power: float,
+    progress_stage: str | None = None,
+    progress_label: str | None = None,
+    surface_name: str = "surface",
+) -> np.ndarray:
+    predictions = np.empty(len(query_points), dtype=float)
+    if len(query_points) == 0:
+        return predictions
+
+    chunk_size = min(len(query_points), _estimate_idw_chunk_size(n_neighbors))
+    total_chunks = max(1, math.ceil(len(query_points) / max(chunk_size, 1)))
+    _emit_interpolation_progress(
+        progress_stage,
+        progress_label,
+        surface_name,
+        "idw",
+        0,
+        total_chunks,
+        force=True,
+    )
+
+    for chunk_index, start in enumerate(range(0, len(query_points), chunk_size), start=1):
+        stop = min(len(query_points), start + chunk_size)
+        distances, indices = _query_neighbor_samples(dem_points, query_points[start:stop], n_neighbors)
+        predictions[start:stop] = _interpolate_points_idw(dem_elevations, distances, indices, power)
+        _emit_interpolation_progress(
+            progress_stage,
+            progress_label,
+            surface_name,
+            "idw",
+            chunk_index,
+            total_chunks,
+            force=chunk_index == total_chunks,
+        )
+
+    return predictions
+
+
+def _interpolate_points_kriging_rowwise(
+    local_points: np.ndarray,
+    local_elevations: np.ndarray,
+    local_distances: np.ndarray,
+    *,
+    range_param: float,
+    partial_sill: float,
+    nugget: float,
+    fallback_power: float,
+) -> np.ndarray:
+    from scipy.spatial.distance import cdist
+
+    predictions = np.empty(local_points.shape[0], dtype=float)
+    for row_index in range(local_points.shape[0]):
+        row_points = local_points[row_index]
+        row_elevations = local_elevations[row_index]
+        row_distances = np.asarray(local_distances[row_index], dtype=float)
+
+        exact_hits = np.where(row_distances <= 1e-10)[0]
+        if exact_hits.size > 0:
+            predictions[row_index] = float(row_elevations[exact_hits[0]])
+            continue
+
+        if row_points.shape[0] == 1 or np.allclose(row_elevations, row_elevations[0]):
+            predictions[row_index] = float(row_elevations[0])
+            continue
+
+        variogram_matrix = _exponential_variogram(
+            cdist(row_points, row_points),
+            range_param,
+            partial_sill,
+            nugget,
+        )
+        np.fill_diagonal(variogram_matrix, 0.0)
+
+        system_size = row_points.shape[0] + 1
+        system = np.empty((system_size, system_size), dtype=float)
+        system[:-1, :-1] = variogram_matrix
+        system[:-1, -1] = 1.0
+        system[-1, :-1] = 1.0
+        system[-1, -1] = 0.0
+
+        rhs = np.empty((system_size, 1), dtype=float)
+        rhs[:-1, 0] = _exponential_variogram(row_distances, range_param, partial_sill, nugget)
+        rhs[-1, 0] = 1.0
+
+        regularization = max(float(nugget) * 1e-6, 1e-10)
+        diag = np.arange(row_points.shape[0])
+        system[diag, diag] += regularization
+
+        try:
+            weights = np.linalg.solve(system, rhs)[:-1, 0]
+        except np.linalg.LinAlgError:
+            weights = np.linalg.lstsq(system, rhs, rcond=None)[0][:-1, 0]
+
+        prediction = float(np.dot(weights, row_elevations))
+        if not math.isfinite(prediction):
+            prediction = float(
+                _interpolate_points_idw(
+                    row_elevations,
+                    row_distances[np.newaxis, :],
+                    np.arange(row_points.shape[0], dtype=int)[np.newaxis, :],
+                    fallback_power,
+                )[0]
+            )
+        local_min = float(np.min(row_elevations))
+        local_max = float(np.max(row_elevations))
+        predictions[row_index] = min(max(prediction, local_min), local_max)
+
+    return predictions
+
+
+def _interpolate_points_kriging_chunk(
+    dem_points: np.ndarray,
+    dem_elevations: np.ndarray,
+    distances: np.ndarray,
+    indices: np.ndarray,
+    *,
+    range_param: float,
+    partial_sill: float,
+    nugget: float,
+    fallback_power: float,
+) -> np.ndarray:
+    local_points = dem_points[indices]
+    local_elevations = dem_elevations[indices]
+    local_distances = np.asarray(distances, dtype=float)
+    query_count, neighbor_count = local_distances.shape
+
+    predictions = np.empty(query_count, dtype=float)
+    if query_count == 0:
+        return predictions
+
+    exact_mask = np.any(local_distances <= 1e-10, axis=1)
+    if np.any(exact_mask):
+        exact_indices = np.argmax(local_distances <= 1e-10, axis=1)
+        rows = np.nonzero(exact_mask)[0]
+        predictions[rows] = local_elevations[rows, exact_indices[rows]]
+
+    constant_mask = ~exact_mask & (
+        (neighbor_count == 1) | (np.ptp(local_elevations, axis=1) <= 1e-12)
+    )
+    if np.any(constant_mask):
+        rows = np.nonzero(constant_mask)[0]
+        predictions[rows] = local_elevations[rows, 0]
+
+    solve_mask = ~(exact_mask | constant_mask)
+    if not np.any(solve_mask):
+        return predictions
+
+    pts = local_points[solve_mask]
+    elev = local_elevations[solve_mask]
+    dist = local_distances[solve_mask]
+    active_count = pts.shape[0]
+
+    try:
+        deltas = pts[:, :, None, :] - pts[:, None, :, :]
+        pairwise_distances = np.sqrt(np.sum(deltas * deltas, axis=-1))
+        variogram_matrix = _exponential_variogram(
+            pairwise_distances,
+            range_param,
+            partial_sill,
+            nugget,
+        )
+        diag = np.arange(neighbor_count)
+        variogram_matrix[:, diag, diag] = 0.0
+
+        system = np.empty((active_count, neighbor_count + 1, neighbor_count + 1), dtype=float)
+        system[:, :-1, :-1] = variogram_matrix
+        system[:, :-1, -1] = 1.0
+        system[:, -1, :-1] = 1.0
+        system[:, -1, -1] = 0.0
+
+        regularization = max(float(nugget) * 1e-6, 1e-10)
+        system[:, diag, diag] += regularization
+
+        rhs = np.empty((active_count, neighbor_count + 1, 1), dtype=float)
+        rhs[:, :-1, 0] = _exponential_variogram(dist, range_param, partial_sill, nugget)
+        rhs[:, -1, 0] = 1.0
+
+        weights = np.linalg.solve(system, rhs)[:, :-1, 0]
+        active_predictions = np.sum(weights * elev, axis=1)
+    except np.linalg.LinAlgError:
+        active_predictions = _interpolate_points_kriging_rowwise(
+            pts,
+            elev,
+            dist,
+            range_param=range_param,
+            partial_sill=partial_sill,
+            nugget=nugget,
+            fallback_power=fallback_power,
+        )
+    else:
+        invalid_mask = ~np.isfinite(active_predictions)
+        if np.any(invalid_mask):
+            fallback_predictions = _interpolate_points_idw(
+                elev[invalid_mask],
+                dist[invalid_mask],
+                np.tile(np.arange(neighbor_count, dtype=int), (int(np.count_nonzero(invalid_mask)), 1)),
+                fallback_power,
+            )
+            active_predictions[invalid_mask] = fallback_predictions
+
+        local_min = np.min(elev, axis=1)
+        local_max = np.max(elev, axis=1)
+        active_predictions = np.clip(active_predictions, local_min, local_max)
+
+    predictions[np.nonzero(solve_mask)[0]] = active_predictions
+    return predictions
+
+
+def _interpolate_points_kriging(
+    dem_points: np.ndarray,
+    dem_elevations: np.ndarray,
+    query_points: np.ndarray,
+    *,
+    n_neighbors: int,
+    fallback_power: float,
+    progress_stage: str | None = None,
+    progress_label: str | None = None,
+    surface_name: str = "surface",
+) -> np.ndarray:
+    if progress_stage and _PROGRESS.enabled:
+        _PROGRESS.stage(
+            progress_stage,
+            f"Finding neighboring DEM points for {surface_name}",
+            label=progress_label,
+        )
+    distances, indices = _query_neighbor_samples(dem_points, query_points, n_neighbors)
+    range_param, partial_sill, nugget = _estimate_kriging_model(dem_points, dem_elevations, distances)
+    predictions = np.empty(len(query_points), dtype=float)
+    chunk_size = min(len(query_points), _estimate_kriging_chunk_size(int(indices.shape[1])))
+    if chunk_size <= 0:
+        return predictions
+
+    total_chunks = max(1, math.ceil(len(query_points) / max(chunk_size, 1)))
+    _emit_interpolation_progress(
+        progress_stage,
+        progress_label,
+        surface_name,
+        "kriging",
+        0,
+        total_chunks,
+        force=True,
+    )
+
+    for chunk_index, start in enumerate(range(0, len(query_points), chunk_size), start=1):
+        stop = min(len(query_points), start + chunk_size)
+        predictions[start:stop] = _interpolate_points_kriging_chunk(
+            dem_points,
+            dem_elevations,
+            distances[start:stop],
+            indices[start:stop],
+            range_param=range_param,
+            partial_sill=partial_sill,
+            nugget=nugget,
+            fallback_power=fallback_power,
+        )
+        _emit_interpolation_progress(
+            progress_stage,
+            progress_label,
+            surface_name,
+            "kriging",
+            chunk_index,
+            total_chunks,
+            force=chunk_index == total_chunks,
+        )
+
+    return predictions
+
+
+def _interpolate_points_kriging_gpu(
+    dem_points: np.ndarray,
+    dem_elevations: np.ndarray,
+    query_points: np.ndarray,
+    *,
+    n_neighbors: int,
+    fallback_power: float,
+    progress_stage: str | None = None,
+    progress_label: str | None = None,
+    surface_name: str = "surface",
+) -> np.ndarray:
+    if progress_stage and _PROGRESS.enabled:
+        _PROGRESS.stage(
+            progress_stage,
+            f"Finding neighboring DEM points for {surface_name}",
+            label=progress_label,
+        )
+    distances, indices = _query_neighbor_samples(dem_points, query_points, n_neighbors)
+    range_param, partial_sill, nugget = _estimate_kriging_model(dem_points, dem_elevations, distances)
+    predictions = np.empty(len(query_points), dtype=float)
+    chunk_size = min(len(query_points), _estimate_kriging_gpu_chunk_size(int(indices.shape[1])))
+    if chunk_size <= 0:
+        return predictions
+
+    warmup_needed = gpu_kriging_requires_warmup()
+    if warmup_needed:
+        print("[INFO] CUDA kriging kernel is compiling for first use. This one-time warmup may take a little longer.")
+        if progress_stage and _PROGRESS.enabled:
+            _PROGRESS.stage(
+                progress_stage,
+                f"Compiling GPU kriging kernel for {surface_name} (first use)",
+                label=progress_label,
+            )
+        warmup_gpu_kriging_kernel(int(indices.shape[1]))
+        print("[INFO] CUDA kriging kernel warmup finished. Continuing with GPU interpolation.")
+
+    total_chunks = max(1, math.ceil(len(query_points) / max(chunk_size, 1)))
+    _emit_interpolation_progress(
+        progress_stage,
+        progress_label,
+        surface_name,
+        "kriging_gpu",
+        0,
+        total_chunks,
+        force=True,
+    )
+
+    for chunk_index, start in enumerate(range(0, len(query_points), chunk_size), start=1):
+        stop = min(len(query_points), start + chunk_size)
+        local_points = dem_points[indices[start:stop]]
+        local_elevations = dem_elevations[indices[start:stop]]
+        predictions[start:stop] = interpolate_points_kriging_cuda_chunk(
+            local_points,
+            local_elevations,
+            distances[start:stop],
+            range_param=range_param,
+            partial_sill=partial_sill,
+            nugget=nugget,
+            fallback_power=fallback_power,
+        )
+        _emit_interpolation_progress(
+            progress_stage,
+            progress_label,
+            surface_name,
+            "kriging_gpu",
+            chunk_index,
+            total_chunks,
+            force=chunk_index == total_chunks,
+        )
+
+    return predictions
+
+
+def _create_interpolated_surface(
+    base_poly,
+    dem_points,
+    dem_elevations,
+    *,
+    grid_resolution: float,
+    elevation_scale: float,
+    smooth_sigma: float,
+    smooth_sigma_factor: float,
+    approach: str,
+    idw_power: float,
+    idw_neighbors: int,
+    surface_name: str,
+    progress_stage: str | None = None,
+    progress_label: str | None = None,
+):
+    if dem_points is None or dem_elevations is None:
+        return None, None, None
+
+    print(f"[INFO] Creating {surface_name} grid (resolution: {grid_resolution}m, approach: {approach})...")
+
+    minx, miny, maxx, maxy = base_poly.bounds
+    nx = int((maxx - minx) / grid_resolution) + 1
+    ny = int((maxy - miny) / grid_resolution) + 1
+
+    x = np.linspace(minx, maxx, nx)
+    y = np.linspace(miny, maxy, ny)
+    X, Y = np.meshgrid(x, y)
+    query_points = np.column_stack([X.ravel(), Y.ravel()])
+
+    if approach == "kriging_gpu":
+        backend = gpu_kriging_backend_summary()
+        runtime_root = backend.get("runtime_root") or backend.get("cuda_home") or "auto"
+        print(
+            f"[INFO] Interpolating {surface_name} using GPU-accelerated ordinary kriging "
+            f"with {idw_neighbors} neighboring points..."
+        )
+        print(f"[INFO] CUDA runtime root: {runtime_root}")
+        try:
+            Z = _interpolate_points_kriging_gpu(
+                dem_points,
+                dem_elevations,
+                query_points,
+                n_neighbors=idw_neighbors,
+                fallback_power=idw_power,
+                progress_stage=progress_stage,
+                progress_label=progress_label,
+                surface_name=surface_name,
+            )
+        except TerrainGpuKrigingUnavailable as exc:
+            print(f"[WARN] GPU kriging is unavailable for {surface_name}: {exc}")
+            print(f"[WARN] Falling back to CPU kriging for {surface_name}.")
+            Z = _interpolate_points_kriging(
+                dem_points,
+                dem_elevations,
+                query_points,
+                n_neighbors=idw_neighbors,
+                fallback_power=idw_power,
+                progress_stage=progress_stage,
+                progress_label=progress_label,
+                surface_name=surface_name,
+            )
+    elif approach == "kriging":
+        if len(query_points) > 50000:
+            print(f"[WARN] Kriging over {len(query_points)} grid points may take noticeably longer than IDW.")
+        print(f"[INFO] Interpolating {surface_name} using local ordinary kriging with {idw_neighbors} neighboring points...")
+        Z = _interpolate_points_kriging(
+            dem_points,
+            dem_elevations,
+            query_points,
+            n_neighbors=idw_neighbors,
+            fallback_power=idw_power,
+            progress_stage=progress_stage,
+            progress_label=progress_label,
+            surface_name=surface_name,
+        )
+    else:
+        print(f"[INFO] Interpolating {surface_name} using Inverse Distance Weighting (IDW) with {idw_neighbors} neighboring points...")
+        if progress_stage and _PROGRESS.enabled:
+            Z = _interpolate_points_idw_chunked(
+                dem_points,
+                dem_elevations,
+                query_points,
+                n_neighbors=idw_neighbors,
+                power=idw_power,
+                progress_stage=progress_stage,
+                progress_label=progress_label,
+                surface_name=surface_name,
+            )
+        else:
+            distances, indices = _query_neighbor_samples(dem_points, query_points, idw_neighbors)
+            Z = _interpolate_points_idw(dem_elevations, distances, indices, idw_power)
+
+    Z = Z.reshape(ny, nx)
+
+    applied_sigma = float(smooth_sigma) * float(smooth_sigma_factor)
+    if applied_sigma > 0.0:
+        from scipy.ndimage import gaussian_filter
+
+        if progress_stage and _PROGRESS.enabled:
+            _PROGRESS.stage(
+                progress_stage,
+                f"Smoothing {surface_name} (sigma={applied_sigma:.2f})",
+                label=progress_label,
+            )
+        print(f"[INFO] Applying Gaussian smoothing to {surface_name} (sigma={applied_sigma:.2f})...")
+        Z = gaussian_filter(Z, sigma=applied_sigma)
+    else:
+        print(f"[INFO] Smoothing disabled for {surface_name}")
+
+    if Z.min() < 0:
+        print(f"[WARN] {surface_name.capitalize()} contains negative values (min={Z.min():.2f}m), clipping to 0")
+        Z = np.maximum(Z, 0.0)
+
+    z_min_grid = float(Z.min())
+    if abs(z_min_grid) > 1e-9:
+        print(f"[INFO] Normalizing {surface_name} to local datum (grid min -> 0). Offset removed: {z_min_grid:.3f}m")
+        Z = Z - z_min_grid
+        if Z.min() < 0:
+            Z = np.maximum(Z, 0.0)
+
+    if elevation_scale != 1.0:
+        print(f"[INFO] Applying elevation scale factor to {surface_name}: {elevation_scale}x")
+        Z = Z * elevation_scale
+
+    print(f"[INFO] {surface_name.capitalize()} elevation range: {Z.min():.2f} to {Z.max():.2f} meters")
+    if progress_stage and _PROGRESS.enabled:
+        _PROGRESS.complete(
+            progress_stage,
+            f"{surface_name.capitalize()} ready",
+            label=progress_label,
+        )
+    return X, Y, Z
+
+
+def create_elevation_lookup_grid(base_poly, dem_points, dem_elevations, grid_resolution=10.0, elevation_scale=1.0, smooth_sigma=1.0, approach="idw", idw_power=2.0, idw_neighbors=12):
     """
     Create a fast lookup grid for elevation queries.
     This is much faster than calling griddata() for each building.
@@ -259,6 +874,7 @@ def create_elevation_lookup_grid(base_poly, dem_points, dem_elevations, grid_res
         grid_resolution: Grid spacing in meters (smaller = more accurate but slower)
         elevation_scale: Scale factor for elevation differences
         smooth_sigma: Gaussian smoothing strength
+        approach: Terrain interpolation approach ("idw", "kriging_gpu", or "kriging")
         idw_power: IDW power parameter
         idw_neighbors: Number of nearest neighbors for IDW
 
@@ -268,71 +884,27 @@ def create_elevation_lookup_grid(base_poly, dem_points, dem_elevations, grid_res
     if dem_points is None or dem_elevations is None:
         return None, None, None
 
-    print(f"[INFO] Creating elevation lookup grid (resolution: {grid_resolution}m)...")
+    X, Y, Z = _create_interpolated_surface(
+        base_poly,
+        dem_points,
+        dem_elevations,
+        grid_resolution=grid_resolution,
+        elevation_scale=elevation_scale,
+        smooth_sigma=smooth_sigma,
+        smooth_sigma_factor=0.5,
+        approach=approach,
+        idw_power=idw_power,
+        idw_neighbors=idw_neighbors,
+        surface_name="elevation lookup",
+        progress_stage="terrain_lookup",
+        progress_label="Preparing terrain lookup",
+    )
+    if X is None or Y is None or Z is None:
+        return None, None, None
 
-    # Get bounds
-    minx, miny, maxx, maxy = base_poly.bounds
-
-    # Create grid
-    nx = int((maxx - minx) / grid_resolution) + 1
-    ny = int((maxy - miny) / grid_resolution) + 1
-
-    x = np.linspace(minx, maxx, nx)
-    y = np.linspace(miny, maxy, ny)
-    X, Y = np.meshgrid(x, y)
-
-    # Interpolate elevations on grid using IDW (do this once!)
-    points_grid = np.column_stack([X.ravel(), Y.ravel()])
-
-    from scipy.spatial import cKDTree
-
-    # Build KD-tree for fast nearest neighbor search
-    tree = cKDTree(dem_points)
-
-    # IDW parameters
-    power = idw_power
-    n_neighbors = idw_neighbors
-
-    # Query nearest neighbors
-    distances, indices = tree.query(points_grid, k=n_neighbors)
-    distances = np.maximum(distances, 1e-10)
-
-    # Calculate IDW weights
-    weights = 1.0 / (distances ** power)
-    weights_sum = weights.sum(axis=1, keepdims=True)
-    weights_normalized = weights / weights_sum
-
-    # Interpolate elevations
-    Z = np.sum(weights_normalized * dem_elevations[indices], axis=1)
-
-    Z = Z.reshape(ny, nx)
-
-    # Apply Gaussian smoothing (lighter than terrain mesh)
-    if smooth_sigma > 0:
-        from scipy.ndimage import gaussian_filter
-        Z = gaussian_filter(Z, sigma=smooth_sigma * 0.5)  # Half the terrain smoothing
-
-    # Ensure minimum is at least 0 (in case smoothing created negative values)
-    if Z.min() < 0:
-        Z = np.maximum(Z, 0.0)
-
-    # Normalize to local datum (minimum within the CFD domain grid = 0).
-    # This matches core/bridge_core/1_buildBC.py behavior and avoids a constant offset
-    # when DEM points include an expanded area outside the CFD bounds or when smoothing
-    # lifts the minimum above 0.
-    z_min_grid = float(Z.min())
-    if abs(z_min_grid) > 1e-9:
-        Z = Z - z_min_grid
-        # Numerical safety
-        if Z.min() < 0:
-            Z = np.maximum(Z, 0.0)
-
-    # Apply elevation scale
-    if elevation_scale != 1.0:
-        Z = Z * elevation_scale
-
-    print(f"[INFO] Elevation lookup grid created: {nx} x {ny} = {nx*ny} points")
-    print(f"[INFO] Lookup grid elevation range: {Z.min():.2f} to {Z.max():.2f} meters")
+    nx = X.shape[1]
+    ny = X.shape[0]
+    print(f"[INFO] Elevation lookup grid created: {nx} x {ny} = {nx * ny} points")
 
     return X, Y, Z
 
@@ -396,7 +968,7 @@ def interpolate_elevation_fast(x, y, X_grid, Y_grid, Z_grid):
         return 0.0
 
 
-def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_resolution=50, elevation_scale=1.0, smooth_sigma=1.0, idw_power=2.0, idw_neighbors=12, base_height=50.0, proj_temp: Path = Path("./proj_temp")) -> trimesh.Trimesh:
+def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_resolution=50, elevation_scale=1.0, smooth_sigma=1.0, approach="idw", idw_power=2.0, idw_neighbors=12, base_height=50.0, proj_temp: Path = Path("./proj_temp")) -> trimesh.Trimesh:
     """
     Create a terrain mesh from DEM data within the base polygon.
     The terrain sits on top of the base layer (at z=base_height).
@@ -410,6 +982,7 @@ def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_res
         grid_resolution: Grid spacing in meters
         elevation_scale: Scale factor for elevation differences (for visualization)
         smooth_sigma: Gaussian smoothing strength (0=no smoothing)
+        approach: Terrain interpolation approach ("idw", "kriging_gpu", or "kriging")
         idw_power: IDW power parameter
         idw_neighbors: Number of nearest neighbors for IDW
         base_height: Height of base layer (terrain starts from this height)
@@ -421,87 +994,26 @@ def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_res
         print("[INFO] No DEM data, creating flat base")
         return None
 
-    print(f"[INFO] Creating terrain mesh with resolution {grid_resolution}m")
+    X, Y, Z = _create_interpolated_surface(
+        base_poly,
+        dem_points,
+        dem_elevations,
+        grid_resolution=grid_resolution,
+        elevation_scale=elevation_scale,
+        smooth_sigma=smooth_sigma,
+        smooth_sigma_factor=1.0,
+        approach=approach,
+        idw_power=idw_power,
+        idw_neighbors=idw_neighbors,
+        surface_name="terrain mesh",
+        progress_stage="terrain_mesh",
+        progress_label="Creating terrain mesh",
+    )
+    if X is None or Y is None or Z is None:
+        return None
 
-    # Get bounds of base polygon
-    minx, miny, maxx, maxy = base_poly.bounds
-
-    # Create grid
-    nx = int((maxx - minx) / grid_resolution) + 1
-    ny = int((maxy - miny) / grid_resolution) + 1
-
+    ny, nx = Z.shape
     print(f"[INFO] Grid size: {nx} x {ny} = {nx*ny} points")
-
-    x = np.linspace(minx, maxx, nx)
-    y = np.linspace(miny, maxy, ny)
-    X, Y = np.meshgrid(x, y)
-
-    # Interpolate elevations on grid
-    points_grid = np.column_stack([X.ravel(), Y.ravel()])
-
-    # Use Inverse Distance Weighting (IDW) interpolation
-    # IDW is more stable and doesn't extrapolate beyond data range
-    print("[INFO] Interpolating elevations using Inverse Distance Weighting (IDW)...")
-
-    from scipy.spatial import cKDTree
-
-    # Build KD-tree for fast nearest neighbor search
-    tree = cKDTree(dem_points)
-
-    # IDW parameters
-    power = idw_power  # Power parameter (higher = more weight to closer points)
-    n_neighbors = idw_neighbors  # Number of nearest neighbors to use
-
-    # Query nearest neighbors for all grid points
-    distances, indices = tree.query(points_grid, k=n_neighbors)
-
-    # Avoid division by zero for points exactly on DEM points
-    distances = np.maximum(distances, 1e-10)
-
-    # Calculate IDW weights
-    weights = 1.0 / (distances ** power)
-    weights_sum = weights.sum(axis=1, keepdims=True)
-    weights_normalized = weights / weights_sum
-
-    # Interpolate elevations
-    Z = np.sum(weights_normalized * dem_elevations[indices], axis=1)
-
-    print(f"[INFO] IDW interpolation complete using {n_neighbors} nearest neighbors")
-
-    Z = Z.reshape(ny, nx)
-
-    # Apply Gaussian smoothing for even smoother terrain
-    if smooth_sigma > 0:
-        print(f"[INFO] Applying Gaussian smoothing (sigma={smooth_sigma:.1f}) for terrain smoothness...")
-        from scipy.ndimage import gaussian_filter
-        Z = gaussian_filter(Z, sigma=smooth_sigma)
-    else:
-        print("[INFO] Smoothing disabled (sigma=0)")
-
-    print(f"[INFO] Interpolated elevation range: {Z.min():.2f} to {Z.max():.2f} meters")
-
-    # Ensure minimum is at least 0 (in case smoothing created negative values)
-    if Z.min() < 0:
-        print(f"[WARN] Smoothing created negative values (min={Z.min():.2f}m), clipping to 0")
-        Z = np.maximum(Z, 0.0)
-
-    # Normalize to local datum (minimum within the CFD domain grid = 0).
-    # This matches core/bridge_core/1_buildBC.py behavior and avoids a constant offset
-    # when DEM points include an expanded bbox outside the CFD bounds or when smoothing
-    # lifts the minimum above 0.
-    z_min_grid = float(Z.min())
-    if abs(z_min_grid) > 1e-9:
-        print(f"[INFO] Normalizing terrain to local datum (grid min -> 0). Offset removed: {z_min_grid:.3f}m")
-        Z = Z - z_min_grid
-        if Z.min() < 0:
-            Z = np.maximum(Z, 0.0)
-
-    # Apply elevation scale (for visualization/testing)
-    if elevation_scale != 1.0:
-        print(f"[INFO] Applying elevation scale factor: {elevation_scale}x")
-        Z = Z * elevation_scale
-
-    print(f"[INFO] Final terrain elevation range: {Z.min():.2f} to {Z.max():.2f} meters")
 
     # Export interpolated DEM to CSV
     csv_path = proj_temp / "interpolated_dem.csv"
@@ -730,14 +1242,16 @@ def main():
     )
     parser.add_argument(
         "--height-field",
-        default="auto",
-        help="height field in shapefile, or 'auto' to detect (Height, Elevation, etc.). Default 'auto'"
+        default=None,
+        help="height field in shapefile, or 'Inferred' (legacy 'auto') to detect (Height, Elevation, etc.). "
+             "If omitted, deck key terr_voxel_height_field is used before falling back to 'Inferred'."
     )
     parser.add_argument(
         "--min-height",
         type=float,
-        default=0.0,
-        help="minimum valid height in meters. Buildings with height less than this will be ignored. Default 0.0"
+        default=None,
+        help="minimum valid height in meters. Buildings with height less than or equal to this will be ignored. "
+             "If omitted, deck key terr_voxel_ignore_under is used before falling back to 0.0."
     )
     parser.add_argument(
         "--no-reproject",
@@ -760,8 +1274,9 @@ def main():
     parser.add_argument(
         "--terrain-resolution",
         type=float,
-        default=50.0,
-        help="terrain mesh grid resolution in meters. Default 50.0"
+        default=None,
+        help="terrain interpolation grid resolution in meters. "
+             "If omitted, deck key terr_voxel_grid_resolution is used before falling back to 50.0."
     )
     parser.add_argument(
         "--max-buildings",
@@ -778,20 +1293,30 @@ def main():
     parser.add_argument(
         "--smooth-sigma",
         type=float,
-        default=1.0,
-        help="Gaussian smoothing strength for terrain (0=no smoothing, 1=default, 2=very smooth). Default: 1.0"
+        default=None,
+        help="Gaussian smoothing strength for terrain interpolation (0=no smoothing). "
+             "If omitted, deck key terr_voxel_idw_sigma is used before falling back to 1.0."
     )
     parser.add_argument(
         "--idw-power",
         type=float,
-        default=2.0,
-        help="IDW power parameter (higher = more weight to closer points, 1-3 recommended). Default: 2.0"
+        default=None,
+        help="IDW power parameter (higher = more weight to closer points, 1-3 recommended). "
+             "If omitted, deck key terr_voxel_idw_power is used before falling back to 2.0."
     )
     parser.add_argument(
         "--idw-neighbors",
         type=int,
-        default=12,
-        help="Number of nearest neighbors for IDW interpolation. Default: 12"
+        default=None,
+        help="Number of nearest neighbors for terrain interpolation. "
+             "If omitted, deck key terr_voxel_idw_neighbors is used before falling back to 12."
+    )
+    parser.add_argument(
+        "--terrain-approach",
+        type=str,
+        choices=ALLOWED_TERR_VOXEL_APPROACHES,
+        default=None,
+        help="terrain interpolation approach. If omitted, deck key terr_voxel_approach is used before falling back to idw."
     )
     parser.add_argument(
         "--base-height",
@@ -816,6 +1341,27 @@ def main():
     case_name = deck.get_text("casename")
     if not case_name:
         raise RuntimeError("casename not found in conf")
+
+    terr_voxel_cfg, terr_voxel_sources = resolve_terrain_voxel_config(
+        deck,
+        cli_overrides={
+            "approach": args.terrain_approach,
+            "height_field": args.height_field,
+            "ignore_under": args.min_height,
+            "grid_resolution": args.terrain_resolution,
+            "idw_sigma": args.smooth_sigma,
+            "idw_power": args.idw_power,
+            "idw_neighbors": args.idw_neighbors,
+        },
+        warn=lambda message: print(f"[WARN] {message}"),
+    )
+    args.terrain_approach = terr_voxel_cfg.approach
+    args.height_field = terr_voxel_cfg.height_field
+    args.min_height = terr_voxel_cfg.ignore_under
+    args.terrain_resolution = terr_voxel_cfg.grid_resolution
+    args.smooth_sigma = terr_voxel_cfg.idw_sigma
+    args.idw_power = terr_voxel_cfg.idw_power
+    args.idw_neighbors = terr_voxel_cfg.idw_neighbors
 
     # If --base-height is not provided, read from conf (same behavior as 1_buildBC.py)
     if args.base_height is None:
@@ -845,8 +1391,14 @@ def main():
         raise FileNotFoundError(f"Shapefile not found: {primary_shp} or {fallback_shp}")
 
     print(f"[INFO] Input Shapefile: {shp_path}")
-    print(f"[INFO] Height field: {args.height_field}")
-    print(f"[INFO] Min valid height: {args.min_height} m")
+    print(f"[INFO] Terrain approach: {args.terrain_approach} (source: {terr_voxel_sources['approach']})")
+    height_field_display = "Inferred" if str(args.height_field).strip().lower() == "auto" else args.height_field
+    print(f"[INFO] Height field: {height_field_display} (source: {terr_voxel_sources['height_field']})")
+    print(f"[INFO] Min valid height: {args.min_height} m (source: {terr_voxel_sources['ignore_under']})")
+    print(f"[INFO] Terrain grid resolution: {args.terrain_resolution} m (source: {terr_voxel_sources['grid_resolution']})")
+    print(f"[INFO] Terrain smoothing sigma: {args.smooth_sigma} (source: {terr_voxel_sources['idw_sigma']})")
+    print(f"[INFO] IDW power: {args.idw_power} (source: {terr_voxel_sources['idw_power']})")
+    print(f"[INFO] Neighboring points: {args.idw_neighbors} (source: {terr_voxel_sources['idw_neighbors']})")
 
     combined_file = proj_temp / f"{case_name}.stl"
 
@@ -939,7 +1491,7 @@ def main():
         print("[INFO] No DEM data available, will create flat terrain")
 
     # Auto-detect height field
-    if args.height_field == "auto":
+    if str(args.height_field).strip().lower() in {"auto", "inferred"}:
         height_candidates = ["Height", "Elevation", "height", "elevation", "HEIGHT", "ELEVATION"]
         height_field = None
         for candidate in height_candidates:
@@ -951,6 +1503,10 @@ def main():
             raise RuntimeError(f"Cannot auto-detect height field. Available fields: {list(gdf_work.columns)}")
         args.height_field = height_field
     else:
+        if args.height_field not in gdf_work.columns:
+            raise RuntimeError(
+                f"Specified height field '{args.height_field}' not found. Available fields: {list(gdf_work.columns)}"
+            )
         print(f"[INFO] Using specified height field: {args.height_field}")
 
     # Build bbox - project only two corner points (same as 1_buildBC.py)
@@ -1140,6 +1696,7 @@ def main():
         args.terrain_resolution,
         elevation_scale=args.elevation_scale,
         smooth_sigma=args.smooth_sigma,
+        approach=args.terrain_approach,
         idw_power=args.idw_power,
         idw_neighbors=args.idw_neighbors,
         base_height=args.base_height,
@@ -1153,16 +1710,16 @@ def main():
         combined_file = proj_temp / f"{case_name}.stl"
     print(f"[INFO] Combined STL output path: {combined_file}")
     # Create fast elevation lookup grid for building placement
-    # Use finer resolution (10m) for more accurate building base elevations
     # Note: dem_elevations are already adjusted to datum (min=0)
     _PROGRESS.stage("terrain_lookup", "Preparing terrain lookup grid")
     X_elev_grid, Y_elev_grid, Z_elev_grid = create_elevation_lookup_grid(
         base_final,
         dem_points,
         dem_elevations,
-        grid_resolution=10.0,
+        grid_resolution=args.terrain_resolution,
         elevation_scale=args.elevation_scale,
         smooth_sigma=args.smooth_sigma,
+        approach=args.terrain_approach,
         idw_power=args.idw_power,
         idw_neighbors=args.idw_neighbors
     )

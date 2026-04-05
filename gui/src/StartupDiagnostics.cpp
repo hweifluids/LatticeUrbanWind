@@ -16,89 +16,19 @@ namespace luwgui {
 namespace {
 
 QString pythonCheckScript() {
-    return QStringLiteral(R"PY(import contextlib
-import importlib
-import io
-import json
-import re
+    return QStringLiteral(R"PY(import json
 import sys
 from pathlib import Path
 
-IMPORT_NAME_MAP = {
-    "netcdf4": "netCDF4",
-}
+requirements_path = Path(sys.argv[1]).resolve()
+repo_root = requirements_path.parent.parent
+core_dir = repo_root / "core"
+if str(core_dir) not in sys.path:
+    sys.path.insert(0, str(core_dir))
 
+from accelerator_runtime import build_startup_report
 
-def sanitize_requirement(line: str) -> str | None:
-    raw = line.split("#", 1)[0].strip()
-    if not raw:
-        return None
-    return re.split(r"[<>=!~;\[]", raw, maxsplit=1)[0].strip()
-
-
-def candidate_modules(package_name: str) -> list[str]:
-    normalized = package_name.replace("-", "_")
-    mapped = IMPORT_NAME_MAP.get(package_name.lower(), normalized)
-    candidates = []
-    for value in (mapped, normalized, package_name):
-        if value and value not in candidates:
-            candidates.append(value)
-    return candidates
-
-
-def try_import(module_name: str) -> tuple[bool, str]:
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
-            importlib.import_module(module_name)
-        return True, ""
-    except Exception as exc:
-        details = []
-        std_out = stdout_buffer.getvalue().strip()
-        std_err = stderr_buffer.getvalue().strip()
-        if std_out:
-            details.append(std_out)
-        if std_err:
-            details.append(std_err)
-        details.append(str(exc))
-        return False, " | ".join(part for part in details if part)
-
-
-requirements_path = Path(sys.argv[1])
-checks = []
-for line in requirements_path.read_text(encoding="utf-8").splitlines():
-    package_name = sanitize_requirement(line)
-    if not package_name:
-        continue
-
-    chosen_module = ""
-    errors = []
-    success = False
-    for module_name in candidate_modules(package_name):
-        chosen_module = module_name
-        ok, error_text = try_import(module_name)
-        if ok:
-            success = True
-            errors = []
-            break
-        errors.append(f"{module_name}: {error_text}")
-
-    checks.append(
-        {
-            "package": package_name,
-            "module": chosen_module,
-            "success": success,
-            "error": " || ".join(errors),
-        }
-    )
-
-payload = {
-    "python_executable": sys.executable,
-    "python_version": sys.version.split()[0],
-    "checks": checks,
-}
-print(json.dumps(payload, ensure_ascii=False))
+print(json.dumps(build_startup_report(requirements_path), ensure_ascii=False))
 )PY");
 }
 
@@ -116,6 +46,45 @@ QString buildProcessErrorMessage(const StartupCheckResult& result) {
     return lines.join('\n').trimmed();
 }
 
+AcceleratorDeviceCheck parseDevice(const QJsonObject& object) {
+    AcceleratorDeviceCheck device;
+    device.name = object.value(QStringLiteral("name")).toString();
+    device.vendor = object.value(QStringLiteral("vendor")).toString();
+    device.version = object.value(QStringLiteral("version")).toString();
+    device.driverVersion = object.value(QStringLiteral("driver_version")).toString();
+    device.computeCapability = object.value(QStringLiteral("compute_capability")).toString();
+    device.computeUnits = object.value(QStringLiteral("compute_units")).toInt(0);
+    return device;
+}
+
+AcceleratorCheck parseAcceleratorCheck(const QJsonObject& object) {
+    AcceleratorCheck check;
+    check.summary = object.value(QStringLiteral("summary")).toString();
+    check.errorText = object.value(QStringLiteral("error")).toString();
+    check.provider = object.value(QStringLiteral("provider")).toString();
+    check.sourceRoot = object.value(QStringLiteral("source_root")).toString();
+    check.runtimeRoot = object.value(QStringLiteral("runtime_root")).toString();
+    check.cudaHome = object.value(QStringLiteral("cuda_home")).toString();
+    check.runtimeVersion = object.value(QStringLiteral("runtime_version")).toString();
+    check.driverVersion = object.value(QStringLiteral("driver_version")).toString();
+    check.numbaVersion = object.value(QStringLiteral("numba_version")).toString();
+    check.version = object.value(QStringLiteral("version")).toString();
+    check.configured = object.value(QStringLiteral("configured")).toBool(false);
+    check.prepared = object.value(QStringLiteral("prepared")).toBool(false);
+    check.available = object.value(QStringLiteral("available")).toBool(false);
+    check.warning = object.value(QStringLiteral("warning")).toBool(false);
+
+    const QJsonArray devices = object.value(QStringLiteral("devices")).toArray();
+    check.devices.reserve(devices.size());
+    for (const QJsonValue& value : devices) {
+        if (!value.isObject()) {
+            continue;
+        }
+        check.devices.push_back(parseDevice(value.toObject()));
+    }
+    return check;
+}
+
 } // namespace
 
 bool StartupCheckResult::hasWarnings() const {
@@ -127,12 +96,12 @@ bool StartupCheckResult::hasWarnings() const {
             return true;
         }
     }
-    return false;
+    return opencl.warning || cuda.warning;
 }
 
 QString StartupCheckResult::warningText() const {
     QStringList lines;
-    lines << QStringLiteral("Startup finished, but the Python environment self-check reported problems.");
+    lines << QStringLiteral("Startup finished, but the runtime environment self-check reported problems.");
     lines << QStringLiteral("The GUI continued to load, but preprocessing, solver orchestration, or post-processing commands may fail.");
     lines << "";
     lines << QStringLiteral("Repository root: ") + QDir::toNativeSeparators(repoRoot);
@@ -140,8 +109,14 @@ QString StartupCheckResult::warningText() const {
     if (!pythonVersion.isEmpty()) {
         lines << QStringLiteral("Python version: ") + pythonVersion;
     }
+    if (!hostPlatform.isEmpty()) {
+        lines << QStringLiteral("Host platform: ") + hostPlatform;
+    }
     if (!requirementsPath.isEmpty()) {
         lines << QStringLiteral("Requirements file: ") + QDir::toNativeSeparators(requirementsPath);
+    }
+    if (!pythonSummary.isEmpty()) {
+        lines << QStringLiteral("Python environment: ") + pythonSummary;
     }
 
     const QString processMessage = buildProcessErrorMessage(*this);
@@ -166,6 +141,23 @@ QString StartupCheckResult::warningText() const {
         lines += failedPackages;
     }
 
+    if (opencl.warning) {
+        lines << "";
+        lines << QStringLiteral("OpenCL:");
+        lines << (opencl.summary.isEmpty() ? QStringLiteral("OpenCL is unavailable.") : opencl.summary);
+        if (!opencl.errorText.isEmpty()) {
+            lines << opencl.errorText;
+        }
+    }
+    if (cuda.warning) {
+        lines << "";
+        lines << QStringLiteral("CUDA:");
+        lines << (cuda.summary.isEmpty() ? QStringLiteral("CUDA is unavailable.") : cuda.summary);
+        if (!cuda.errorText.isEmpty()) {
+            lines << cuda.errorText;
+        }
+    }
+
     return lines.join('\n');
 }
 
@@ -178,7 +170,7 @@ StartupCheckResult runPythonEnvironmentSelfCheck(const QString& repoRoot, int ti
     result.pythonResolved = !result.pythonExecutable.trimmed().isEmpty();
 
     if (!result.requirementsResolved) {
-        result.processError = QStringLiteral("Could not find installer/requirements.txt, so the dependency import self-check could not run.");
+        result.processError = QStringLiteral("Could not find installer/requirements.txt, so the startup dependency self-check could not run.");
         return result;
     }
 
@@ -233,6 +225,10 @@ StartupCheckResult runPythonEnvironmentSelfCheck(const QString& repoRoot, int ti
     const QJsonObject root = document.object();
     result.pythonExecutable = root.value(QStringLiteral("python_executable")).toString(result.pythonExecutable);
     result.pythonVersion = root.value(QStringLiteral("python_version")).toString();
+    result.hostPlatform = root.value(QStringLiteral("host_platform")).toString();
+
+    const QJsonObject requirementsSummary = root.value(QStringLiteral("requirements_summary")).toObject();
+    result.pythonSummary = requirementsSummary.value(QStringLiteral("text")).toString();
 
     const QJsonArray checks = root.value(QStringLiteral("checks")).toArray();
     result.packageChecks.reserve(checks.size());
@@ -249,7 +245,9 @@ StartupCheckResult runPythonEnvironmentSelfCheck(const QString& repoRoot, int ti
         result.packageChecks.push_back(check);
     }
 
+    result.cuda = parseAcceleratorCheck(root.value(QStringLiteral("cuda")).toObject());
+    result.opencl = parseAcceleratorCheck(root.value(QStringLiteral("opencl")).toObject());
     return result;
 }
 
-}
+} // namespace luwgui

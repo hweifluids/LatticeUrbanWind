@@ -37,6 +37,7 @@ struct SectionSpec {
     QString id;
     QString title;
     QString description;
+    QStringList aliases;
 };
 
 struct FieldSpec {
@@ -46,6 +47,7 @@ struct FieldSpec {
     QString help;
     FieldKind kind = FieldKind::String;
     QStringList enumValues;
+    QStringList aliases;
     int modeMask = ModeMaskAll;
     bool quoted = false;
     bool readOnly = false;
@@ -62,6 +64,8 @@ const QHash<QString, FieldSpec>& fieldSpecMap();
 const FieldSpec* findFieldSpec(const QString& key);
 QVector<FieldSpec> fieldsForSection(const QString& sectionId, RunMode mode);
 QStringList knownKeys();
+QString normalizeDeckKey(const QString& key);
+bool tryParseDeckBool(const QString& raw, bool* value = nullptr);
 
 }
 

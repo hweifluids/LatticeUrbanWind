@@ -8,6 +8,7 @@
 #include "luwgui/ConsolePanel.h"
 #include "luwgui/Preferences.h"
 #include "luwgui/ProgressPanel.h"
+#include "luwgui/StartupDiagnostics.h"
 #include "luwgui/VtkViewWidget.h"
 #include "luwgui/WavenumberPanel.h"
 
@@ -38,6 +39,7 @@ class MainWindow : public QMainWindow {
 
 public:
     explicit MainWindow(const AppPreferences& preferences, QWidget* parent = nullptr);
+    void appendStartupReport(const StartupCheckResult& startupCheck);
 
 private:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -63,13 +65,21 @@ private:
         QStringList propertyKeys;
         bool caseRoot = false;
         bool toolsRoot = false;
-        bool toolLeaf = false;
+        bool resultsRoot = false;
+        bool managedLeaf = false;
+        bool managedLeafTrashed = false;
+        QString managedRole;
     };
 
-    struct ToolNode {
+    struct ManagedNode {
         QString id;
+        QString name;
         QString title;
-        QString type;
+        QString filePath;
+        QString role;
+        QString storageType;
+        bool trashed = false;
+        int trashIndex = -1;
     };
 
     void buildTitleBar();
@@ -114,8 +124,24 @@ private:
     void showNavTreeContextMenu(const QPoint& pos);
     void expandNodeRecursive(QTreeWidgetItem* item, bool expand);
     void renameCase();
-    void addToolNode(const QString& type);
-    void syncToolStateWithProject();
+    void revealProjectInExplorer();
+    void addManagedNode(const QString& role, const QString& type = {});
+    void renameManagedNode(const QString& nodeId);
+    bool commitManagedNodeRename(const QString& nodeId, const QString& nextName, QString* errorMessage = nullptr);
+    void removeManagedNode(const QString& nodeId);
+    void removeAllToolNodes();
+    void removeAllResultNodes();
+    void recoverManagedNode(const QString& nodeId);
+    void permanentlyDeleteManagedNode(const QString& nodeId);
+    void syncManagedStateWithProject();
+    void reloadToolNodesFromGuiProperties();
+    void reloadResultNodesFromGuiProperties();
+    QString guiPropertiesDirectory() const;
+    bool ensureGuiPropertiesDirectory();
+    const ManagedNode* findToolNode(const QString& nodeId) const;
+    const ManagedNode* findResultNode(const QString& nodeId) const;
+    const ManagedNode* findManagedNode(const QString& nodeId) const;
+    bool hasActiveDataProcessor() const;
     bool keyRequiresTreeRebuild(const QString& key) const;
     void unlockPropertyEditor(int bindingIndex);
 
@@ -138,6 +164,7 @@ private:
     QString resolveTargetCrs() const;
     void loadLatestResult();
     void loadViewerFile(const QString& filePath);
+    void fixDeckFile();
     bool isFieldActive(const QString& key) const;
     void clearEditorDisplay(const EditorBinding& binding);
     QVariant readEditorValue(const EditorBinding& binding) const;
@@ -180,13 +207,16 @@ private:
     QHash<QString, QTreeWidgetItem*> treeItemById_;
     QVector<EditorBinding> bindings_;
     QString currentNodeId_;
-    QVector<ToolNode> toolNodes_;
-    QString toolStateProjectKey_;
-    int nextToolSerial_ = 1;
+    QVector<ManagedNode> toolNodes_;
+    QVector<ManagedNode> resultNodes_;
+    QString managedStateProjectKey_;
+    bool viewTrashedTools_ = false;
+    bool viewTrashedResults_ = false;
 
     QWidget* centerHost_ = nullptr;
     QWidget* centerPlaceholderShell_ = nullptr;
     QWidget* centerPlaceholder_ = nullptr;
+    QStackedWidget* viewerStack_ = nullptr;
     QWidget* viewerPanelShell_ = nullptr;
     VtkViewWidget* vtkView_ = nullptr;
     QWidget* consolePanelShell_ = nullptr;

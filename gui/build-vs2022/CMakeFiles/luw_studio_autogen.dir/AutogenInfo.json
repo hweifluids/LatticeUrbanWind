@@ -623,7 +623,7 @@
 	"MOC_RELAXED_MODE" : false,
 	"MOC_SKIP" : [],
 	"MULTI_CONFIG" : true,
-	"PARALLEL" : 32,
+	"PARALLEL" : 16,
 	"PARSE_CACHE_FILE" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache.txt",
 	"PARSE_CACHE_FILE_Debug" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache_Debug.txt",
 	"PARSE_CACHE_FILE_MinSizeRel" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache_MinSizeRel.txt",
