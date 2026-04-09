@@ -19,6 +19,7 @@
 /example/**
 /run/**
 /database/**
+/gui/preferences.json
 
 # Re-allow directories so we can unignore specific files
 !/example/**/
