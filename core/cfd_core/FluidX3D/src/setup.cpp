@@ -270,6 +270,117 @@ struct VkInletRuntimeConfig {
     int downstream_face_id = -1; // {0:west,1:east,2:south,3:north}, -1 means unknown/none
 };
 
+struct ProjectGpuMemoryEstimate {
+    uint3 grid = uint3(1u);
+    uint core_per_device_mb = 0u;
+    uint extra_per_device_mb = 0u;
+    uint total_per_device_mb = 0u;
+    uint total_project_mb = 0u;
+    bool top_sponge_grid_extend = false;
+    uint sponge_cells = 0u;
+};
+
+static uint tracked_buffer_mb_setup(const ulong bytes) {
+    return (uint)(bytes / 1048576ull);
+}
+
+static uint estimate_vk_inlet_extra_mb_per_device(const uint Nx, const uint Ny, const uint Nz) {
+    if (!vk_inlet_settings.enable || Nx < 2u || Ny < 2u || Nz < 2u) {
+        return 0u;
+    }
+
+    // Conservative upper bound before boundary flags are known exactly:
+    // 4 side planes (excluding bottom/top overlap) plus the full top plane.
+    const ulong nz_side = Nz > 2u ? (ulong)(Nz - 2u) : 0ull;
+    const ulong nx_inner = Nx > 2u ? (ulong)(Nx - 2u) : 0ull;
+    const ulong point_count_upper =
+        2ull * (ulong)Ny * nz_side +
+        2ull * nx_inner * nz_side +
+        (ulong)Nx * (ulong)Ny;
+    const ulong mode_stride = 5ull * (ulong)std::max(1, vk_inlet_settings.nmodes);
+
+    uint memory_mb = 0u;
+    memory_mb += tracked_buffer_mb_setup(point_count_upper * sizeof(ulong)); // point_cell
+    memory_mb += tracked_buffer_mb_setup(point_count_upper * sizeof(uchar)); // point_face
+    memory_mb += tracked_buffer_mb_setup(point_count_upper * 7ull * sizeof(float)); // point_data
+    memory_mb += tracked_buffer_mb_setup(mode_stride * 10ull * sizeof(float)); // mode_data
+    return memory_mb;
+}
+
+static ProjectGpuMemoryEstimate estimate_project_gpu_memory_from_grid(const uint3& grid) {
+    ProjectGpuMemoryEstimate estimate;
+    estimate.grid = grid;
+    estimate.core_per_device_mb = vram_required_mb_per_device(grid.x, grid.y, grid.z, Dx, Dy, Dz);
+    estimate.extra_per_device_mb = estimate_vk_inlet_extra_mb_per_device(grid.x, grid.y, grid.z);
+    estimate.total_per_device_mb = estimate.core_per_device_mb + estimate.extra_per_device_mb;
+    estimate.total_project_mb = estimate.total_per_device_mb * (Dx * Dy * Dz);
+    return estimate;
+}
+
+static ProjectGpuMemoryEstimate estimate_project_gpu_memory_from_cell_size(const float cell_size_m) {
+    const float safe_cell_m = fmax(cell_size_m, 1.0e-6f);
+    ProjectGpuMemoryEstimate estimate;
+    estimate.grid.x = std::max(1, (int)(si_size.x / safe_cell_m + 0.5f));
+    estimate.grid.y = std::max(1, (int)(si_size.y / safe_cell_m + 0.5f));
+#ifndef D2Q9
+    const uint Nz_cells_core = std::max(1, (int)(si_size.z / safe_cell_m + 0.5f));
+    estimate.top_sponge_grid_extend =
+        enable_top_sponge &&
+        sponge_tau_s > 0.0f &&
+        sponge_ref_mode == 0 &&
+        Nz_cells_core > 2u;
+    estimate.sponge_cells = estimate.top_sponge_grid_extend
+        ? (uint)std::max(1, (int)std::lround(sponge_thickness_m / safe_cell_m))
+        : 0u;
+    estimate.grid.z = Nz_cells_core + estimate.sponge_cells;
+#else
+    estimate.grid.z = 1u;
+#endif
+
+    ProjectGpuMemoryEstimate projected = estimate_project_gpu_memory_from_grid(estimate.grid);
+    projected.top_sponge_grid_extend = estimate.top_sponge_grid_extend;
+    projected.sponge_cells = estimate.sponge_cells;
+    return projected;
+}
+
+static float fit_cell_size_to_gpu_memory_request(const uint target_mb) {
+    if (target_mb == 0u) {
+        return 20.0f;
+    }
+
+    float fit_cell_m = fmax(fmax(si_size.x, si_size.y), si_size.z + fmax(sponge_thickness_m, 0.0f));
+    fit_cell_m = fmax(fit_cell_m, 1.0f);
+    ProjectGpuMemoryEstimate fit_estimate = estimate_project_gpu_memory_from_cell_size(fit_cell_m);
+    for (int i = 0; i < 32 && fit_estimate.total_per_device_mb > target_mb; ++i) {
+        fit_cell_m *= 2.0f;
+        fit_estimate = estimate_project_gpu_memory_from_cell_size(fit_cell_m);
+    }
+
+    float overflow_cell_m = fit_cell_m * 0.5f;
+    ProjectGpuMemoryEstimate overflow_estimate = estimate_project_gpu_memory_from_cell_size(overflow_cell_m);
+    for (int i = 0; i < 64 && overflow_cell_m > 1.0e-6f && overflow_estimate.total_per_device_mb <= target_mb; ++i) {
+        fit_cell_m = overflow_cell_m;
+        fit_estimate = overflow_estimate;
+        overflow_cell_m *= 0.5f;
+        overflow_estimate = estimate_project_gpu_memory_from_cell_size(overflow_cell_m);
+    }
+
+    for (int i = 0; i < 48; ++i) {
+        const float mid_cell_m = 0.5f * (overflow_cell_m + fit_cell_m);
+        const ProjectGpuMemoryEstimate mid_estimate = estimate_project_gpu_memory_from_cell_size(mid_cell_m);
+        if (mid_estimate.total_per_device_mb <= target_mb) {
+            fit_cell_m = mid_cell_m;
+            fit_estimate = mid_estimate;
+        }
+        else {
+            overflow_cell_m = mid_cell_m;
+            overflow_estimate = mid_estimate;
+        }
+    }
+
+    return fit_cell_m;
+}
+
 static const char* vk_uc_mode_name(const VkInletUcMode mode) {
     return (mode == VkInletUcMode::NORM_MEAN) ? "NORM_MEAN" : "NORMAL_COMPONENT";
 }
@@ -3151,8 +3262,7 @@ void main_setup() {
                     uint mm = static_cast<uint>(atoi(trim(gpu_memory_val).c_str()));
                     if (mm > 0u) {
                         memory = mm;
-                        const uint3 Nfit = resolution(si_size, memory); 
-                        cell_m = si_size.x / std::max(1u, Nfit.x);
+                        cell_m = fit_cell_size_to_gpu_memory_request(memory);
                         applied = true;
                     }
                 }
@@ -3345,6 +3455,7 @@ void main_setup() {
     const uint Nz_cells = 1u;
 #endif
     const uint3 lbm_N = uint3(Nx_cells, Ny_cells, Nz_cells);
+    const ProjectGpuMemoryEstimate gpu_memory_estimate = estimate_project_gpu_memory_from_grid(lbm_N);
 
     print_section_title("DOMAIN AND TRANSFORMATION");
     const ulong n_cells_total = (ulong)lbm_N.x*(ulong)lbm_N.y*(ulong)lbm_N.z;
@@ -3353,6 +3464,13 @@ void main_setup() {
         println("| Top sponge grid | " + alignr(57u, "core Nz=" + to_string((ulong)Nz_cells_core) +
                 ", ext=" + to_string((ulong)sponge_cells_cfg) +
                 ", total Nz=" + to_string((ulong)lbm_N.z)) + " |");
+    }
+    if (gpu_memory_estimate.extra_per_device_mb > 0u) {
+        println("| GPU Estimate    | " + alignr(57u, to_string(Dx * Dy * Dz) + "x " + to_string(gpu_memory_estimate.total_per_device_mb) +
+                " MB (core " + to_string(gpu_memory_estimate.core_per_device_mb) +
+                " + extra " + to_string(gpu_memory_estimate.extra_per_device_mb) + ")") + " |");
+    } else {
+        println("| GPU Estimate    | " + alignr(57u, to_string(Dx * Dy * Dz) + "x " + to_string(gpu_memory_estimate.total_per_device_mb) + " MB") + " |");
     }
 
     const uint mem_per_dev_mb = vram_required_mb_per_device(lbm_N.x, lbm_N.y, lbm_N.z, Dx, Dy, Dz);

@@ -88,6 +88,10 @@ inline bool overlaps_projected(const TriangleAABB& tri, const DomainProjectedBou
 }
 } // namespace
 
+inline uint tracked_allocation_mb(const ulong bytes) {
+	return (uint)(bytes/1048576ull);
+}
+
 uint bytes_per_cell_host() { // returns the number of Bytes per cell allocated in host memory
 	uint bytes_per_cell = 17u; // rho, u, flags
 #ifdef FORCE_FIELD
@@ -137,24 +141,90 @@ uint bandwidth_bytes_per_cell_device() { // returns the bandwidth in Bytes per c
 	return bandwidth_bytes_per_cell;
 }
 uint3 resolution(const float3 box_aspect_ratio, const uint memory) { // input: simulation box aspect ratio and VRAM occupation in MB, output: grid resolution
+	const auto make_resolution = [&](const float scaling) {
+#ifndef D2Q9
+		return uint3(
+			max(1u, to_uint(scaling*box_aspect_ratio.x)),
+			max(1u, to_uint(scaling*box_aspect_ratio.y)),
+			max(1u, to_uint(scaling*box_aspect_ratio.z))
+		);
+#else // D2Q9
+		return uint3(
+			max(1u, to_uint(scaling*box_aspect_ratio.x)),
+			max(1u, to_uint(scaling*box_aspect_ratio.y)),
+			1u
+		);
+#endif // D2Q9
+	};
 #ifndef D2Q9
 	float memory_required = (box_aspect_ratio.x*box_aspect_ratio.y*box_aspect_ratio.z)*(float)bytes_per_cell_device()/1048576.0f; // in MB
-	float scaling = cbrt((float)memory/memory_required);
-	return uint3(to_uint(scaling*box_aspect_ratio.x), to_uint(scaling*box_aspect_ratio.y), to_uint(scaling*box_aspect_ratio.z));
+	float fit_scaling = cbrt((float)memory/memory_required);
 #else // D2Q9
 	float memory_required = (box_aspect_ratio.x*box_aspect_ratio.y)*(float)bytes_per_cell_device()/1048576.0f; // in MB
-	float scaling = sqrt((float)memory/memory_required);
-	return uint3(to_uint(scaling*box_aspect_ratio.x), to_uint(scaling*box_aspect_ratio.y), 1u);
+	float fit_scaling = sqrt((float)memory/memory_required);
 #endif // D2Q9
+	fit_scaling = fmax(fit_scaling, 1.0e-6f);
+	while(vram_required_mb_per_device(make_resolution(fit_scaling).x, make_resolution(fit_scaling).y, make_resolution(fit_scaling).z, 1u, 1u, 1u)>memory&&fit_scaling>1.0e-6f) fit_scaling *= 0.5f;
+	float overflow_scaling = fit_scaling*2.0f;
+	while(vram_required_mb_per_device(make_resolution(overflow_scaling).x, make_resolution(overflow_scaling).y, make_resolution(overflow_scaling).z, 1u, 1u, 1u)<=memory&&overflow_scaling<1.0e8f) {
+		fit_scaling = overflow_scaling;
+		overflow_scaling *= 2.0f;
+	}
+	uint3 best = make_resolution(fit_scaling);
+	for(uint i=0u; i<48u; i++) {
+		const float mid_scaling = 0.5f*(fit_scaling+overflow_scaling);
+		const uint3 candidate = make_resolution(mid_scaling);
+		if(vram_required_mb_per_device(candidate.x, candidate.y, candidate.z, 1u, 1u, 1u)<=memory) {
+			fit_scaling = mid_scaling;
+			best = candidate;
+		} else {
+			overflow_scaling = mid_scaling;
+		}
+	}
+	return best;
 }
 
 // required VRAM in MB for a given resolution
 uint vram_required_mb_per_device(const uint Nx, const uint Ny, const uint Nz, const uint Dx, const uint Dy, const uint Dz) {
-	// per-device local grid size is (Nx*Ny*Nz)/(Dx*Dy*Dz)
-	const ulong cells_per_device = ((ulong)Nx * (ulong)Ny * (ulong)Nz) / ((ulong)Dx * (ulong)Dy * (ulong)Dz);
-	// bytes_per_cell_device() already accounts for SURFACE, TEMPERATURE ??????
-	const ulong bytes = cells_per_device * (ulong)bytes_per_cell_device();
-	return (uint)(bytes / 1048576ull); // MB
+	const uint Hx = Dx>1u, Hy = Dy>1u, Hz = Dz>1u;
+	const ulong local_Nx = (ulong)(Nx/Dx+2u*Hx);
+	const ulong local_Ny = (ulong)(Ny/Dy+2u*Hy);
+	const ulong local_Nz = (ulong)(Nz/Dz+2u*Hz);
+	const ulong local_N = local_Nx*local_Ny*local_Nz;
+	uint memory_mb = 0u;
+
+	memory_mb += tracked_allocation_mb(local_N*(ulong)velocity_set*sizeof(fpxx)); // fi
+	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // rho
+	memory_mb += tracked_allocation_mb(local_N*3ull*sizeof(float)); // u
+	memory_mb += tracked_allocation_mb(local_N*sizeof(uchar)); // flags
+#ifdef FORCE_FIELD
+	memory_mb += tracked_allocation_mb(local_N*3ull*sizeof(float)); // F
+	memory_mb += tracked_allocation_mb(4ull*sizeof(float)); // object_sum
+#endif // FORCE_FIELD
+#ifdef SURFACE
+	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // phi
+	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // mass
+	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // massex
+#endif // SURFACE
+#ifdef TEMPERATURE
+	memory_mb += tracked_allocation_mb(local_N*7ull*sizeof(fpxx)); // gi
+	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // T
+#endif // TEMPERATURE
+#ifdef GRAPHICS
+	const ulong pixels = (ulong)GRAPHICS_FRAME_WIDTH*(ulong)GRAPHICS_FRAME_HEIGHT;
+	memory_mb += tracked_allocation_mb(pixels*sizeof(int)); // bitmap
+	memory_mb += tracked_allocation_mb(pixels*sizeof(int)); // zbuffer
+	memory_mb += tracked_allocation_mb(15ull*sizeof(float)); // camera_parameters
+#endif // GRAPHICS
+	if(Dx*Dy*Dz>1u) {
+		ulong Amax = 0ull;
+		if(Dx>1u) Amax = max(Amax, local_Ny*local_Nz);
+		if(Dy>1u) Amax = max(Amax, local_Nz*local_Nx);
+		if(Dz>1u) Amax = max(Amax, local_Nx*local_Ny);
+		const ulong transfer_bytes = Amax*(ulong)max(transfers*(uint)sizeof(fpxx), 17u);
+		memory_mb += 2u*tracked_allocation_mb(transfer_bytes); // +/- transfer buffers
+	}
+	return memory_mb;
 }
 uint vram_required_mb_total(const uint Nx, const uint Ny, const uint Nz, const uint Dx, const uint Dy, const uint Dz) {
 	const uint per_dev = vram_required_mb_per_device(Nx, Ny, Nz, Dx, Dy, Dz);
@@ -1055,7 +1125,7 @@ void LBM::sanity_checks_constructor(const vector<Device_Info>& device_infos, con
 	const uint local_Nx=Nx/Dx+2u*(Dx>1u), local_Ny=Ny/Dy+2u*(Dy>1u), local_Nz=Nz/Dz+2u*(Dz>1u);
 	uint memory_available = max_uint; // in MB
 	for(Device_Info device_info : device_infos) memory_available = min(memory_available, device_info.memory);
-	uint memory_required = (uint)((ulong)Nx*(ulong)Ny*(ulong)Nz/((ulong)(Dx*Dy*Dz))*(ulong)bytes_per_cell_device()/1048576ull); // in MB
+	uint memory_required = vram_required_mb_per_device(Nx, Ny, Nz, Dx, Dy, Dz);
 	if(memory_required>memory_available) {
 		float factor = cbrt((float)memory_available/(float)memory_required);
 		const uint maxNx=(uint)(factor*(float)Nx), maxNy=(uint)(factor*(float)Ny), maxNz=(uint)(factor*(float)Nz);
