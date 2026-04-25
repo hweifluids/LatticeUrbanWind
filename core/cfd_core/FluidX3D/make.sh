@@ -17,6 +17,8 @@ echo -e "\033[92mInfo\033[0m: Detected Operating System: "${target}
 echo_and_execute() { echo "$@"; "$@"; }
 if command -v make &>/dev/null; then # if make is available, compile FluidX3D with multiple CPU cores
 	echo -e "\033[92mInfo\033[0m: Compiling with "$(nproc)" CPU cores."
+	echo -e "\033[92mInfo\033[0m: Cleaning previous build artifacts."
+	make clean
 	make ${target} -j$(nproc) # compile FluidX3D with makefile
 else # else (make is not installed), compile FluidX3D with a single CPU core
 	echo -e "\033[92mInfo\033[0m: Compiling with 1 CPU core. For faster multi-core compiling, install make with \"sudo apt install make\"."

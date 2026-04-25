@@ -22,6 +22,7 @@
 #include <chrono>
 #include <thread>
 #include <functional> // for parallel_for(...)
+#include <type_traits>
 #include <fstream>
 #include <mutex>
 #include <cctype>
@@ -2716,6 +2717,14 @@ inline string to_string(ulong x) {
 	return r;
 }
 inline string to_string(slong x) {
+	return x>=0ll ? to_string((ulong)x) : "-"+to_string((ulong)(-x));
+}
+template<typename T>
+inline typename std::enable_if<std::is_same<T, unsigned long long>::value&&!std::is_same<T, ulong>::value, string>::type to_string(T x) {
+	return to_string((ulong)x);
+}
+template<typename T>
+inline typename std::enable_if<std::is_same<T, long long>::value&&!std::is_same<T, slong>::value, string>::type to_string(T x) {
 	return x>=0ll ? to_string((ulong)x) : "-"+to_string((ulong)(-x));
 }
 inline string to_string(uint x) {

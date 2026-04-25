@@ -20,6 +20,7 @@
 /run/**
 /database/**
 /gui/preferences.json
+/codexlog/
 
 # Re-allow directories so we can unignore specific files
 !/example/**/

@@ -12,17 +12,18 @@ struct Info { // contains redundant information for console printing
 	Clock clock; // for measuring total runtime
 	ulong steps=max_ulong, steps_last=0ull; // runtime_total_last and steps_last are there if multiple run() commands are executed consecutively
 	bool phase_eta_enabled=false; // enables two-phase ETA model (normal stage + mean-field stage)
-	ulong phase_total_steps=0ull, phase_avg_start_t=max_ulong, phase_avg_steps=0ull;
+	ulong phase_total_steps=0ull, phase_avg_start_t=max_ulong, phase_avg_steps=0ull, phase_avg_stride=1ull;
 	double phase_normal_step_s=0.0, phase_avg_step_s=0.0; // averaged wall-time per solver step
-	double phase_normal_runtime_sum=0.0, phase_avg_runtime_sum=0.0;
-	ulong phase_normal_samples=0ull, phase_avg_samples=0ull;
+	double phase_avg_sample_extra_s=0.0; // extra wall-time for one mean-field sample/readback
+	double phase_normal_runtime_sum=0.0, phase_avg_runtime_sum=0.0, phase_avg_extra_runtime_sum=0.0;
+	ulong phase_normal_samples=0ull, phase_avg_samples=0ull, phase_avg_extra_samples=0ull;
 	bool progress_console_enabled=true;
 	uint cpu_mem_required=0u, gpu_mem_required=0u; // all in MB
 	string collision = "";
 	std::mutex allow_printing; // to prevent threading conflicts when continuously printing updates to console
 	void clear_two_phase_eta();
-	void configure_two_phase_eta(const ulong total_steps, const ulong avg_start_t, const ulong avg_steps, const double normal_steps_per_s_hint, const double avg_steps_per_s_hint);
-	void update_two_phase_eta_step(const bool avg_phase, const double step_seconds);
+	void configure_two_phase_eta(const ulong total_steps, const ulong avg_start_t, const ulong avg_steps, const double normal_steps_per_s_hint, const double avg_sample_extra_s_hint, const ulong avg_stride);
+	void update_two_phase_eta_step(const bool avg_phase, const double step_seconds, const bool avg_sampled=false);
 	double steps_per_second() const;
 	double normal_steps_per_second() const;
 	double avg_steps_per_second() const;

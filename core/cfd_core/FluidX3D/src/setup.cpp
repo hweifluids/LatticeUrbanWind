@@ -2476,7 +2476,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
 
         const uint threads = std::max(1u, (uint)std::thread::hardware_concurrency());
         const uint chunk_size_MB = 4u * threads;
-        const ulong chunk_elements = std::max(1ull, (1048576ull * (ulong)chunk_size_MB) / ((ulong)components * sizeof(float)));
+        const ulong chunk_elements = std::max((ulong)1u, ((ulong)1048576u * (ulong)chunk_size_MB) / ((ulong)components * (ulong)sizeof(float)));
         std::vector<float> buffer(chunk_elements * (ulong)components);
 
         const ulong chunks = points / chunk_elements;
@@ -2646,7 +2646,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-251119")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-260424")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -4019,10 +4019,14 @@ void main_setup() {
         }
     }
 
+    double last_normal_steps_per_second_hint = 0.0;
+
     auto run_lbm = [&](LBM& lbm,
                        const std::string& vtk_prefix,
                        const bool extra_spacing,
-                       const std::function<void(LBM&, ulong)>& pre_step_update = std::function<void(LBM&, ulong)>()) {
+                       const double preprocess_seconds,
+                       const std::function<void(LBM&, ulong)>& pre_step_update = std::function<void(LBM&, ulong)>()) -> double {
+        Clock case_solver_clock;
         print_section_title("LBM SOLVER INFORMATION");
 
         lbm.graphics.visualization_modes = VIS_FLAG_SURFACE | VIS_Q_CRITERION;
@@ -4033,6 +4037,9 @@ void main_setup() {
         const ulong unsteady_interval = unsteady_output_interval > 0u ? (ulong)unsteady_output_interval : 0ull;
         const bool enable_unsteady_u_output = unsteady_interval > 0ull;
         const ulong total_steps = base_run_steps + extra_run_steps;
+        auto format_estimated_time = [&](const double seconds, const bool normal_hint_ready) -> std::string {
+            return normal_hint_ready ? print_time(seconds) : std::string("pending normal-speed sample");
+        };
         auto emit_progress_stage = [&](const std::string& stage,
                                        const std::string& label,
                                        const std::string& detail,
@@ -4061,11 +4068,18 @@ void main_setup() {
                 (long long)total_steps,
                 false);
         };
-        auto print_task_finished = [&]() {
+        auto print_task_finished = [&]() -> double {
+            const double solver_seconds = case_solver_clock.stop();
+            const double case_total_seconds = preprocess_seconds + solver_seconds;
+            last_normal_steps_per_second_hint = info.normal_steps_per_second();
             print_kv_row("Task finished", "[" + now_str() + "]");
+            print_kv_row("Preprocess time", print_time(preprocess_seconds) + " (recorded)");
+            print_kv_row("Solver time", print_time(solver_seconds));
+            print_kv_row("LBM case total", print_time(case_total_seconds) + " (preprocess + solver)");
             if (extra_spacing) {
                 println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
             }
+            return case_total_seconds;
         };
 
         const std::string results_vtk_dir = parent + "/RESULTS/vtk/";
@@ -4118,7 +4132,15 @@ void main_setup() {
         const bool do_avg = purge_avg_steps > 0u;
         const ulong avg_window = do_avg ? std::min((ulong)purge_avg_steps, total_steps) : 0ull;
         const ulong avg_stride = std::max((ulong)1u, (ulong)purge_avg_stride);
-        const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + 1ull) : max_ulong;
+        const ulong avg_start_t = avg_window > 0ull ? (total_steps - avg_window + (ulong)1u) : max_ulong;
+        auto count_avg_samples_after = [&](const ulong current_t) -> ulong {
+            if (avg_window == 0ull || avg_start_t == max_ulong || current_t >= total_steps) return 0ull;
+            ulong first = std::max(current_t + (ulong)1u, avg_start_t);
+            const ulong offset = (first - avg_start_t) % avg_stride;
+            if (offset != 0ull) first += avg_stride - offset;
+            if (first > total_steps) return 0ull;
+            return (ulong)1u + (total_steps - first) / avg_stride;
+        };
         if (avg_window > 0ull) {
             print_kv_row("Avg stride", "sample every " + to_string(avg_stride) + " step(s) in purge_avg window");
         }
@@ -4387,10 +4409,10 @@ void main_setup() {
                 }
             }
         };
-        auto process_post_step_samples = [&]() {
+        auto process_post_step_samples = [&]() -> bool {
             const bool want_avg = should_accumulate_avg();
             const bool want_probe = should_sample_probes();
-            if (!want_avg && !want_probe) return;
+            if (!want_avg && !want_probe) return false;
             const ulong t_now = lbm.get_t();
 
             if (want_avg) {
@@ -4418,6 +4440,7 @@ void main_setup() {
                 }
                 capture_probe_sample();
             }
+            return want_avg;
         };
         auto is_avg_phase = [&]() -> bool {
             return avg_window > 0ull && lbm.get_t() >= avg_start_t;
@@ -4458,12 +4481,15 @@ void main_setup() {
                                     (long long)k_avg_benchmark_iterations,
                                     false);
             }
-            const double mean_step_seconds = total_seconds / (double)k_avg_benchmark_iterations;
-            const double mean_steps_per_second = mean_step_seconds > 1.0E-12 ? (1.0 / mean_step_seconds) : 0.0;
-            print_runtime_kv("Avg benchmark", "mean-field Steps/s = " + to_string(mean_steps_per_second, 3u));
+            const double mean_sample_seconds = total_seconds / (double)k_avg_benchmark_iterations;
+            const double effective_extra_step_seconds = mean_sample_seconds / (double)avg_stride;
+            print_runtime_kv("Avg benchmark",
+                "sample extra = " + to_string(mean_sample_seconds, 3u) +
+                " s, effective extra = " + to_string(effective_extra_step_seconds, 3u) +
+                " s/step at stride " + to_string(avg_stride));
             emit_progress_stage("speed_estimate",
                                 "Estimating solve speed",
-                                "Mean-field estimate = " + to_string(mean_steps_per_second, 3u) + " Steps/s",
+                                "Mean-field sample extra = " + to_string(mean_sample_seconds, 3u) + " s",
                                 1ll,
                                 1ll,
                                 false);
@@ -4477,35 +4503,75 @@ void main_setup() {
 #ifdef TEMPERATURE
             if (include_temperature_avg) std::fill(avg_T.begin(), avg_T.end(), 0.0f);
 #endif
-            return mean_steps_per_second;
+            return mean_sample_seconds;
         };
-        auto configure_eta_model = [&](const double avg_steps_per_second_hint) {
-            info.configure_two_phase_eta(total_steps, avg_start_t, avg_window, 0.0, avg_steps_per_second_hint);
+        auto configure_eta_model = [&](const double avg_sample_seconds_hint) {
+            info.configure_two_phase_eta(total_steps, avg_start_t, avg_window, last_normal_steps_per_second_hint, avg_sample_seconds_hint, avg_stride);
+            const string normal_sps_text = last_normal_steps_per_second_hint > 0.0
+                ? to_string(last_normal_steps_per_second_hint, 3u)
+                : string("dynamic");
             if (avg_window > 0ull) {
-                const string avg_sps_text = avg_steps_per_second_hint > 0.0
-                    ? to_string(avg_steps_per_second_hint, 3u)
+                const string avg_extra_text = avg_sample_seconds_hint > 0.0
+                    ? to_string(avg_sample_seconds_hint, 3u) + " s/sample"
                     : string("n/a");
-                print_runtime_kv("ETA model", "normal Steps/s = dynamic, mean-field Steps/s = " + avg_sps_text);
+                print_runtime_kv("ETA model",
+                    "normal Steps/s = " + normal_sps_text + ", mean-field extra = " + avg_extra_text +
+                    ", stride = " + to_string(avg_stride));
                 emit_progress_stage("speed_estimate",
                                     "Estimating solve speed",
-                                    "ETA model ready: normal Steps/s = dynamic, mean-field Steps/s = " + avg_sps_text,
+                                    "ETA model ready: normal Steps/s = " + normal_sps_text + ", mean-field extra = " + avg_extra_text,
                                     1ll,
                                     1ll,
                                     false);
             } else {
-                print_runtime_kv("ETA model", "single-stage dynamic Steps/s");
+                print_runtime_kv("ETA model", "single-stage normal Steps/s = " + normal_sps_text);
                 emit_progress_stage("speed_estimate",
                                     "Estimating solve speed",
-                                    "ETA model ready: single-stage dynamic Steps/s",
+                                    "ETA model ready: single-stage normal Steps/s = " + normal_sps_text,
                                     1ll,
                                     1ll,
                                     false);
             }
         };
+        auto print_timing_plan = [&](const double avg_sample_seconds_hint) {
+            const bool normal_hint_ready = last_normal_steps_per_second_hint > 0.0;
+            const double normal_sps = info.normal_steps_per_second();
+            const double normal_step_s = normal_sps > 1.0E-12 ? 1.0 / normal_sps : 0.0;
+            const ulong warmup_steps = avg_window > 0ull
+                ? (avg_start_t > 0ull ? std::min(avg_start_t - (ulong)1u, total_steps) : 0ull)
+                : total_steps;
+            const ulong statistical_steps = total_steps > warmup_steps ? total_steps - warmup_steps : 0ull;
+            const ulong statistical_samples = count_avg_samples_after(warmup_steps);
+            const double warmup_seconds = (double)warmup_steps * normal_step_s;
+            const double statistical_seconds =
+                (double)statistical_steps * normal_step_s +
+                (double)statistical_samples * avg_sample_seconds_hint;
+            const double solver_seconds = warmup_seconds + statistical_seconds;
+            const double case_seconds = preprocess_seconds + solver_seconds;
+
+            print_runtime_section("LBM TIMING PLAN");
+            print_runtime_kv("Preprocess time", print_time(preprocess_seconds) + " (recorded)");
+            print_runtime_kv("Warm-up est.",
+                format_estimated_time(warmup_seconds, normal_hint_ready) +
+                ", steps = " + to_string(warmup_steps));
+            if (avg_window > 0ull) {
+                print_runtime_kv("Statistical est.",
+                    format_estimated_time(statistical_seconds, normal_hint_ready) +
+                    ", steps = " + to_string(statistical_steps) +
+                    ", samples = " + to_string(statistical_samples));
+            }
+            else {
+                print_runtime_kv("Statistical est.", "off");
+            }
+            print_runtime_kv("Estimated solver", format_estimated_time(solver_seconds, normal_hint_ready));
+            print_runtime_kv("Estimated total",
+                format_estimated_time(case_seconds, normal_hint_ready) +
+                " (includes recorded preprocess)");
+        };
         bool avg_phase_entry_reported = false;
-        auto update_runtime_eta = [&](const double iteration_seconds) {
+        auto update_runtime_eta = [&](const double iteration_seconds, const bool avg_sampled) {
             const bool avg_phase = is_avg_phase();
-            info.update_two_phase_eta_step(avg_phase, iteration_seconds);
+            info.update_two_phase_eta_step(avg_phase, iteration_seconds, avg_sampled);
             if (avg_phase && !avg_phase_entry_reported) {
                 avg_phase_entry_reported = true;
                 print_runtime_kv("Mean-field stage",
@@ -4632,6 +4698,49 @@ void main_setup() {
                 println("ERROR: Could not open " + info_path + " for writing.");
             }
         };
+        auto run_normal_speed_benchmark = [&](const std::function<void()>& before_step) {
+            if (last_normal_steps_per_second_hint > 0.0) return;
+            const ulong warmup_steps = avg_window > 0ull
+                ? (avg_start_t > 0ull ? std::min(avg_start_t - (ulong)1u, total_steps) : 0ull)
+                : total_steps;
+            if (lbm.get_t() >= warmup_steps) return;
+            const ulong remaining_warmup_steps = warmup_steps - lbm.get_t();
+            const ulong probe_steps = std::min((ulong)16u, remaining_warmup_steps);
+            if (probe_steps == 0ull) return;
+
+            print_runtime_kv("Normal benchmark", "run " + to_string(probe_steps) + " warm-up step(s) before timing plan");
+            emit_progress_stage("speed_estimate",
+                                "Estimating solve speed",
+                                "Benchmarking normal LBM solver",
+                                0ll,
+                                (long long)probe_steps,
+                                false);
+            Clock probe_clock;
+            double probe_seconds = 0.0;
+            for (ulong i = 0ull; i < probe_steps; ++i) {
+                probe_clock.start();
+                if (before_step) before_step();
+                if (pre_step_update) pre_step_update(lbm, lbm.get_t());
+                lbm.run(1u, total_steps);
+                maybe_write_unsteady_u();
+                process_post_step_samples();
+                probe_seconds += probe_clock.stop();
+                emit_progress_stage("speed_estimate",
+                                    "Estimating solve speed",
+                                    "Benchmarking normal LBM solver step " +
+                                        to_string(i + (ulong)1u) + "/" + to_string(probe_steps),
+                                    (long long)(i + (ulong)1u),
+                                    (long long)probe_steps,
+                                    false);
+            }
+            if (probe_seconds > 0.0) {
+                last_normal_steps_per_second_hint = (double)probe_steps / probe_seconds;
+                print_runtime_kv("Normal benchmark",
+                    "normal Steps/s = " + to_string(last_normal_steps_per_second_hint, 3u) +
+                    ", step = " + to_string(probe_seconds / (double)probe_steps, 3u) +
+                    " s, measured steps = " + to_string(probe_steps));
+            }
+        };
 
 #if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)
         const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
@@ -4643,27 +4752,30 @@ void main_setup() {
             80.0f);                               // FOV
 
         lbm.run(0u, total_steps); // initialize fields and graphics buffers
-        const double avg_steps_per_second_hint = run_avg_phase_benchmark();
-        configure_eta_model(avg_steps_per_second_hint);
+        auto render_frame_before_step = [&]() {
+            // ------------------ off-screen PNG rendering (optional video) ------------------
+            if (lbm.graphics.next_frame(total_steps, 1.0f)) {
+                auto __old_cwd = std::filesystem::current_path();
+                std::filesystem::current_path(snapshots_dir);
+                lbm.graphics.write_frame();
+                std::filesystem::current_path(__old_cwd);
+            }
+        };
+        run_normal_speed_benchmark(render_frame_before_step);
+        const double avg_sample_seconds_hint = run_avg_phase_benchmark();
+        configure_eta_model(avg_sample_seconds_hint);
+        print_timing_plan(avg_sample_seconds_hint);
         print_runtime_section("SOLVER START");
         emit_solver_progress(true);
         Clock iteration_clock;
         while (lbm.get_t() < total_steps) {
             iteration_clock.start();
-            // ------------------ off-screen PNG rendering (optional video) ------------------
-            if (lbm.graphics.next_frame(total_steps, 1.0f)) {
-                {
-                    auto __old_cwd = std::filesystem::current_path();
-                    std::filesystem::current_path(snapshots_dir);
-                    lbm.graphics.write_frame();
-                    std::filesystem::current_path(__old_cwd);
-                }
-            }
+            render_frame_before_step();
             if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
-            process_post_step_samples();
-            update_runtime_eta(iteration_clock.stop());
+            const bool avg_sampled = process_post_step_samples();
+            update_runtime_eta(iteration_clock.stop(), avg_sampled);
             emit_solver_progress();
         }
         emit_solver_progress(true);
@@ -4671,12 +4783,14 @@ void main_setup() {
         maybe_write_transform_info();
         finalize_avg();
         finalize_probes();
-        print_task_finished();
+        return print_task_finished();
 
 #else // GRAPHICS + INTERACTIVE or pure CLI
         lbm.run(0u, total_steps); // initialize fields once before first pre-step callback
-        const double avg_steps_per_second_hint = run_avg_phase_benchmark();
-        configure_eta_model(avg_steps_per_second_hint);
+        run_normal_speed_benchmark(std::function<void()>());
+        const double avg_sample_seconds_hint = run_avg_phase_benchmark();
+        configure_eta_model(avg_sample_seconds_hint);
+        print_timing_plan(avg_sample_seconds_hint);
         print_runtime_section("SOLVER START");
         emit_solver_progress(true);
         Clock iteration_clock;
@@ -4685,8 +4799,8 @@ void main_setup() {
             if (pre_step_update) pre_step_update(lbm, lbm.get_t());
             lbm.run(1u, total_steps);
             maybe_write_unsteady_u();
-            process_post_step_samples();
-            update_runtime_eta(iteration_clock.stop());
+            const bool avg_sampled = process_post_step_samples();
+            update_runtime_eta(iteration_clock.stop(), avg_sampled);
             emit_solver_progress();
         }
         emit_solver_progress(true);
@@ -4694,7 +4808,7 @@ void main_setup() {
         maybe_write_transform_info();
         finalize_avg();
         finalize_probes();
-        print_task_finished();
+        return print_task_finished();
 #endif
     };
 
@@ -4718,6 +4832,7 @@ void main_setup() {
 
     if (!dataset_generation && !profile_generation) {
         // const uint Dx = 2u, Dy = 1u, Dz = 1u;
+        Clock case_preprocess_clock;
         print_section_title("DEVICE INFORMATION");
         LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
         lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
@@ -5415,10 +5530,12 @@ void main_setup() {
             }
         }
 
+        const double case_preprocess_seconds = case_preprocess_clock.stop();
         run_lbm(
             lbm,
             "",
             false,
+            case_preprocess_seconds,
             [&](LBM& lbm_ref, const ulong t_now) {
                 if (vk_updater) vk_updater->update(lbm_ref, t_now);
             }
@@ -5434,6 +5551,8 @@ void main_setup() {
 
         const uint total_cases = static_cast<uint>(inflow_list.size() * angle_list.size());
         uint case_index = 0u;
+        Clock batch_lbm_clock;
+        double batch_lbm_case_seconds_sum = 0.0;
 
         auto initialize_uniform_velocity = [&](LBM& lbm, const float3& u) {
             const ulong Ntot = lbm.get_N();
@@ -5473,6 +5592,7 @@ void main_setup() {
         for (const float inflow_si : inflow_list) {
             for (const float angle_deg : angle_list) {
                 ++case_index;
+                Clock case_preprocess_clock;
                 const uint remaining = total_cases - case_index;
 
                 si_ref_u = inflow_si;
@@ -5520,15 +5640,25 @@ void main_setup() {
                 }
 
                 const std::string vtk_prefix = "DG_" + format_tag(inflow_si) + "_" + format_tag(angle_deg) + "_";
-                run_lbm(
+                const double case_preprocess_seconds = case_preprocess_clock.stop();
+                const double case_total_seconds = run_lbm(
                     lbm,
                     vtk_prefix,
                     true,
+                    case_preprocess_seconds,
                     [&](LBM& lbm_ref, const ulong t_now) {
                         if (vk_updater) vk_updater->update(lbm_ref, t_now);
                     }
                 );
+                batch_lbm_case_seconds_sum += case_total_seconds;
             }
+        }
+        if (total_cases > 1u) {
+            const double batch_lbm_seconds = batch_lbm_clock.stop();
+            print_section_title("BATCH LBM SUMMARY");
+            print_kv_row("LBM cases", to_string(total_cases));
+            print_kv_row("Sum case time", print_time(batch_lbm_case_seconds_sum));
+            print_kv_row("Batch wall time", print_time(batch_lbm_seconds) + " (recorded)");
         }
     }
     else { // profile_generation
@@ -5622,6 +5752,8 @@ void main_setup() {
 
         const uint total_cases = static_cast<uint>(angle_list.size());
         uint case_index = 0u;
+        Clock batch_lbm_clock;
+        double batch_lbm_case_seconds_sum = 0.0;
         const bool profile_single_case_standard_output = (total_cases == 1u);
         if (profile_single_case_standard_output) {
             println("| Output logic    | standard luw naming: <datetime>_raw_* and <datetime>_avg  |");
@@ -5729,6 +5861,7 @@ void main_setup() {
 
         for (const float angle_deg : angle_list) {
             ++case_index;
+            Clock case_preprocess_clock;
             const uint remaining = total_cases - case_index;
 
             const std::string case_label = to_string(case_index) + "/" + to_string(total_cases) +
@@ -5858,14 +5991,24 @@ void main_setup() {
                 }
             }
 
-            run_lbm(
+            const double case_preprocess_seconds = case_preprocess_clock.stop();
+            const double case_total_seconds = run_lbm(
                 lbm,
                 vtk_prefix,
                 true,
+                case_preprocess_seconds,
                 [&](LBM& lbm_ref, const ulong t_now) {
                     if (vk_updater) vk_updater->update(lbm_ref, t_now);
                 }
             );
+            batch_lbm_case_seconds_sum += case_total_seconds;
+        }
+        if (total_cases > 1u) {
+            const double batch_lbm_seconds = batch_lbm_clock.stop();
+            print_section_title("BATCH LBM SUMMARY");
+            print_kv_row("LBM cases", to_string(total_cases));
+            print_kv_row("Sum case time", print_time(batch_lbm_case_seconds_sum));
+            print_kv_row("Batch wall time", print_time(batch_lbm_seconds) + " (recorded)");
         }
     }
 }
