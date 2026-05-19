@@ -91,6 +91,70 @@ def _safe_float(x):
         return None
 
 
+def _utm_metadata_from_crs(utm_crs: str):
+    match = re.search(r"EPSG\s*:?\s*(\d+)", str(utm_crs), flags=re.IGNORECASE)
+    if not match:
+        return None, None, None
+
+    epsg = int(match.group(1))
+    if 32601 <= epsg <= 32660:
+        return epsg, epsg - 32600, "N"
+    if 32701 <= epsg <= 32760:
+        return epsg, epsg - 32700, "S"
+    return epsg, None, None
+
+
+def _write_projected_domain_metadata(
+    conf_file: Path,
+    deck,
+    utm_crs: str,
+    rotate_deg: float,
+    base_bounds,
+    terrain_top_z: float,
+    mesh_top_z: float,
+    base_height: float,
+) -> None:
+    minx, miny, maxx, maxy = base_bounds
+    si_x = float(maxx - minx)
+    si_y = float(maxy - miny)
+
+    z_limit = deck.get_float("z_limit")
+    if z_limit is not None and math.isfinite(float(z_limit)) and float(z_limit) > 0.0:
+        si_z = float(terrain_top_z) + float(z_limit)
+    else:
+        si_z = float(mesh_top_z)
+    si_z = max(float(si_z), float(mesh_top_z), float(base_height))
+
+    epsg, zone, hemisphere = _utm_metadata_from_crs(utm_crs)
+
+    deck.set_pair("si_x_cfd", (0.0, si_x), precision=6)
+    deck.set_pair("si_y_cfd", (0.0, si_y), precision=6)
+    deck.set_pair("si_z_cfd", (0.0, si_z), precision=6)
+    deck.set_text("utm_crs", str(utm_crs), quoted=True)
+    if epsg is not None:
+        deck.set_int("utm_epsg", epsg)
+        deck.set_int("utm", epsg)
+    if zone is not None:
+        deck.set_int("utm_zone", zone)
+    if hemisphere is not None:
+        deck.set_text("utm_hemisphere", hemisphere)
+    deck.set_float("rotate_deg", float(rotate_deg), precision=6)
+
+    lon_pair = deck.get_pair("cut_lon_manual")
+    lat_pair = deck.get_pair("cut_lat_manual")
+    if lon_pair is not None:
+        deck.set_float("center_lon", 0.5 * (float(lon_pair[0]) + float(lon_pair[1])), precision=8)
+    if lat_pair is not None:
+        deck.set_float("center_lat", 0.5 * (float(lat_pair[0]) + float(lat_pair[1])), precision=8)
+
+    deck.save(conf_file)
+    print(
+        "[INFO] Wrote projected domain metadata to config: "
+        f"si_x={si_x:.3f}m, si_y={si_y:.3f}m, si_z={si_z:.3f}m, "
+        f"utm_crs={utm_crs}, rotate_deg={float(rotate_deg):.6f}"
+    )
+
+
 def _rotate_points_xy(points_xy: np.ndarray, rotate_deg: float, pivot_xy):
     """
     Rotate Nx2 points around pivot by rotate_deg degrees (CCW positive).
@@ -1730,6 +1794,11 @@ def main():
         max_terrain_z = terrain_mesh.vertices[:, 2].max()
         print(f"[INFO] Terrain layer elevation range: {min_terrain_z:.2f}m to {max_terrain_z:.2f}m")
         print(f"[INFO] Terrain relief: {max_terrain_z - min_terrain_z:.2f}m")
+    terrain_top_z = (
+        float(np.nanmax(terrain_mesh.vertices[:, 2]))
+        if terrain_mesh is not None and terrain_mesh.vertices.size > 0
+        else float(args.base_height)
+    )
 
     # Generate building meshes
     building_meshes = []
@@ -1899,6 +1968,16 @@ def main():
     min_bounds, max_bounds = final_mesh.bounds
     zmin = float(min_bounds[2])
     zmax = float(max_bounds[2])
+    _write_projected_domain_metadata(
+        conf_file,
+        deck,
+        utm_crs,
+        rotate_deg,
+        base_final.bounds,
+        terrain_top_z,
+        zmax,
+        float(args.base_height),
+    )
     print(f"[RESULT] STL Z range: min {zmin:.3f}m, max {zmax:.3f}m")
     print(f"[RESULT] Total height: {(zmax - zmin):.3f}m")
     program_elapsed = time.time() - program_start_time

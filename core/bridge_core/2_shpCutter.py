@@ -362,6 +362,28 @@ def clean_building_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     _PROGRESS.complete("geometry_clean", f"Validated {before} geometries, kept {after_fix}")
     return gdf2
 
+
+def final_polygonal_filter(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Ensure the output layer contains only Polygon/MultiPolygon geometries."""
+    before = len(gdf)
+    out = gdf.copy()
+    out["geometry"] = [_make_valid_safe(geom) for geom in out.geometry]
+    out = out[out.geometry.notna() & ~out.geometry.is_empty]
+    out = out[out.geometry.type.isin(["Polygon", "MultiPolygon"])].copy()
+    dropped = before - len(out)
+    if dropped > 0:
+        print(f"[WARN] Final polygonal filter dropped {dropped} non-polygonal features before writing.")
+    return out
+
+
+def remove_existing_shapefile(path: Path) -> None:
+    stem = path.with_suffix("")
+    for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".fix"):
+        sidecar = stem.with_suffix(ext)
+        if sidecar.exists():
+            sidecar.unlink()
+
+
 def remove_small_interior_rings_projected(
     gdf: gpd.GeoDataFrame, min_hole_area_m2: float
 ) -> Tuple[gpd.GeoDataFrame, int]:
@@ -965,8 +987,10 @@ def main():
         subset = result_wgs84
         print("Original CRS is EPSG 4326. No final reprojection needed.")
 
+    subset = final_polygonal_filter(subset)
     _PROGRESS.stage("save_crop", f"Saving cropped shapefile: {out_path.name}")
     print("Writing output shapefile.")
+    remove_existing_shapefile(out_path)
     subset.to_file(out_path, driver="ESRI Shapefile", encoding="utf-8")
     print("Write completed.")
     _PROGRESS.complete("save_crop", f"Saved cropped shapefile: {out_path.name}")

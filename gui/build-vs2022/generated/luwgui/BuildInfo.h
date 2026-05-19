@@ -2,8 +2,8 @@
 
 namespace luwgui::buildinfo {
 
-inline constexpr const char* kStudioVersion = "pre-release-75-gc4f153b-dirty";
-inline constexpr const char* kBuildTimestamp = "2026-04-05 22:41:13 ";
+inline constexpr const char* kStudioVersion = "pre-release-79-g516c019";
+inline constexpr const char* kBuildTimestamp = "2026-04-29 16:59:40 ";
 inline constexpr const char* kCfdCoreVersion = "FluidX3D 3.3";
 inline constexpr const char* kAuthorName = "Huanxia Wei";
 inline constexpr const char* kAuthorEmail = "huanxia.wei@u.nus.edu";

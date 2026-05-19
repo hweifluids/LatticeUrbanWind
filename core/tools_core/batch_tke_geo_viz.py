@@ -88,6 +88,7 @@ class RuntimeConfig:
     max_lat: float
     cell_size: float = 10.0
     vis_dpi: int = 1200
+    crop_z_max: float | None = None
     crop_debug_file_glob: str = "*_avg-*.vtk,*_avg_*.vtk"
     WIND_VTK_CONFIG: dict = field(default_factory=dict)
 
@@ -248,6 +249,12 @@ def _load_runtime_config(luw_path: Path) -> RuntimeConfig:
     vis_dpi = int(round(vis_dpi_raw)) if vis_dpi_raw is not None else 1200
     if vis_dpi <= 0:
         vis_dpi = 1200
+    crop_z_max = _safe_float(
+        _parse_scalar_any(
+            raw,
+            ["crop_z_max", "crop_max_z", "crop_z_limit", "crop_max_height"],
+        )
+    )
     crop_debug_input_dir = _parse_scalar_any(raw, ["crop_debug_input_dir"])
 
     if crop_debug_input_dir is not None:
@@ -280,6 +287,7 @@ def _load_runtime_config(luw_path: Path) -> RuntimeConfig:
         max_lat=float(max_lat),
         cell_size=float(cell_size),
         vis_dpi=int(vis_dpi),
+        crop_z_max=crop_z_max,
         crop_debug_file_glob=str(crop_debug_file_glob),
         WIND_VTK_CONFIG=wind_cfg,
     )
@@ -1145,6 +1153,7 @@ def export_cropped_vtk(
     vtk_info: dict,
     crop: dict,
     output_path: str,
+    z_crop: dict | None = None,
 ) -> None:
     nx, ny, nz = vtk_info["dimensions"]
     ox, oy, oz = vtk_info["origin"]
@@ -1153,16 +1162,20 @@ def export_cropped_vtk(
     x_end = int(crop["x_end"])
     y_start = int(crop["y_start"])
     y_end = int(crop["y_end"])
+    z_start = int(z_crop["z_start"]) if z_crop is not None else 0
+    z_end = int(z_crop["z_end"]) if z_crop is not None else int(nz)
 
     if not (0 <= x_start < x_end <= nx and 0 <= y_start < y_end <= ny):
         raise ValueError("Invalid crop window for VTK export")
+    if not (0 <= z_start < z_end <= nz):
+        raise ValueError("Invalid z crop window for VTK export")
 
     nx_out = x_end - x_start
     ny_out = y_end - y_start
-    nz_out = nz
+    nz_out = z_end - z_start
     ox_out = float(ox + x_start * dx)
     oy_out = float(oy + y_start * dy)
-    oz_out = float(oz)
+    oz_out = float(oz + z_start * dz)
     n_points = int(vtk_info["n_points"])
     n_points_out = nx_out * ny_out * nz_out
 
@@ -1204,13 +1217,48 @@ def export_cropped_vtk(
                     f.write(f"SCALARS {field_name} {vtk_type_token} {n_comp}\n".encode("utf-8"))
                 f.write(b"LOOKUP_TABLE default\n")
 
-            for z in range(nz_out):
+            for z in range(z_start, z_end):
                 arr = _read_z_slice_native(vtk_file, vtk_info, field_name, z)
                 arr_crop = arr[y_start:y_end, x_start:x_end, ...]
                 arr_out = np.ascontiguousarray(arr_crop)
                 f.write(arr_out.tobytes(order="C"))
 
     print(f"Saved cropped VTK: {output_path}")
+
+
+def compute_z_crop(vtk_info: dict, crop_z_max: float | None) -> dict:
+    _, _, nz = vtk_info["dimensions"]
+    _, _, oz = vtk_info["origin"]
+    _, _, dz = vtk_info["spacing"]
+
+    if crop_z_max is None:
+        return {
+            "z_start": 0,
+            "z_end": int(nz),
+            "nz_out": int(nz),
+            "z_min": float(oz),
+            "z_max_kept": float(oz + (int(nz) - 1) * dz),
+            "enabled": False,
+        }
+    if dz <= 0.0:
+        raise ValueError(f"Z crop requires positive dz, got dz={dz}")
+
+    rel = (float(crop_z_max) - float(oz)) / float(dz)
+    z_end = int(math.floor(rel + 1.0e-9)) + 1
+    z_end = min(int(nz), max(0, z_end))
+    if z_end <= 0:
+        raise ValueError(
+            f"crop_z_max={crop_z_max} is below the first VTK layer z={oz}"
+        )
+
+    return {
+        "z_start": 0,
+        "z_end": int(z_end),
+        "nz_out": int(z_end),
+        "z_min": float(oz),
+        "z_max_kept": float(oz + (int(z_end) - 1) * dz),
+        "enabled": int(z_end) < int(nz),
+    }
 
 
 def _extract_step(vtk_path: str) -> int | None:
@@ -1332,10 +1380,18 @@ def main() -> None:
         "config_path",
         help="Path to config (*.luw, *.luwdg, *.luwpf)",
     )
+    parser.add_argument(
+        "--crop-z-max",
+        type=float,
+        default=None,
+        help="Optional maximum VTK z coordinate to keep during cropped VTK export.",
+    )
     args = parser.parse_args()
 
     config_luw = Path(args.config_path).resolve()
     cfg = _load_runtime_config(config_luw)
+    if args.crop_z_max is not None:
+        cfg.crop_z_max = float(args.crop_z_max)
 
     output_root = os.path.abspath(cfg.OUTPUT_DIR)
     cropped_dir = os.path.join(output_root, "cropped_vtk")
@@ -1372,6 +1428,10 @@ def main() -> None:
     )
     print(f"Target CRS: {cfg.TARGET_CRS}")
     print(f"Crop grid step: {cfg.cell_size:.3f} m")
+    if cfg.crop_z_max is None:
+        print("Z crop upper bound: disabled (all layers retained)")
+    else:
+        print(f"Z crop upper bound: z <= {cfg.crop_z_max:.6f} m")
     print(f"Figure DPI: {cfg.vis_dpi}")
 
     print("Discovering input VTK files...")
@@ -1393,6 +1453,7 @@ def main() -> None:
 
     crop_cache: dict[tuple[tuple, tuple, tuple], dict] = {}
     grid_cache: dict[tuple[tuple, tuple, tuple], dict] = {}
+    z_crop_cache: dict[tuple[tuple, tuple, tuple], dict] = {}
 
     for idx, vtk_file in enumerate(vtk_files, start=1):
         print("")
@@ -1416,11 +1477,18 @@ def main() -> None:
             print("  - Computing crop window and target grid for this grid signature...")
             crop_cache[key] = compute_visualization_crop(info, cfg, xy_bounds)
             grid_cache[key] = build_regular_target_grid(info, cfg, xy_bounds, crop_cache[key])
+            z_crop_cache[key] = compute_z_crop(info, cfg.crop_z_max)
             print(
                 "  - Crop computed: "
                 f"X_idx=[{crop_cache[key]['x_start']}, {crop_cache[key]['x_end']}), "
                 f"Y_idx=[{crop_cache[key]['y_start']}, {crop_cache[key]['y_end']}), "
                 f"size={crop_cache[key]['nx_crop']}x{crop_cache[key]['ny_crop']}"
+            )
+            print(
+                "  - Z crop computed: "
+                f"Z_idx=[{z_crop_cache[key]['z_start']}, {z_crop_cache[key]['z_end']}), "
+                f"z=[{z_crop_cache[key]['z_min']:.3f}, {z_crop_cache[key]['z_max_kept']:.3f}] m, "
+                f"layers={z_crop_cache[key]['nz_out']}/{info['dimensions'][2]}"
             )
             print(
                 "  - Target grid computed: "
@@ -1433,6 +1501,7 @@ def main() -> None:
 
         crop = crop_cache[key]
         target_grid = grid_cache[key]
+        z_crop = z_crop_cache[key]
         height_plan = build_height_plan(info, TARGET_HEIGHTS_M)
 
         stem = Path(vtk_file).stem
@@ -1442,7 +1511,13 @@ def main() -> None:
         tke_out = os.path.join(figure_dir, f"{stem}_tke_9layers.png")
 
         _log_output_intent("cropped VTK", cropped_out)
-        export_cropped_vtk(vtk_file=vtk_file, vtk_info=info, crop=crop, output_path=cropped_out)
+        export_cropped_vtk(
+            vtk_file=vtk_file,
+            vtk_info=info,
+            crop=crop,
+            output_path=cropped_out,
+            z_crop=z_crop,
+        )
         _log_output_intent("range diagnostic figure", range_out)
         plot_range_diagnostic(
             crop=crop,
