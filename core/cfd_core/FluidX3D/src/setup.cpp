@@ -236,6 +236,29 @@ enum class VkInletUcMode {
     NORMAL_COMPONENT = 1
 };
 
+enum class VkInletFaceMode {
+    AUTO_SIDES = 0,
+    TARGET_INFLOW = 1,
+    EXCLUDE_DOWNSTREAM = 2,
+    EXCLUDE_DOWNSTREAM_SIDES = 3,
+    ALL_SIDES = 4,
+    ALL_SELECTED = 5
+};
+
+static const char* vk_face_mode_name(const VkInletFaceMode mode) {
+    if (mode == VkInletFaceMode::AUTO_SIDES) return "AUTO_SIDES";
+    if (mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM) return "EXCLUDE_DOWNSTREAM";
+    if (mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES) return "EXCLUDE_DOWNSTREAM_SIDES";
+    if (mode == VkInletFaceMode::ALL_SIDES) return "ALL_SIDES";
+    if (mode == VkInletFaceMode::ALL_SELECTED) return "ALL_SELECTED";
+    return "TARGET_INFLOW";
+}
+
+static VkInletFaceMode resolve_vk_face_mode(const VkInletFaceMode mode, const bool inflow_only) {
+    if (mode != VkInletFaceMode::AUTO_SIDES) return mode;
+    return inflow_only ? VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES : VkInletFaceMode::ALL_SIDES;
+}
+
 struct VkInletSettings {
     bool enable = true;
     // turbulence intensity (fraction); sigma_local uses uc_mode:
@@ -249,7 +272,8 @@ struct VkInletSettings {
     VkInletUcMode uc_mode = VkInletUcMode::NORM_MEAN;
     bool same_realization_all_faces = true;
     bool stride_interpolation = false; // optional double-buffer interpolation for stride > 1
-    bool inflow_only = false; // true: only U·n>0 cells, false: all selected boundary-face cells
+    bool inflow_only = false; // true: side faces except outlet, false: all four side faces; top is excluded in AUTO_SIDES
+    VkInletFaceMode face_mode = VkInletFaceMode::AUTO_SIDES;
     float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f); // per-component perturbation gain [ax, ay, az]
 };
 VkInletSettings vk_inlet_settings;
@@ -266,6 +290,7 @@ struct VkInletRuntimeConfig {
     bool same_realization_all_faces = true;
     bool stride_interpolation = false;
     bool inflow_only = false;
+    VkInletFaceMode face_mode = VkInletFaceMode::AUTO_SIDES;
     float3 anisotropy_scale = float3(1.0f, 1.0f, 1.0f);
     int downstream_face_id = -1; // {0:west,1:east,2:south,3:north}, -1 means unknown/none
 };
@@ -406,6 +431,31 @@ public:
         }
 
         setup_face_geometry_();
+        const int target_face = opposite_side_face_(cfg_.downstream_face_id);
+        if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM) {
+            if (cfg_.downstream_face_id >= 0) {
+                println("| VK inlet target | all except downstream " + string(face_name_(cfg_.downstream_face_id)) +
+                        "                                    |");
+            } else {
+                println("| VK inlet target | all selected faces; downstream unknown                     |");
+            }
+        } else if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES) {
+            if (cfg_.downstream_face_id >= 0) {
+                println("| VK inlet target | side faces except downstream " + string(face_name_(cfg_.downstream_face_id)) +
+                        "                               |");
+            } else {
+                println("| VK inlet target | side faces; downstream unknown; top excluded               |");
+            }
+        } else if (cfg_.face_mode == VkInletFaceMode::ALL_SIDES) {
+            println("| VK inlet target | all side faces; top excluded                             |");
+        } else if (cfg_.face_mode == VkInletFaceMode::TARGET_INFLOW && target_face >= 0) {
+            println("| VK inlet target | " + string(face_name_(target_face)) +
+                    " (opposite downstream " + string(face_name_(cfg_.downstream_face_id)) + ")                         |");
+        } else if (cfg_.inflow_only) {
+            println("| VK inlet target | velocity-normal side faces; top excluded                  |");
+        } else {
+            println("| VK inlet warn   | all boundary-face mode also includes outlet/side/top cells |");
+        }
         collect_face_points_(lbm);
 
         uint face_enabled_count = 0u;
@@ -444,9 +494,19 @@ public:
         } else {
             println("| VK inlet        | independent realization per active face                     |");
         }
-        println("| VK inlet filter | " + string(cfg_.inflow_only
-            ? "inflow-only by face-normal velocity"
-            : "all selected boundary face cells") + "                  |");
+        string filter_desc;
+        if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM) {
+            filter_desc = (cfg_.downstream_face_id >= 0) ? "all cells except downstream face" : "all selected boundary face cells";
+        } else if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES) {
+            filter_desc = (cfg_.downstream_face_id >= 0) ? "side faces except downstream" : "side faces with top excluded";
+        } else if (cfg_.face_mode == VkInletFaceMode::ALL_SIDES) {
+            filter_desc = "all side faces";
+        } else if (cfg_.face_mode == VkInletFaceMode::TARGET_INFLOW && target_face >= 0) {
+            filter_desc = "target face cells from downstream";
+        } else {
+            filter_desc = "all selected boundary face cells";
+        }
+        println("| VK inlet filter | " + filter_desc + "                  |");
         if (!build_face_modes_(u_ref, conv_dir, cfg_.seed)) {
             println("| VK inlet        | failed to build VK spectrum modes                           |");
             return false;
@@ -463,6 +523,7 @@ public:
                 ", sigma_lbm(fallback)=" + to_string(cfg_.sigma_lbm, 6u) +
                 ", stride=" + to_string((ulong)cfg_.update_stride) +
                 ", uc_mode=" + string(vk_uc_mode_name(cfg_.uc_mode)) +
+                ", face_mode=" + string(vk_face_mode_name(cfg_.face_mode)) +
                 ", aniso=[" + to_string(cfg_.anisotropy_scale.x, 3u) + "," +
                              to_string(cfg_.anisotropy_scale.y, 3u) + "," +
                              to_string(cfg_.anisotropy_scale.z, 3u) + "]" +
@@ -568,6 +629,14 @@ private:
         return "unknown";
     }
 
+    static int opposite_side_face_(const int id) {
+        if (id == WEST) return EAST;
+        if (id == EAST) return WEST;
+        if (id == SOUTH) return NORTH;
+        if (id == NORTH) return SOUTH;
+        return -1;
+    }
+
     void setup_face_geometry_() {
         faces_[0].id = WEST;
         faces_[0].n = float3(+1.0f, 0.0f, 0.0f);
@@ -602,10 +671,21 @@ private:
         if ((lbm.flags[n] & TYPE_S) != 0u) return false;
         if ((lbm.flags[n] & TYPE_E) == 0u) return false;
 
-        if (!cfg_.inflow_only) return true;
-        const float3 base_u = float3(lbm.u.x[n], lbm.u.y[n], lbm.u.z[n]);
-        const float vn = dot(base_u, face.n);
-        return vn > 1.0e-7f; // inflow-only side cells
+        const int target_face = opposite_side_face_(cfg_.downstream_face_id);
+        if (cfg_.face_mode == VkInletFaceMode::TARGET_INFLOW) {
+            if (target_face >= 0 && face.id != target_face) return false;
+            if (target_face < 0 && face.id == TOP && cfg_.inflow_only) return false;
+        } else if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM) {
+            if (cfg_.downstream_face_id >= 0 && face.id == cfg_.downstream_face_id) return false;
+        } else if (cfg_.face_mode == VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES) {
+            if (face.id == TOP) return false;
+            if (cfg_.downstream_face_id >= 0 && face.id == cfg_.downstream_face_id) return false;
+        } else if (cfg_.face_mode == VkInletFaceMode::ALL_SIDES) {
+            if (face.id == TOP) return false;
+        } else if (face.id == TOP && cfg_.inflow_only) {
+            return false;
+        }
+        return true;
     }
 
     void add_point_(VkFaceData& face, const ulong n, const uint x, const uint y, const uint z, LBM& lbm) {
@@ -2434,7 +2514,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
                           const float* u_avg, const float* rho_avg, const float* T_avg, const uchar* flags,
                           const float* M2_u, const float* M2_v, const float* M2_w,
                           const ulong avg_count, const bool convert_to_si_units,
-                          const bool print_saved_message=true) {
+                          const bool print_saved_message=true, const uint Nz_write=0u) {
     if (!u_avg || !rho_avg) return;
     float spacing = 1.0f;
     float u_factor = 1.0f;
@@ -2450,7 +2530,8 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     }
     float3 origin = spacing * float3(0.5f - 0.5f * (float)Nx, 0.5f - 0.5f * (float)Ny, 0.5f - 0.5f * (float)Nz);
     if (convert_to_si_units) origin += vtk_origin_shift;
-    const ulong points = (ulong)Nx * (ulong)Ny * (ulong)Nz;
+    const uint Nz_out = (Nz_write > 0u && Nz_write < Nz) ? Nz_write : Nz;
+    const ulong points = (ulong)Nx * (ulong)Ny * (ulong)Nz_out;
 
     create_folder(filename);
     std::ofstream file(filename, std::ios::out | std::ios::binary);
@@ -2463,7 +2544,7 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     const string base = (slash == string::npos) ? filename : filename.substr(slash + 1);
     const string header =
         "# vtk DataFile Version 3.0\nFluidX3D " + base + "\nBINARY\nDATASET STRUCTURED_POINTS\n"
-        "DIMENSIONS " + to_string(Nx) + " " + to_string(Ny) + " " + to_string(Nz) + "\n"
+        "DIMENSIONS " + to_string(Nx) + " " + to_string(Ny) + " " + to_string(Nz_out) + "\n"
         "ORIGIN " + to_string(origin.x) + " " + to_string(origin.y) + " " + to_string(origin.z) + "\n"
         "SPACING " + to_string(spacing) + " " + to_string(spacing) + " " + to_string(spacing) + "\n"
         "POINT_DATA " + to_string(points) + "\n";
@@ -2516,9 +2597,9 @@ static void write_avg_vtk(const string& filename, const uint Nx, const uint Ny, 
     const float grid_dx = fmaxf(spacing, 1.0e-12f);
     const ulong Nxul = (ulong)Nx;
     const ulong Nyul = (ulong)Ny;
-    const ulong Nzul = (ulong)Nz;
+    const ulong Nzul = (ulong)Nz_out;
     const ulong plane = Nxul * Nyul;
-    const float tls_cap = (float)std::max(std::max(Nx, Ny), Nz) * grid_dx;
+    const float tls_cap = (float)std::max(std::max(Nx, Ny), Nz_out) * grid_dx;
     const auto sample_u = [&](const ulong idx, const uint comp) -> float {
         return u_avg[3ull * idx + (ulong)comp] * u_factor;
     };
@@ -2646,7 +2727,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-260518")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-260523")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -2655,8 +2736,9 @@ void main_setup() {
     std::vector<float> inflow_list;
     std::vector<float> angle_list;
     std::vector<float> profile_u_si;
+    std::vector<float> profile_z_samples_si;
+    std::vector<float> profile_u_samples_si;
     float z_limit_override = 0.0f;
-    float z_limit_si = 0.0f;
     const float profile_dz_si = 0.1f;
     bool buoyancy_enabled = true; // default-on unless explicitly false/False/0
     bool buoyancy_explicit = false;
@@ -3147,6 +3229,34 @@ void main_setup() {
                         vk_inlet_settings.inflow_only = parsed;
                     }
                 }
+                else if (key == "vk_inlet_face_mode") {
+                    std::string v = unquote(val);
+                    if (v.empty()) continue;
+                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                        return c == '-' ? '_' : (char)std::toupper(c);
+                    });
+                    if (v == "AUTO" || v == "AUTO_SIDES" || v == "BY_INFLOW_ONLY" ||
+                        v == "BUSINESS_DEFAULT" || v == "DEFAULT") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::AUTO_SIDES;
+                    } else if (v == "TARGET_INFLOW" || v == "INFLOW" || v == "TARGET" || v == "UPSTREAM_ONLY") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::TARGET_INFLOW;
+                    } else if (v == "EXCLUDE_DOWNSTREAM" || v == "EXCEPT_DOWNSTREAM" ||
+                               v == "ALL_EXCEPT_DOWNSTREAM" || v == "NON_DOWNSTREAM") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::EXCLUDE_DOWNSTREAM;
+                    } else if (v == "EXCLUDE_DOWNSTREAM_SIDES" || v == "EXCEPT_DOWNSTREAM_SIDES" ||
+                               v == "SIDE_EXCEPT_DOWNSTREAM" || v == "SIDES_EXCEPT_DOWNSTREAM" ||
+                               v == "NON_DOWNSTREAM_SIDES" || v == "SIDE_FACES_EXCEPT_DOWNSTREAM") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::EXCLUDE_DOWNSTREAM_SIDES;
+                    } else if (v == "ALL_SIDES" || v == "SIDE_FACES" ||
+                               v == "ALL_SIDE_FACES" || v == "SIDES_ONLY" ||
+                               v == "ALL_SIDES_NO_TOP") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::ALL_SIDES;
+                    } else if (v == "ALL" || v == "ALL_SELECTED" || v == "ALL_FACES") {
+                        vk_inlet_settings.face_mode = VkInletFaceMode::ALL_SELECTED;
+                    } else {
+                        println("| WARNING: vk_inlet_face_mode invalid. Use AUTO_SIDES/ALL_SIDES/etc.          |");
+                    }
+                }
                 else if (key == "vk_inlet_anisotropy" ||
                          key == "vk_inlet_anisotropy_scale" ||
                          key == "vk_inlet_aniso_scale") {
@@ -3431,6 +3541,7 @@ void main_setup() {
                 alignr(6u, to_string(fmtf(vk_inlet_settings.anisotropy_scale.z))) + "] |");
         println("| VK same realiz. | " + alignr(57u, vk_inlet_settings.same_realization_all_faces ? string("true") : string("false")) + " |");
         println("| VK inflow only  | " + alignr(57u, vk_inlet_settings.inflow_only ? string("true") : string("false")) + " |");
+        println("| VK face mode    | " + alignr(57u, string(vk_face_mode_name(vk_inlet_settings.face_mode))) + " |");
     }
 
     const float lbm_ref_u = 0.10f; // 0.1731 is Ma=0.3
@@ -3547,18 +3658,15 @@ void main_setup() {
         si_ref_u = *std::max_element(inflow_list.begin(), inflow_list.end());
     }
     else { // profile_generation
-        z_limit_si = si_size.z - z_si_offset;
-        if (z_limit_override > 0.0f) {
-            if (std::fabs(z_limit_override - z_limit_si) > 1e-3f) {
-                println("| WARNING: z_limit differs from si_z_cfd - base_height. Using z_limit value. |");
-            }
-            z_limit_si = z_limit_override;
-        }
-        if (z_limit_si <= 0.0f) {
-            println("| ERROR: invalid z_limit for profile mode. Check si_z_cfd/base_height.        |");
+        const float profile_domain_agl_si = si_size.z - z_si_offset;
+        if (profile_domain_agl_si <= 0.0f) {
+            println("| ERROR: invalid profile domain height. Check si_z_cfd/base_height.           |");
             println("|-----------------------------------------------------------------------------|");
             wait();
             exit(-1);
+        }
+        if (z_limit_override > 0.0f) {
+            println("| Profile z_limit | terrain-clearance cap only; profile interpolation uses DEM |");
         }
 
         const std::string profile_path = parent + "/wind_bc/profile.dat";
@@ -3593,11 +3701,11 @@ void main_setup() {
             exit(-1);
         }
 
-        if (z_limit_si > 1.0f && z_vals.back() <= 1.5f) {
+        if (profile_domain_agl_si > 1.0f && z_vals.back() <= 1.5f) {
             for (float& z : z_vals) {
-                z *= z_limit_si;
+                z *= profile_domain_agl_si;
             }
-            println("| Profile z unit  | normalized -> scaled by z_limit                           |");
+            println("| Profile z unit  | normalized -> scaled by domain AGL height                 |");
         }
 
         float max_u = 0.0f;
@@ -3611,29 +3719,13 @@ void main_setup() {
             exit(-1);
         }
         si_ref_u = max_u;
-
-        const uint steps = static_cast<uint>(std::ceil(z_limit_si / profile_dz_si));
-        profile_u_si.resize(steps + 1u);
-        for (uint i = 0u; i <= steps; ++i) {
-            const float zq = std::min(z_limit_si, i * profile_dz_si);
-            float u_val = interpolate_profile_cubic(z_vals, u_vals, zq);
-            if (u_val < 0.0f) u_val = 0.0f;
-            profile_u_si[i] = u_val;
-        }
-
-        float u_min_prof = profile_u_si.front();
-        float u_max_prof = profile_u_si.front();
-        for (const float v : profile_u_si) {
-            if (v < u_min_prof) u_min_prof = v;
-            if (v > u_max_prof) u_max_prof = v;
-        }
+        profile_z_samples_si = z_vals;
+        profile_u_samples_si = u_vals;
 
         println("| Profile samples | " + alignr(57u, to_string(z_vals.size())) + " |");
         println("| Profile z range | " + alignr(24u, to_string(fmtf(z_vals.front()))) +
                 " to " + alignl(16u, to_string(fmtf(z_vals.back()))) + " m |");
-        println("| Profile z_limit | " + alignr(57u, to_string(fmtf(z_limit_si))) + " m |");
-        println("| Profile U range | " + alignr(24u, to_string(fmtf(u_min_prof))) +
-                " to " + alignl(16u, to_string(fmtf(u_max_prof))) + " m/s |");
+        println("| Profile domain  | " + alignr(57u, to_string(fmtf(profile_domain_agl_si))) + " m AGL |");
     }
 
     units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
@@ -3680,6 +3772,7 @@ void main_setup() {
         cfg.same_realization_all_faces = vk_inlet_settings.same_realization_all_faces;
         cfg.stride_interpolation = vk_inlet_settings.stride_interpolation;
         cfg.inflow_only = vk_inlet_settings.inflow_only;
+        cfg.face_mode = resolve_vk_face_mode(vk_inlet_settings.face_mode, vk_inlet_settings.inflow_only);
         cfg.anisotropy_scale = vk_inlet_settings.anisotropy_scale;
         // Keep parsed for compatibility with existing config/deck fields.
         cfg.downstream_face_id = downstream_face_id_from_bc(downstream_bc_runtime);
@@ -4085,10 +4178,15 @@ void main_setup() {
         const std::string results_vtk_dir = parent + "/RESULTS/vtk/";
         const std::string vtk_dir = results_vtk_dir + vtk_prefix + datetime + "_raw_";
         const std::string snapshots_dir = parent + "/proj_temp/snapshots";
+        const uint vtk_output_Nz = (top_sponge_grid_extend && Nz_cells_core < lbm.get_Nz()) ? Nz_cells_core : lbm.get_Nz();
         std::filesystem::create_directories(std::filesystem::path(vtk_dir).parent_path());
         std::filesystem::create_directories(snapshots_dir);
         if (use_temperature_bc) {
             print_kv_row("Export mode", "include temperature T field in Kelvin");
+        }
+        if (vtk_output_Nz < lbm.get_Nz()) {
+            print_kv_row("VTK z output", "core Nz=" + to_string((ulong)vtk_output_Nz) +
+                " of solver Nz=" + to_string((ulong)lbm.get_Nz()) + " (top sponge omitted)");
         }
         std::vector<string> vtk_saved_files;
         vtk_saved_files.reserve(16u);
@@ -4586,7 +4684,7 @@ void main_setup() {
             const ulong t = lbm.get_t();
             if (t == 0ull || (t % unsteady_interval) != 0ull) return;
             push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", t));
-            lbm.u.write_device_to_vtk(vtk_dir, true, false);
+            lbm.u.write_device_to_vtk(vtk_dir, true, false, vtk_output_Nz);
             last_u_host_t = t;
             last_unsteady_u_vtk_t = t;
             flush_vtk_saved_files();
@@ -4612,7 +4710,7 @@ void main_setup() {
             write_avg_vtk(avg_file, lbm.get_Nx(), lbm.get_Ny(), lbm.get_Nz(),
                           avg_u.data(), avg_rho.data(), T_avg_ptr, flags_host.data(),
                           M2_u.data(), M2_v.data(), M2_w.data(),
-                          avg_count, true, false);
+                          avg_count, true, false, vtk_output_Nz);
             push_vtk_saved_file(avg_file);
             flush_vtk_saved_files();
             print_kv_row("Avg samples", to_string(avg_count));
@@ -4665,14 +4763,14 @@ void main_setup() {
             const ulong vtk_t = lbm.get_t();
             if (last_unsteady_u_vtk_t != vtk_t) {
                 push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", vtk_t));
-                lbm.u.write_device_to_vtk(vtk_dir, true, false);
+                lbm.u.write_device_to_vtk(vtk_dir, true, false, vtk_output_Nz);
             }
             push_vtk_saved_file(default_filename(vtk_dir, "rho", ".vtk", vtk_t));
-            lbm.rho.write_device_to_vtk(vtk_dir, true, false);
+            lbm.rho.write_device_to_vtk(vtk_dir, true, false, vtk_output_Nz);
 #ifdef TEMPERATURE
             if (use_temperature_bc) {
                 push_vtk_saved_file(default_filename(vtk_dir, "T", ".vtk", vtk_t));
-                lbm.T.write_device_to_vtk(vtk_dir, true, false);
+                lbm.T.write_device_to_vtk(vtk_dir, true, false, vtk_output_Nz);
             }
 #endif
         };
@@ -5668,17 +5766,13 @@ void main_setup() {
             wait();
             exit(-1);
         }
-        if (profile_u_si.empty()) {
-            println("| ERROR: profile forcing requires profile_u_si to be initialized.             |");
+        if (profile_z_samples_si.empty() || profile_u_samples_si.empty()) {
+            println("| ERROR: profile forcing requires profile.dat samples to be initialized.      |");
             println("|-----------------------------------------------------------------------------|");
             wait();
             exit(-1);
         }
-
-        std::vector<float> profile_u_lbmu(profile_u_si.size(), 0.0f);
-        for (size_t i = 0; i < profile_u_si.size(); ++i) {
-            profile_u_lbmu[i] = profile_u_si[i] * u_scale;
-        }
+        std::vector<float> profile_u_lbmu;
 
         const float3 origin_lbmu = float3(
             0.5f - 0.5f * (float)lbm_N.x,
@@ -5749,6 +5843,47 @@ void main_setup() {
                 println("| Terrain DEM     | invalid DEM or STL XY range, fallback to flat ground       |");
             }
         }
+
+        const float solver_top_si = (lbm_N.z > 0u) ? units.si_x((float)(lbm_N.z - 1u)) : 0.0f;
+        const float core_top_si = (top_sponge_side_ref_z_cap >= 0)
+            ? units.si_x((float)top_sponge_side_ref_z_cap)
+            : solver_top_si;
+        float ground_min_si = units.si_x(ground_z_min_lbm - origin_lbmu.z);
+        float ground_max_si = units.si_x(ground_z_max_lbm - origin_lbmu.z);
+        if (!std::isfinite(ground_min_si)) ground_min_si = z_si_offset;
+        if (!std::isfinite(ground_max_si)) ground_max_si = ground_min_si;
+        float profile_table_top_si = solver_top_si - ground_min_si;
+        if (!std::isfinite(profile_table_top_si) || profile_table_top_si <= 0.0f) {
+            profile_table_top_si = std::max(profile_dz_si, si_size.z - ground_min_si);
+        }
+        profile_table_top_si = std::max(profile_table_top_si, profile_dz_si);
+
+        const uint profile_steps = static_cast<uint>(std::ceil(profile_table_top_si / profile_dz_si));
+        profile_u_si.assign(profile_steps + 1u, 0.0f);
+        for (uint i = 0u; i <= profile_steps; ++i) {
+            const float zq = std::min(profile_table_top_si, (float)i * profile_dz_si);
+            float u_val = interpolate_profile_cubic(profile_z_samples_si, profile_u_samples_si, zq);
+            if (u_val < 0.0f) u_val = 0.0f;
+            profile_u_si[i] = u_val;
+        }
+
+        float u_min_prof = profile_u_si.front();
+        float u_max_prof = profile_u_si.front();
+        for (const float v : profile_u_si) {
+            if (v < u_min_prof) u_min_prof = v;
+            if (v > u_max_prof) u_max_prof = v;
+        }
+        profile_u_lbmu.assign(profile_u_si.size(), 0.0f);
+        for (size_t i = 0; i < profile_u_si.size(); ++i) {
+            profile_u_lbmu[i] = profile_u_si[i] * u_scale;
+        }
+        println("| Profile table   | local-terrain AGL top=" + to_string(profile_table_top_si, 3u) +
+                " m, core_top=" + to_string(core_top_si, 3u) +
+                " m, solver_top=" + to_string(solver_top_si, 3u) + " m |");
+        println("| Profile ground  | z(SI) min/max=" + to_string(ground_min_si, 3u) +
+                " / " + to_string(ground_max_si, 3u) + " m |");
+        println("| Profile U range | " + alignr(24u, to_string(fmtf(u_min_prof))) +
+                " to " + alignl(16u, to_string(fmtf(u_max_prof))) + " m/s |");
 
         const uint total_cases = static_cast<uint>(angle_list.size());
         uint case_index = 0u;
@@ -5962,7 +6097,12 @@ void main_setup() {
                     uint x = 0u, y = 0u, z = 0u;
                     lbm.coordinates(q, x, y, z);
                     const float ground_z = ground_xy[(ulong)y * (ulong)Nx + (ulong)x];
-                    const float u_mag = profile_speed_lbmu(q.z, ground_z);
+                    float pos_z_eval = q.z;
+                    const bool is_side_boundary = (x == 0u || x == Nx - 1u || y == 0u || y == Ny - 1u);
+                    if (is_side_boundary && top_sponge_side_ref_z_cap >= 0 && (int)z > top_sponge_side_ref_z_cap) {
+                        pos_z_eval = lbm.position(x, y, (uint)top_sponge_side_ref_z_cap).z;
+                    }
+                    const float u_mag = profile_speed_lbmu(pos_z_eval, ground_z);
                     return float3(dir_x * u_mag, dir_y * u_mag, 0.0f);
                 };
                 apply_flux_correction(lbm, case_downstream_bc, eval, /*show_report=*/true,

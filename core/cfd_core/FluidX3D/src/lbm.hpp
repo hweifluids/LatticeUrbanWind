@@ -304,7 +304,7 @@ public:
 			else print_error("Error in vtk_type(): Type not supported.");
 			return "";
 		}
-		inline void write_vtk(const string& path, const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
+		inline void write_vtk(const string& path, const bool convert_to_si_units=true, const bool print_saved_message=true, const uint Nz_write=0u) { // write binary .vtk file
 			float spacing = 1.0f;
 			T unit_conversion_factor = (T)1;
 			if(convert_to_si_units) {
@@ -315,19 +315,21 @@ public:
 				if(name=="T"  ) unit_conversion_factor = (T)units.si_dT (1.0f);
 			}
 			const string filename = create_file_extension(path, ".vtk");
+			const uint Nz_out = (Nz_write>0u&&Nz_write<Nz) ? Nz_write : Nz;
+			const ulong points = (ulong)Nx*(ulong)Ny*(ulong)Nz_out;
 			float3 origin = spacing*float3(0.5f-0.5f*(float)Nx, 0.5f-0.5f*(float)Ny, 0.5f-0.5f*(float)Nz);
 			if(convert_to_si_units) origin += vtk_origin_shift;
 			const string header =
 				"# vtk DataFile Version 3.0\nFluidX3D "+filename.substr(filename.rfind('/')+1)+"\nBINARY\nDATASET STRUCTURED_POINTS\n"
-				"DIMENSIONS "+to_string(Nx)+" "+to_string(Ny)+" "+to_string(Nz)+"\n"
+				"DIMENSIONS "+to_string(Nx)+" "+to_string(Ny)+" "+to_string(Nz_out)+"\n"
 				"ORIGIN "+to_string(origin.x)+" "+to_string(origin.y)+" "+to_string(origin.z)+"\n"
 				"SPACING "+to_string(spacing)+" "+to_string(spacing)+" "+to_string(spacing)+"\n"
-				"POINT_DATA "+to_string((ulong)Nx*(ulong)Ny*(ulong)Nz)+"\n"
+				"POINT_DATA "+to_string(points)+"\n"
 				"SCALARS data "+vtk_type()+" "+to_string(dimensions())+"\nLOOKUP_TABLE default\n"
 			;
 			const uint chunk_size_MB = 4u*thread::hardware_concurrency(); // in MB; convert and write data in chunks, to reduce memory footprint and time for large memory allocation
 			const ulong chunk_elements = (1048576ull*(ulong)chunk_size_MB)/((ulong)dimensions()*sizeof(T));
-			const ulong chunks=length()/chunk_elements, chunk_remainder=length()%chunk_elements;
+			const ulong chunks=points/chunk_elements, chunk_remainder=points%chunk_elements;
 			T* data = new T[chunk_elements*(ulong)dimensions()];
 			create_folder(filename);
 			std::ofstream file(filename, std::ios::out|std::ios::binary);
@@ -412,12 +414,12 @@ public:
 			for(uint domain=0u; domain<D; domain++) buffers[domain]->enqueue_write_to_device();
 			for(uint domain=0u; domain<D; domain++) buffers[domain]->finish_queue();
 		}
-		inline void write_host_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
-			write_vtk(default_filename(path, name, ".vtk", lbm->get_t()), convert_to_si_units, print_saved_message);
+		inline void write_host_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true, const uint Nz_write=0u) { // write binary .vtk file
+			write_vtk(default_filename(path, name, ".vtk", lbm->get_t()), convert_to_si_units, print_saved_message, Nz_write);
 		}
-		inline void write_device_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true) { // write binary .vtk file
+		inline void write_device_to_vtk(const string& path="", const bool convert_to_si_units=true, const bool print_saved_message=true, const uint Nz_write=0u) { // write binary .vtk file
 			read_from_device();
-			write_host_to_vtk(path, convert_to_si_units, print_saved_message);
+			write_host_to_vtk(path, convert_to_si_units, print_saved_message, Nz_write);
 		}
 	};
 

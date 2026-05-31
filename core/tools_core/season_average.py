@@ -134,6 +134,35 @@ class VtkDirectoryChoice:
 
 
 @dataclass(frozen=True)
+class WindFieldSelection:
+    vector_field: str | None
+    component_fields: tuple[str, str, str] | None
+
+    def display_name(self) -> str:
+        if self.vector_field is not None:
+            return self.vector_field
+        if self.component_fields is not None:
+            return "/".join(self.component_fields)
+        return "-"
+
+
+@dataclass(frozen=True)
+class ResamplePlan:
+    dimensions: tuple[int, int, int]
+    origin: tuple[float, float, float]
+    spacing: tuple[float, float, float]
+    x0: np.ndarray
+    x1: np.ndarray
+    xw: np.ndarray
+    y0: np.ndarray
+    y1: np.ndarray
+    yw: np.ndarray
+    z0: np.ndarray
+    z1: np.ndarray
+    zw: np.ndarray
+
+
+@dataclass(frozen=True)
 class ProjectLayout:
     config_path: Path
     project_dir: Path
@@ -728,13 +757,23 @@ def scan_vtk_directory(directory: Path, label: str) -> VtkDirectoryChoice | None
     return VtkDirectoryChoice(label=label, directory=directory.resolve(), angle_to_file=selected)
 
 
-def choose_vtk_source(project_dir: Path, weights: list[DirectionWeight]) -> VtkDirectoryChoice:
-    candidates = [
-        scan_vtk_directory(project_dir / "RESULTS" / "crop" / "cropped_vtk", "preferred cropped_vtk"),
-        scan_vtk_directory(project_dir / "RESULTS" / "vtk", "fallback RESULTS/vtk"),
-    ]
+def choose_vtk_source(
+    project_dir: Path,
+    weights: list[DirectionWeight],
+    explicit_vtk_dir: Path | None = None,
+) -> VtkDirectoryChoice:
+    if explicit_vtk_dir is not None:
+        directory = explicit_vtk_dir if explicit_vtk_dir.is_absolute() else project_dir / explicit_vtk_dir
+        candidates = [scan_vtk_directory(directory, "explicit vtk-dir")]
+    else:
+        candidates = [
+            scan_vtk_directory(project_dir / "RESULTS" / "crop" / "cropped_vtk", "preferred cropped_vtk"),
+            scan_vtk_directory(project_dir / "RESULTS" / "vtk", "fallback RESULTS/vtk"),
+        ]
     candidates = [candidate for candidate in candidates if candidate is not None]
     if not candidates:
+        if explicit_vtk_dir is not None:
+            raise FileNotFoundError(f"No suitable *avg*.vtk files found under explicit vtk-dir: {directory}")
         raise FileNotFoundError(
             "No suitable *avg*.vtk files found under "
             f"{project_dir / 'RESULTS' / 'crop' / 'cropped_vtk'} or {project_dir / 'RESULTS' / 'vtk'}"
@@ -756,7 +795,7 @@ def choose_vtk_source(project_dir: Path, weights: list[DirectionWeight]) -> VtkD
 
     raise RuntimeError(
         "No VTK directory covers all directions with non-zero windrose probability. "
-        "Check cropped_vtk / RESULTS/vtk contents."
+        "Check the selected VTK directory contents."
     )
 
 
@@ -932,17 +971,25 @@ def _normalize_field_token(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 
-def resolve_vector_field_name(vtk_info: dict) -> str:
+def _field_lookup(vtk_info: dict) -> tuple[dict[str, str], dict[str, str]]:
     fields = list(vtk_info["fields"].keys())
-    if "u_avg" in vtk_info["fields"]:
-        return "u_avg"
-
-    candidates = ["u_avg", "velocity", "wind", "uvw", "u"]
     by_lower = {field.lower(): field for field in fields}
     by_norm = {_normalize_field_token(field): field for field in fields}
+    return by_lower, by_norm
+
+
+def _field_has_components(vtk_info: dict, field_name: str, min_components: int) -> bool:
+    meta = vtk_info["fields"].get(field_name)
+    return meta is not None and int(meta.get("components", 1)) >= min_components
+
+
+def resolve_vector_field_name(vtk_info: dict) -> str:
+    fields = list(vtk_info["fields"].keys())
+    candidates = ["u_avg", "velocity", "wind", "uvw", "u"]
+    by_lower, by_norm = _field_lookup(vtk_info)
     for candidate in candidates:
         found = by_lower.get(candidate.lower()) or by_norm.get(_normalize_field_token(candidate))
-        if found is not None:
+        if found is not None and _field_has_components(vtk_info, found, 3):
             return found
 
     n_points = int(vtk_info.get("n_points", 0))
@@ -953,14 +1000,41 @@ def resolve_vector_field_name(vtk_info: dict) -> str:
     raise ValueError(f"VTK missing wind vector field. Available fields={fields}")
 
 
+def resolve_wind_component_field_names(vtk_info: dict) -> tuple[str, str, str] | None:
+    by_lower, by_norm = _field_lookup(vtk_info)
+
+    def find_component(candidates: list[str]) -> str | None:
+        for candidate in candidates:
+            found = by_lower.get(candidate.lower()) or by_norm.get(_normalize_field_token(candidate))
+            if found is not None and int(vtk_info["fields"][found].get("components", 1)) == 1:
+                return found
+        return None
+
+    u_name = find_component(["u", "u_avg_x", "ux", "u_x", "velocity_x", "u_filtered"])
+    v_name = find_component(["v", "u_avg_y", "uy", "u_y", "velocity_y", "v_filtered"])
+    w_name = find_component(["w", "u_avg_z", "uz", "u_z", "velocity_z", "w_filtered"])
+    if u_name is None or v_name is None or w_name is None:
+        return None
+    return u_name, v_name, w_name
+
+
+def resolve_wind_field_selection(vtk_info: dict) -> WindFieldSelection:
+    try:
+        return WindFieldSelection(vector_field=resolve_vector_field_name(vtk_info), component_fields=None)
+    except ValueError:
+        components = resolve_wind_component_field_names(vtk_info)
+        if components is not None:
+            return WindFieldSelection(vector_field=None, component_fields=components)
+        raise
+
+
 def resolve_tke_field_name(vtk_info: dict) -> str:
     fields = list(vtk_info["fields"].keys())
     if "tke" in vtk_info["fields"]:
         return "tke"
 
-    candidates = ["tke", "k", "tke_avg", "k_avg", "sgs_tke", "turbulence_k", "tkenergy"]
-    by_lower = {field.lower(): field for field in fields}
-    by_norm = {_normalize_field_token(field): field for field in fields}
+    candidates = ["tke", "k", "tke_avg", "k_avg", "sgs_tke", "turbulence_k", "tkenergy", "tke_filtered"]
+    by_lower, by_norm = _field_lookup(vtk_info)
     for candidate in candidates:
         found = by_lower.get(candidate.lower()) or by_norm.get(_normalize_field_token(candidate))
         if found is not None:
@@ -978,12 +1052,12 @@ def validate_headers(vtk_choice: VtkDirectoryChoice, weights: list[DirectionWeig
         vtk_file = vtk_choice.angle_to_file[item.angle]
         log(f"Read header for angle {format_number(item.angle)} deg from {vtk_file.name}")
         info = parse_legacy_vtk_header(vtk_file)
-        vector_name = resolve_vector_field_name(info)
+        wind_selection = resolve_wind_field_selection(info)
         tke_name = resolve_tke_field_name(info)
         log(
             "  Grid signature: "
             f"dims={info['dimensions']}, origin={info['origin']}, spacing={info['spacing']}, "
-            f"vector={vector_name}, tke={tke_name}"
+            f"wind={wind_selection.display_name()}, tke={tke_name}"
         )
         if reference_header is None:
             reference_header = info
@@ -1088,7 +1162,7 @@ def log_progress(prefix: str, current: int, total: int, last_percent: int) -> in
 def accumulate_direction(
     vtk_path: Path,
     vtk_info: dict,
-    vector_field: str,
+    wind_selection: WindFieldSelection,
     tke_field: str,
     velocity_weight: float,
     tke_weight: float,
@@ -1099,18 +1173,41 @@ def accumulate_direction(
 
     if abs(velocity_weight) > 0.0:
         log(
-            f"Start vector accumulation for {angle_label}: field={vector_field}, "
+            f"Start vector accumulation for {angle_label}: field={wind_selection.display_name()}, "
             f"velocity_weight={velocity_weight:.6f}"
         )
         last_percent = -1
         vel_weight32 = np.float32(velocity_weight)
-        for z_index, vel in iter_field_slices(vtk_path, vtk_info, vector_field):
-            if vel.ndim != 3 or vel.shape[2] < 3:
-                raise RuntimeError(f"Vector field '{vector_field}' in {vtk_path.name} must have 3 components")
-            accum.u[z_index] += vel_weight32 * vel[:, :, :3]
-            mag = np.sqrt(vel[:, :, 0] * vel[:, :, 0] + vel[:, :, 1] * vel[:, :, 1] + vel[:, :, 2] * vel[:, :, 2])
-            accum.vm[z_index] += vel_weight32 * mag
-            last_percent = log_progress(f"  {angle_label} vector progress", z_index + 1, nz, last_percent)
+        if wind_selection.vector_field is not None:
+            vector_field = wind_selection.vector_field
+            for z_index, vel in iter_field_slices(vtk_path, vtk_info, vector_field):
+                if vel.ndim != 3 or vel.shape[2] < 3:
+                    raise RuntimeError(f"Vector field '{vector_field}' in {vtk_path.name} must have 3 components")
+                accum.u[z_index] += vel_weight32 * vel[:, :, :3]
+                mag = np.sqrt(
+                    vel[:, :, 0] * vel[:, :, 0] + vel[:, :, 1] * vel[:, :, 1] + vel[:, :, 2] * vel[:, :, 2]
+                )
+                accum.vm[z_index] += vel_weight32 * mag
+                last_percent = log_progress(f"  {angle_label} vector progress", z_index + 1, nz, last_percent)
+        elif wind_selection.component_fields is not None:
+            u_field, v_field, w_field = wind_selection.component_fields
+            log(f"  Component scalar fields: u={u_field}, v={v_field}, w={w_field}")
+            iter_u = iter_field_slices(vtk_path, vtk_info, u_field)
+            iter_v = iter_field_slices(vtk_path, vtk_info, v_field)
+            iter_w = iter_field_slices(vtk_path, vtk_info, w_field)
+            for (zu, u), (zv, v), (zw, w) in zip(iter_u, iter_v, iter_w):
+                if zu != zv or zu != zw:
+                    raise RuntimeError(f"Component field z-slice mismatch in {vtk_path.name}: {zu}, {zv}, {zw}")
+                if u.ndim != 2 or v.ndim != 2 or w.ndim != 2:
+                    raise RuntimeError(f"Component fields in {vtk_path.name} must be scalar")
+                accum.u[zu, :, :, 0] += vel_weight32 * u
+                accum.u[zu, :, :, 1] += vel_weight32 * v
+                accum.u[zu, :, :, 2] += vel_weight32 * w
+                mag = np.sqrt(u * u + v * v + w * w)
+                accum.vm[zu] += vel_weight32 * mag
+                last_percent = log_progress(f"  {angle_label} vector progress", zu + 1, nz, last_percent)
+        else:
+            raise RuntimeError("No wind field selection available for accumulation")
     else:
         log(f"Skip vector accumulation for {angle_label}: velocity_weight is zero")
 
@@ -1148,7 +1245,7 @@ def synthesize_average_fields(
 
             vtk_path = vtk_choice.angle_to_file[item.angle]
             vtk_info = header_by_angle[item.angle]
-            vector_field = resolve_vector_field_name(vtk_info)
+            wind_selection = resolve_wind_field_selection(vtk_info)
             tke_field = resolve_tke_field_name(vtk_info)
 
             log_rule(f"Accumulate {format_number(item.angle)} deg / {item.label}")
@@ -1157,7 +1254,7 @@ def synthesize_average_fields(
             accumulate_direction(
                 vtk_path=vtk_path,
                 vtk_info=vtk_info,
-                vector_field=vector_field,
+                wind_selection=wind_selection,
                 tke_field=tke_field,
                 velocity_weight=item.velocity_weight,
                 tke_weight=item.tke_weight,
@@ -1217,6 +1314,188 @@ def write_legacy_vtk(output_path: Path, reference_header: dict, accum: Accumulat
                 last_percent = log_progress(f"  {field_name} write progress", z_index + 1, nz, last_percent)
 
     log(f"Finished writing synthesized VTK: {output_path}")
+
+
+def _axis_resample_indices(n_in: int, n_out: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if n_out <= 1:
+        positions = np.zeros(1, dtype=np.float64)
+    else:
+        positions = np.linspace(0.0, float(n_in - 1), int(n_out), dtype=np.float64)
+    lower = np.floor(positions).astype(np.int64)
+    upper = np.minimum(lower + 1, int(n_in - 1)).astype(np.int64)
+    weight = (positions - lower).astype(np.float32)
+    return lower, upper, weight
+
+
+def _resampled_axis_size(n_in: int, source_spacing: float, requested_spacing: float) -> tuple[int, float]:
+    if requested_spacing <= 0.0 or not math.isfinite(requested_spacing):
+        raise ValueError(f"Output spacing must be positive, got {requested_spacing}")
+    if n_in <= 1:
+        return 1, float(requested_spacing)
+    extent = abs(float(source_spacing)) * float(n_in - 1)
+    n_out = max(2, int(round(extent / float(requested_spacing))) + 1)
+    actual_spacing = extent / float(n_out - 1)
+    if float(source_spacing) < 0.0:
+        actual_spacing = -actual_spacing
+    return n_out, actual_spacing
+
+
+def build_resample_plan(reference_header: dict, requested_spacing: tuple[float, float, float]) -> ResamplePlan:
+    nx, ny, nz = reference_header["dimensions"]
+    ox, oy, oz = reference_header["origin"]
+    dx, dy, dz = reference_header["spacing"]
+    nx_out, dx_out = _resampled_axis_size(int(nx), float(dx), float(requested_spacing[0]))
+    ny_out, dy_out = _resampled_axis_size(int(ny), float(dy), float(requested_spacing[1]))
+    nz_out, dz_out = _resampled_axis_size(int(nz), float(dz), float(requested_spacing[2]))
+    x0, x1, xw = _axis_resample_indices(int(nx), nx_out)
+    y0, y1, yw = _axis_resample_indices(int(ny), ny_out)
+    z0, z1, zw = _axis_resample_indices(int(nz), nz_out)
+    return ResamplePlan(
+        dimensions=(nx_out, ny_out, nz_out),
+        origin=(float(ox), float(oy), float(oz)),
+        spacing=(float(dx_out), float(dy_out), float(dz_out)),
+        x0=x0,
+        x1=x1,
+        xw=xw,
+        y0=y0,
+        y1=y1,
+        yw=yw,
+        z0=z0,
+        z1=z1,
+        zw=zw,
+    )
+
+
+def _resample_plane_bilinear(plane: np.ndarray, plan: ResamplePlan) -> np.ndarray:
+    wx = plan.xw[None, :]
+    wy = plan.yw[:, None]
+    lower = plane[plan.y0[:, None], plan.x0[None, :]] * (1.0 - wx) + plane[
+        plan.y0[:, None], plan.x1[None, :]
+    ] * wx
+    upper = plane[plan.y1[:, None], plan.x0[None, :]] * (1.0 - wx) + plane[
+        plan.y1[:, None], plan.x1[None, :]
+    ] * wx
+    return np.asarray(lower * (1.0 - wy) + upper * wy, dtype=np.float32)
+
+
+def _resample_volume_z_plane(field_array: np.ndarray, plan: ResamplePlan, z_out_index: int) -> np.ndarray:
+    z0 = int(plan.z0[z_out_index])
+    z1 = int(plan.z1[z_out_index])
+    zw = float(plan.zw[z_out_index])
+    if z0 == z1 or zw == 0.0:
+        source_plane = np.asarray(field_array[z0], dtype=np.float32)
+    else:
+        source_plane = (
+            np.asarray(field_array[z0], dtype=np.float32) * np.float32(1.0 - zw)
+            + np.asarray(field_array[z1], dtype=np.float32) * np.float32(zw)
+        )
+    return _resample_plane_bilinear(source_plane, plan)
+
+
+def _write_cached_scalar(
+    handle,
+    field_name: str,
+    field_array: np.ndarray,
+    nz: int,
+) -> None:
+    log(f"  Write SCALARS {field_name}")
+    handle.write(f"SCALARS {field_name} float\n".encode("utf-8"))
+    handle.write(b"LOOKUP_TABLE default\n")
+    last_percent = -1
+    for z_index in range(nz):
+        handle.write(np.asarray(field_array[z_index], dtype=">f4").tobytes(order="C"))
+        last_percent = log_progress(f"  {field_name} write progress", z_index + 1, nz, last_percent)
+
+
+def _write_resampled_scalar(
+    handle,
+    field_name: str,
+    source_array: np.ndarray,
+    plan: ResamplePlan,
+) -> None:
+    _, _, nz = plan.dimensions
+    log(f"  Write SCALARS {field_name}")
+    handle.write(f"SCALARS {field_name} float\n".encode("utf-8"))
+    handle.write(b"LOOKUP_TABLE default\n")
+    last_percent = -1
+    for z_index in range(nz):
+        out = _resample_volume_z_plane(source_array, plan, z_index)
+        handle.write(np.asarray(out, dtype=">f4").tobytes(order="C"))
+        last_percent = log_progress(f"  {field_name} write progress", z_index + 1, nz, last_percent)
+
+
+def write_legacy_vtk_resampled(
+    output_path: Path,
+    reference_header: dict,
+    accum: AccumulatorVolumes,
+    windrose_name: str,
+    requested_spacing: tuple[float, float, float],
+) -> ResamplePlan:
+    plan = build_resample_plan(reference_header, requested_spacing)
+    nx, ny, nz = plan.dimensions
+    ox, oy, oz = plan.origin
+    dx, dy, dz = plan.spacing
+    n_points = int(nx) * int(ny) * int(nz)
+    temp_dir = Path(tempfile.mkdtemp(prefix="season_average_resample_tmp_", dir=output_path.parent))
+
+    log_rule("Write Resampled Output VTK")
+    log(f"Requested output spacing: {requested_spacing}")
+    log(
+        "Resolved output grid: "
+        f"dims={plan.dimensions}, origin={plan.origin}, spacing={plan.spacing}, "
+        f"points={n_points}"
+    )
+    log(f"Component cache directory: {temp_dir}")
+
+    component_cache: list[np.memmap] = []
+    try:
+        for name in ("u", "v", "w"):
+            component_cache.append(
+                np.memmap(temp_dir / f"{name}_resampled.bin", mode="w+", dtype=np.float32, shape=(nz, ny, nx))
+            )
+
+        log(f"Writing synthesized VTK to: {output_path}")
+        with output_path.open("wb") as handle:
+            header_lines = [
+                "# vtk DataFile Version 3.0",
+                f"Season average synthesized from {windrose_name}",
+                "BINARY",
+                "DATASET STRUCTURED_POINTS",
+                f"DIMENSIONS {nx} {ny} {nz}",
+                f"ORIGIN {ox} {oy} {oz}",
+                f"SPACING {dx} {dy} {dz}",
+                "",
+                f"POINT_DATA {n_points}",
+            ]
+            handle.write(("\n".join(header_lines) + "\n").encode("utf-8"))
+
+            log("  Write VECTORS u_avg")
+            handle.write(b"VECTORS u_avg float\n")
+            vector_plane = np.empty((ny, nx, 3), dtype=np.float32)
+            last_percent = -1
+            for z_index in range(nz):
+                for comp_index in range(3):
+                    out = _resample_volume_z_plane(accum.u[..., comp_index], plan, z_index)
+                    component_cache[comp_index][z_index] = out
+                    vector_plane[:, :, comp_index] = out
+                handle.write(np.asarray(vector_plane, dtype=">f4").tobytes(order="C"))
+                last_percent = log_progress("  u_avg write progress", z_index + 1, nz, last_percent)
+
+            for cache in component_cache:
+                cache.flush()
+
+            for field_name, cache in zip(("u", "v", "w"), component_cache):
+                _write_cached_scalar(handle, field_name, cache, nz)
+            _write_resampled_scalar(handle, "vm", accum.vm, plan)
+            _write_resampled_scalar(handle, "tke", accum.tke, plan)
+    finally:
+        for cache in component_cache:
+            if hasattr(cache, "flush"):
+                cache.flush()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    log(f"Finished writing synthesized VTK: {output_path}")
+    return plan
 
 
 def height_to_z_index(height_m: float) -> int:
@@ -1360,6 +1639,7 @@ def write_summary(
     vtk_choice: VtkDirectoryChoice,
     reference_header: dict,
     total_probability: float,
+    output_header: dict | None = None,
 ) -> None:
     lines: list[str] = []
     lines.append("Season Average Summary")
@@ -1376,10 +1656,16 @@ def write_summary(
     lines.append(f"Reference speed from profile: {format_number(reference_speed)} m/s ({reference_speed_mode})")
     lines.append(f"Normalized total probability used: {total_probability:.9f}")
     lines.append(
-        "Grid signature: "
+        "Input grid signature: "
         f"dims={reference_header['dimensions']}, origin={reference_header['origin']}, "
         f"spacing={reference_header['spacing']}"
     )
+    if output_header is not None:
+        lines.append(
+            "Output grid signature: "
+            f"dims={output_header['dimensions']}, origin={output_header['origin']}, "
+            f"spacing={output_header['spacing']}"
+        )
     lines.append("")
     lines.append("Speed bins:")
     for item in speed_bins:
@@ -1404,16 +1690,43 @@ def write_summary(
     log(f"Saved summary: {summary_path}")
 
 
+def parse_requested_output_spacing(values: list[float] | None) -> tuple[float, float, float] | None:
+    if values is None:
+        return None
+    if len(values) == 1:
+        spacing = (float(values[0]), float(values[0]), float(values[0]))
+    elif len(values) == 3:
+        spacing = (float(values[0]), float(values[1]), float(values[2]))
+    else:
+        raise ValueError("--output-spacing expects either one value or three values (x y z)")
+    if any((not math.isfinite(item) or item <= 0.0) for item in spacing):
+        raise ValueError(f"Output spacing values must be positive finite numbers: {spacing}")
+    return spacing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         usage="%(prog)s <config_path>",
         description="Synthesize seasonal average wind/tke VTK from directional average VTK files and windrose probabilities.",
     )
     parser.add_argument("config_path", help="Path to LUW-family config (*.luw, *.luwdg, *.luwpf)")
+    parser.add_argument(
+        "--vtk-dir",
+        help="Directory containing source *avg*.vtk files. Relative paths are resolved from the project directory.",
+    )
+    parser.add_argument(
+        "--output-spacing",
+        nargs="+",
+        type=float,
+        metavar="M",
+        help="Resample output VTK spacing in meters. Pass one value for x/y/z or three values for x y z.",
+    )
+    parser.add_argument("--skip-figures", action="store_true", help="Only write VTK and summary; skip PNG figures.")
     args = parser.parse_args()
 
     start_time = time.time()
     layout = load_project_layout(Path(args.config_path))
+    requested_output_spacing = parse_requested_output_spacing(args.output_spacing)
 
     log_rule("Season Average Synthesis")
     log(f"Config path: {layout.config_path}")
@@ -1424,6 +1737,12 @@ def main() -> None:
     log(f"Output dir: {layout.output_dir}")
     log(f"Figures dir: {layout.figure_dir}")
     log(f"Figure DPI: {layout.figure_dpi}")
+    if args.vtk_dir:
+        log(f"Explicit VTK dir: {args.vtk_dir}")
+    if requested_output_spacing is not None:
+        log(f"Requested output spacing: {requested_output_spacing}")
+    if args.skip_figures:
+        log("Figure generation: skipped by --skip-figures")
     if layout.z_limit_si is not None:
         log(f"Profile z_limit candidate from config: {format_number(layout.z_limit_si)} m")
     else:
@@ -1459,7 +1778,11 @@ def main() -> None:
         total_probability=total_probability,
     )
 
-    vtk_choice = choose_vtk_source(layout.project_dir, weights)
+    vtk_choice = choose_vtk_source(
+        layout.project_dir,
+        weights,
+        explicit_vtk_dir=Path(args.vtk_dir) if args.vtk_dir else None,
+    )
     reference_header, header_by_angle = validate_headers(vtk_choice, weights)
 
     accum = synthesize_average_fields(
@@ -1471,12 +1794,23 @@ def main() -> None:
     )
 
     try:
-        write_legacy_vtk(
-            output_path=layout.output_vtk_path,
-            reference_header=reference_header,
-            accum=accum,
-            windrose_name=layout.windrose_path.name,
-        )
+        if requested_output_spacing is None:
+            write_legacy_vtk(
+                output_path=layout.output_vtk_path,
+                reference_header=reference_header,
+                accum=accum,
+                windrose_name=layout.windrose_path.name,
+            )
+        else:
+            write_legacy_vtk_resampled(
+                output_path=layout.output_vtk_path,
+                reference_header=reference_header,
+                accum=accum,
+                windrose_name=layout.windrose_path.name,
+                requested_spacing=requested_output_spacing,
+            )
+
+        output_info = parse_legacy_vtk_header(layout.output_vtk_path)
 
         write_summary(
             summary_path=layout.summary_path,
@@ -1489,64 +1823,65 @@ def main() -> None:
             vtk_choice=vtk_choice,
             reference_header=reference_header,
             total_probability=total_probability,
+            output_header=output_info,
         )
 
-        output_info = parse_legacy_vtk_header(layout.output_vtk_path)
-        plot_scalar_figure(
-            vtk_file=layout.output_vtk_path,
-            vtk_info=output_info,
-            field_name="u",
-            title="Season Average U Component",
-            colorbar_label="u (m/s)",
-            cmap="coolwarm",
-            output_path=layout.figure_dir / "season_average_u_9layers.png",
-            dpi=max(80, int(layout.figure_dpi)),
-            symmetric=True,
-        )
-        plot_scalar_figure(
-            vtk_file=layout.output_vtk_path,
-            vtk_info=output_info,
-            field_name="v",
-            title="Season Average V Component",
-            colorbar_label="v (m/s)",
-            cmap="coolwarm",
-            output_path=layout.figure_dir / "season_average_v_9layers.png",
-            dpi=max(80, int(layout.figure_dpi)),
-            symmetric=True,
-        )
-        plot_scalar_figure(
-            vtk_file=layout.output_vtk_path,
-            vtk_info=output_info,
-            field_name="w",
-            title="Season Average W Component",
-            colorbar_label="w (m/s)",
-            cmap="coolwarm",
-            output_path=layout.figure_dir / "season_average_w_9layers.png",
-            dpi=max(80, int(layout.figure_dpi)),
-            symmetric=True,
-        )
-        plot_scalar_figure(
-            vtk_file=layout.output_vtk_path,
-            vtk_info=output_info,
-            field_name="vm",
-            title="Season Average Velocity Magnitude",
-            colorbar_label="vm (m/s)",
-            cmap="turbo",
-            output_path=layout.figure_dir / "season_average_vm_9layers.png",
-            dpi=max(80, int(layout.figure_dpi)),
-            symmetric=False,
-        )
-        plot_scalar_figure(
-            vtk_file=layout.output_vtk_path,
-            vtk_info=output_info,
-            field_name="tke",
-            title="Season Average TKE",
-            colorbar_label="tke (m^2/s^2)",
-            cmap="magma",
-            output_path=layout.figure_dir / "season_average_tke_9layers.png",
-            dpi=max(80, int(layout.figure_dpi)),
-            symmetric=False,
-        )
+        if not args.skip_figures:
+            plot_scalar_figure(
+                vtk_file=layout.output_vtk_path,
+                vtk_info=output_info,
+                field_name="u",
+                title="Season Average U Component",
+                colorbar_label="u (m/s)",
+                cmap="coolwarm",
+                output_path=layout.figure_dir / "season_average_u_9layers.png",
+                dpi=max(80, int(layout.figure_dpi)),
+                symmetric=True,
+            )
+            plot_scalar_figure(
+                vtk_file=layout.output_vtk_path,
+                vtk_info=output_info,
+                field_name="v",
+                title="Season Average V Component",
+                colorbar_label="v (m/s)",
+                cmap="coolwarm",
+                output_path=layout.figure_dir / "season_average_v_9layers.png",
+                dpi=max(80, int(layout.figure_dpi)),
+                symmetric=True,
+            )
+            plot_scalar_figure(
+                vtk_file=layout.output_vtk_path,
+                vtk_info=output_info,
+                field_name="w",
+                title="Season Average W Component",
+                colorbar_label="w (m/s)",
+                cmap="coolwarm",
+                output_path=layout.figure_dir / "season_average_w_9layers.png",
+                dpi=max(80, int(layout.figure_dpi)),
+                symmetric=True,
+            )
+            plot_scalar_figure(
+                vtk_file=layout.output_vtk_path,
+                vtk_info=output_info,
+                field_name="vm",
+                title="Season Average Velocity Magnitude",
+                colorbar_label="vm (m/s)",
+                cmap="turbo",
+                output_path=layout.figure_dir / "season_average_vm_9layers.png",
+                dpi=max(80, int(layout.figure_dpi)),
+                symmetric=False,
+            )
+            plot_scalar_figure(
+                vtk_file=layout.output_vtk_path,
+                vtk_info=output_info,
+                field_name="tke",
+                title="Season Average TKE",
+                colorbar_label="tke (m^2/s^2)",
+                cmap="magma",
+                output_path=layout.figure_dir / "season_average_tke_9layers.png",
+                dpi=max(80, int(layout.figure_dpi)),
+                symmetric=False,
+            )
     finally:
         accum.cleanup()
 

@@ -11,3 +11,4 @@
 #include <S3YOOGFUTE/moc_StartupSplash.cpp>
 #include <S3YOOGFUTE/moc_VtkViewWidget.cpp>
 #include <S3YOOGFUTE/moc_WavenumberPanel.cpp>
+#include <AWXS5TJIQC/moc_ViewerWidget.cpp>

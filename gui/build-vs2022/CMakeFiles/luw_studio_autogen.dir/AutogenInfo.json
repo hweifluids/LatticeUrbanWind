@@ -450,6 +450,54 @@
 			"MU",
 			"S3YOOGFUTE/moc_WavenumberPanel.cpp",
 			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/ColorMapCatalog.h",
+			"MU",
+			"AWXS5TJIQC/moc_ColorMapCatalog.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/NvidiaFrucRuntime.h",
+			"MU",
+			"AWXS5TJIQC/moc_NvidiaFrucRuntime.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/ViewerWidget.h",
+			"MU",
+			"AWXS5TJIQC/moc_ViewerWidget.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexOpenGLCanvas.h",
+			"MU",
+			"BYFH6YPZAR/moc_IndexOpenGLCanvas.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexRuntime.h",
+			"MU",
+			"BYFH6YPZAR/moc_IndexRuntime.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexScene.h",
+			"MU",
+			"BYFH6YPZAR/moc_IndexScene.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexVolumeBackend.h",
+			"MU",
+			"BYFH6YPZAR/moc_IndexVolumeBackend.cpp",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexVolumeData.h",
+			"MU",
+			"BYFH6YPZAR/moc_IndexVolumeData.cpp",
+			null
 		]
 	],
 	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
@@ -473,6 +521,10 @@
 		"QT_OPENGLWIDGETS_LIB",
 		"QT_OPENGL_LIB",
 		"QT_WIDGETS_LIB",
+		"STREAMCENTERPLUS_ENABLE_NVIDIA_INDEX=0",
+		"STREAMCENTERPLUS_ENABLE_NVOF_FRUC=0",
+		"STREAMCENTERPLUS_ENABLE_VTK_RAYTRACING=0",
+		"STREAMCENTERPLUS_REPO_ROOT=\"C:/1_Development/LatticeUrbanWind/gui\"",
 		"UNICODE",
 		"WIN32",
 		"WIN64",
@@ -480,7 +532,8 @@
 		"_UNICODE",
 		"_WIN64",
 		"kiss_fft_scalar=double",
-		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_be7301261a49b13d6a9b1d9e110eacd8.h\""
+		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\"",
+		"vtkRenderingVolume_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\""
 	],
 	"MOC_DEFINITIONS_MinSizeRel" : 
 	[
@@ -492,6 +545,10 @@
 		"QT_OPENGLWIDGETS_LIB",
 		"QT_OPENGL_LIB",
 		"QT_WIDGETS_LIB",
+		"STREAMCENTERPLUS_ENABLE_NVIDIA_INDEX=0",
+		"STREAMCENTERPLUS_ENABLE_NVOF_FRUC=0",
+		"STREAMCENTERPLUS_ENABLE_VTK_RAYTRACING=0",
+		"STREAMCENTERPLUS_REPO_ROOT=\"C:/1_Development/LatticeUrbanWind/gui\"",
 		"UNICODE",
 		"WIN32",
 		"WIN64",
@@ -499,7 +556,8 @@
 		"_UNICODE",
 		"_WIN64",
 		"kiss_fft_scalar=double",
-		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_be7301261a49b13d6a9b1d9e110eacd8.h\""
+		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\"",
+		"vtkRenderingVolume_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\""
 	],
 	"MOC_DEFINITIONS_RelWithDebInfo" : 
 	[
@@ -511,6 +569,10 @@
 		"QT_OPENGLWIDGETS_LIB",
 		"QT_OPENGL_LIB",
 		"QT_WIDGETS_LIB",
+		"STREAMCENTERPLUS_ENABLE_NVIDIA_INDEX=0",
+		"STREAMCENTERPLUS_ENABLE_NVOF_FRUC=0",
+		"STREAMCENTERPLUS_ENABLE_VTK_RAYTRACING=0",
+		"STREAMCENTERPLUS_REPO_ROOT=\"C:/1_Development/LatticeUrbanWind/gui\"",
 		"UNICODE",
 		"WIN32",
 		"WIN64",
@@ -518,7 +580,8 @@
 		"_UNICODE",
 		"_WIN64",
 		"kiss_fft_scalar=double",
-		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_be7301261a49b13d6a9b1d9e110eacd8.h\""
+		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\"",
+		"vtkRenderingVolume_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\""
 	],
 	"MOC_DEFINITIONS_Release" : 
 	[
@@ -530,6 +593,10 @@
 		"QT_OPENGLWIDGETS_LIB",
 		"QT_OPENGL_LIB",
 		"QT_WIDGETS_LIB",
+		"STREAMCENTERPLUS_ENABLE_NVIDIA_INDEX=0",
+		"STREAMCENTERPLUS_ENABLE_NVOF_FRUC=0",
+		"STREAMCENTERPLUS_ENABLE_VTK_RAYTRACING=0",
+		"STREAMCENTERPLUS_REPO_ROOT=\"C:/1_Development/LatticeUrbanWind/gui\"",
 		"UNICODE",
 		"WIN32",
 		"WIN64",
@@ -537,7 +604,8 @@
 		"_UNICODE",
 		"_WIN64",
 		"kiss_fft_scalar=double",
-		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_be7301261a49b13d6a9b1d9e110eacd8.h\""
+		"vtkRenderingCore_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\"",
+		"vtkRenderingVolume_AUTOINIT_INCLUDE=\"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/vtkModuleAutoInit_f2e554c0cbc974d1632d12b11ac8d8df.h\""
 	],
 	"MOC_DEPEND_FILTERS" : 
 	[
@@ -550,6 +618,7 @@
 	"MOC_INCLUDES_Debug" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter",
 		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
@@ -560,11 +629,13 @@
 		"C:/Qt/6.8.0/msvc2022_64/include/QtOpenGL",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtConcurrent",
 		"C:/1_Development/deps/VTK-install/include/vtk-9.3",
-		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include"
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include",
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkfreetype/include"
 	],
 	"MOC_INCLUDES_MinSizeRel" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter",
 		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
@@ -575,11 +646,13 @@
 		"C:/Qt/6.8.0/msvc2022_64/include/QtOpenGL",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtConcurrent",
 		"C:/1_Development/deps/VTK-install/include/vtk-9.3",
-		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include"
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include",
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkfreetype/include"
 	],
 	"MOC_INCLUDES_RelWithDebInfo" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter",
 		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
@@ -590,11 +663,13 @@
 		"C:/Qt/6.8.0/msvc2022_64/include/QtOpenGL",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtConcurrent",
 		"C:/1_Development/deps/VTK-install/include/vtk-9.3",
-		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include"
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include",
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkfreetype/include"
 	],
 	"MOC_INCLUDES_Release" : 
 	[
 		"C:/1_Development/LatticeUrbanWind/gui/include",
+		"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter",
 		"C:/1_Development/LatticeUrbanWind/gui/build-vs2022/generated",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtCore",
 		"C:/Qt/6.8.0/msvc2022_64/include",
@@ -605,7 +680,8 @@
 		"C:/Qt/6.8.0/msvc2022_64/include/QtOpenGL",
 		"C:/Qt/6.8.0/msvc2022_64/include/QtConcurrent",
 		"C:/1_Development/deps/VTK-install/include/vtk-9.3",
-		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include"
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtknlohmannjson/include",
+		"C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkfreetype/include"
 	],
 	"MOC_MACRO_NAMES" : 
 	[
@@ -623,7 +699,7 @@
 	"MOC_RELAXED_MODE" : false,
 	"MOC_SKIP" : [],
 	"MULTI_CONFIG" : true,
-	"PARALLEL" : 32,
+	"PARALLEL" : 16,
 	"PARSE_CACHE_FILE" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache.txt",
 	"PARSE_CACHE_FILE_Debug" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache_Debug.txt",
 	"PARSE_CACHE_FILE_MinSizeRel" : "C:/1_Development/LatticeUrbanWind/gui/build-vs2022/CMakeFiles/luw_studio_autogen.dir/ParseCache_MinSizeRel.txt",
@@ -729,7 +805,47 @@
 			"MU",
 			null
 		],
-		[ "C:/1_Development/LatticeUrbanWind/gui/src/main.cpp", "MU", null ]
+		[ "C:/1_Development/LatticeUrbanWind/gui/src/main.cpp", "MU", null ],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/ColorMapCatalog.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/NvidiaFrucRuntime.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/ViewerWidget.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexOpenGLCanvas.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexRuntime.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexScene.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexVolumeBackend.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/index/IndexVolumeData.cpp",
+			"MU",
+			null
+		]
 	],
 	"UIC_OPTIONS" : [],
 	"UIC_SEARCH_PATHS" : [],

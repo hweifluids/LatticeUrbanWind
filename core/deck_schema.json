@@ -580,7 +580,7 @@
       "key": "vk_inlet_inflow_only",
       "label": "Inflow only",
       "section": "vk",
-      "help": "Filter turbulence to inflow cells only.",
+      "help": "When true, apply VK on the three lateral side faces except the outlet face; when false, apply VK on all four lateral side faces. The top face is excluded by the default side-face policy.",
       "kind": "boolean"
     },
     {

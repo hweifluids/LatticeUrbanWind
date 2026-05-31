@@ -44,16 +44,22 @@ find_package(VTK REQUIRED COMPONENTS
     FiltersGeneral
     FiltersGeometry
     FiltersModeling
+    FiltersPoints
+    FiltersSources
     GUISupportQt
     IOGeometry
     IOImage
     IOLegacy
+    IOXML
     ImagingFourier
     InteractionStyle
     InteractionWidgets
     RenderingAnnotation
     RenderingCore
+    RenderingFreeType
     RenderingOpenGL2
+    RenderingVolume
+    RenderingVolumeOpenGL2
 )
 
 qt_standard_project_setup()
@@ -77,6 +83,14 @@ qt_add_executable(luw_studio WIN32
     include/luwgui/MainWindow.h
     include/luwgui/StartupDiagnostics.h
     include/luwgui/StartupSplash.h
+    src/streamcenter/ColorMapCatalog.h
+    src/streamcenter/NvidiaFrucRuntime.h
+    src/streamcenter/ViewerWidget.h
+    src/streamcenter/index/IndexOpenGLCanvas.h
+    src/streamcenter/index/IndexRuntime.h
+    src/streamcenter/index/IndexScene.h
+    src/streamcenter/index/IndexVolumeBackend.h
+    src/streamcenter/index/IndexVolumeData.h
     src/main.cpp
     src/Theme.cpp
     src/Preferences.cpp
@@ -95,11 +109,27 @@ qt_add_executable(luw_studio WIN32
     src/MainWindow.cpp
     src/StartupDiagnostics.cpp
     src/StartupSplash.cpp
+    src/streamcenter/ColorMapCatalog.cpp
+    src/streamcenter/NvidiaFrucRuntime.cpp
+    src/streamcenter/ViewerWidget.cpp
+    src/streamcenter/index/IndexOpenGLCanvas.cpp
+    src/streamcenter/index/IndexRuntime.cpp
+    src/streamcenter/index/IndexScene.cpp
+    src/streamcenter/index/IndexVolumeBackend.cpp
+    src/streamcenter/index/IndexVolumeData.cpp
 )
 
 target_include_directories(luw_studio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/streamcenter
     ${CMAKE_CURRENT_BINARY_DIR}/generated
+)
+
+target_compile_definitions(luw_studio PRIVATE
+    STREAMCENTERPLUS_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+    STREAMCENTERPLUS_ENABLE_NVIDIA_INDEX=0
+    STREAMCENTERPLUS_ENABLE_NVOF_FRUC=0
+    STREAMCENTERPLUS_ENABLE_VTK_RAYTRACING=0
 )
 
 target_link_libraries(luw_studio PRIVATE

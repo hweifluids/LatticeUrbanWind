@@ -930,8 +930,9 @@ def plot_wind_figure(
     show: bool,
     dpi: int,
 ) -> None:
-    if "u_avg" not in vtk_info["fields"]:
-        raise ValueError("VTK missing 'u_avg' field")
+    wind_components = _resolve_wind_component_field_names(vtk_info)
+    if wind_components is None:
+        raise ValueError("VTK missing a wind vector field or scalar u/v/w component fields")
 
     ny_out, nx_out = target_grid["shape"]
     x_vec = target_grid["x_vec"]
@@ -954,16 +955,11 @@ def plot_wind_figure(
         if not item["valid"]:
             continue
         z = item["z_index"]
-        vel = read_z_slice(vtk_file, vtk_info, "u_avg", z)
-        if vel.ndim != 3 or vel.shape[2] < 2:
-            raise ValueError("Field 'u_avg' must have at least 2 components")
+        u_native, v_native, w_native = _read_wind_components_z_slice(vtk_file, vtk_info, wind_components, z)
 
-        u_local = _resample_scalar_to_target(vel[:, :, 0], target_grid)
-        v_local = _resample_scalar_to_target(vel[:, :, 1], target_grid)
-        w = _resample_scalar_to_target(
-            vel[:, :, 2] if vel.shape[2] >= 3 else np.zeros((vel.shape[0], vel.shape[1]), dtype=np.float32),
-            target_grid,
-        )
+        u_local = _resample_scalar_to_target(u_native, target_grid)
+        v_local = _resample_scalar_to_target(v_native, target_grid)
+        w = _resample_scalar_to_target(w_native, target_grid)
 
         u = c * u_local - s * v_local
         v = s * u_local + c * v_local
@@ -1296,12 +1292,87 @@ def _normalize_field_token(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 
+def _resolve_wind_component_field_names(vtk_info: dict) -> tuple[str, str | None, str | None] | None:
+    fields = vtk_info["fields"]
+    n_points = int(vtk_info.get("n_points", 0))
+
+    vector_candidates = ["u_avg", "velocity", "wind", "uvw"]
+    by_lower = {f.lower(): f for f in fields}
+    by_norm = {_normalize_field_token(f): f for f in fields}
+    for candidate in vector_candidates:
+        found = by_lower.get(candidate.lower()) or by_norm.get(_normalize_field_token(candidate))
+        if found is None:
+            continue
+        meta = fields[found]
+        if int(meta.get("tuples", n_points)) == n_points and int(meta.get("components", 1)) >= 3:
+            return found, None, None
+
+    scalar_triplets = [
+        ("u_filtered", "v_filtered", "w_filtered"),
+        ("u", "v", "w"),
+        ("u_avg_x", "u_avg_y", "u_avg_z"),
+        ("ux", "uy", "uz"),
+    ]
+    for triplet in scalar_triplets:
+        resolved: list[str] = []
+        for name in triplet:
+            found = by_lower.get(name.lower()) or by_norm.get(_normalize_field_token(name))
+            if found is None:
+                break
+            meta = fields[found]
+            if int(meta.get("tuples", n_points)) != n_points or int(meta.get("components", 1)) != 1:
+                break
+            resolved.append(found)
+        if len(resolved) == 3:
+            return resolved[0], resolved[1], resolved[2]
+
+    for name, meta in fields.items():
+        tuples = int(meta.get("tuples", n_points))
+        if tuples == n_points and int(meta.get("components", 1)) >= 3:
+            return name, None, None
+
+    return None
+
+
+def _read_wind_components_z_slice(
+    vtk_file: str,
+    vtk_info: dict,
+    wind_components: tuple[str, str | None, str | None],
+    z_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u_name, v_name, w_name = wind_components
+    if v_name is None:
+        vel = read_z_slice(vtk_file, vtk_info, u_name, z_index)
+        if vel.ndim != 3 or vel.shape[2] < 2:
+            raise ValueError(f"Field '{u_name}' must have at least 2 components")
+        u = vel[:, :, 0]
+        v = vel[:, :, 1]
+        if vel.shape[2] >= 3:
+            w = vel[:, :, 2]
+        else:
+            w = np.zeros((vel.shape[0], vel.shape[1]), dtype=np.float32)
+        return u, v, w
+
+    u = read_z_slice(vtk_file, vtk_info, u_name, z_index)
+    v = read_z_slice(vtk_file, vtk_info, v_name, z_index)
+    w = read_z_slice(vtk_file, vtk_info, w_name or v_name, z_index)
+    if u.ndim != 2 or v.ndim != 2 or w.ndim != 2:
+        raise ValueError(
+            "Scalar wind component fields must be two-dimensional slices: "
+            f"{u_name}, {v_name}, {w_name}"
+        )
+    return u, v, w
+
+
 def _resolve_vector_field_name(vtk_info: dict) -> str:
     fields = list(vtk_info["fields"].keys())
-    if "u_avg" in vtk_info["fields"]:
-        return "u_avg"
+    wind_components = _resolve_wind_component_field_names(vtk_info)
+    if wind_components is not None:
+        if wind_components[1] is None:
+            return wind_components[0]
+        return ",".join(name for name in wind_components if name is not None)
 
-    candidates = ["u_avg", "velocity", "wind", "uvw", "u"]
+    candidates = ["u_avg", "velocity", "wind", "uvw"]
     by_lower = {f.lower(): f for f in fields}
     by_norm = {_normalize_field_token(f): f for f in fields}
     for candidate in candidates:
@@ -1326,7 +1397,7 @@ def _resolve_tke_field_name(vtk_info: dict) -> str:
     if "tke" in vtk_info["fields"]:
         return "tke"
 
-    candidates = ["tke", "k", "tke_avg", "k_avg", "sgs_tke", "turbulence_k", "tkenergy"]
+    candidates = ["tke", "tke_filtered", "k", "tke_avg", "k_avg", "sgs_tke", "turbulence_k", "tkenergy"]
     by_lower = {f.lower(): f for f in fields}
     by_norm = {_normalize_field_token(f): f for f in fields}
     for candidate in candidates:
@@ -1345,7 +1416,7 @@ def _alias_visualization_fields(vtk_info: dict) -> dict:
     aliased_fields = dict(vtk_info["fields"])
 
     vector_name = _resolve_vector_field_name(vtk_info)
-    if vector_name != "u_avg":
+    if vector_name != "u_avg" and vector_name in aliased_fields:
         aliased_fields["u_avg"] = aliased_fields[vector_name]
 
     tke_name = _resolve_tke_field_name(vtk_info)

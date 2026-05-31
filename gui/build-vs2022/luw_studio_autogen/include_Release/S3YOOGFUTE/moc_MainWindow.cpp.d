@@ -12,6 +12,7 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Re
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/Theme.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/VtkViewWidget.h \
   C:/1_Development/LatticeUrbanWind/gui/include/luwgui/WavenumberPanel.h \
+  C:/1_Development/LatticeUrbanWind/gui/src/streamcenter/ViewerWidget.h \
   C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkABI.h \
   C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkABINamespace.h \
   C:/1_Development/deps/VTK-install/include/vtk-9.3/vtkBuild.h \
@@ -39,10 +40,12 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Re
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QFutureWatcher \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QHash \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QList \
+  C:/Qt/6.8.0/msvc2022_64/include/QtCore/QMap \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QMetaType \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QObject \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QProcess \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QRect \
+  C:/Qt/6.8.0/msvc2022_64/include/QtCore/QSet \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QSize \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QSizeF \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/QString \
@@ -204,7 +207,9 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Re
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/qversiontagging.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/qxptype_traits.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtCore/qyieldcpu.h \
+  C:/Qt/6.8.0/msvc2022_64/include/QtGui/QColor \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/QFileSystemModel \
+  C:/Qt/6.8.0/msvc2022_64/include/QtGui/QImage \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/QTransform \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qabstracttextdocumentlayout.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qaction.h \
@@ -257,12 +262,10 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Re
   C:/Qt/6.8.0/msvc2022_64/include/QtGui/qwindowdefs_win.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QApplication \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QComboBox \
-  C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QDoubleSpinBox \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QLabel \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QLineEdit \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QMainWindow \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QPlainTextEdit \
-  C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QSlider \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QStackedWidget \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QTableWidget \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/QToolButton \
@@ -283,7 +286,6 @@ C:/1_Development/LatticeUrbanWind/gui/build-vs2022/luw_studio_autogen/include_Re
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qrubberband.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qsizepolicy.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qslider.h \
-  C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qspinbox.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qstackedwidget.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qstyle.h \
   C:/Qt/6.8.0/msvc2022_64/include/QtWidgets/qstyleoption.h \

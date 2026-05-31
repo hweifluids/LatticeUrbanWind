@@ -58,6 +58,30 @@
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\StartupSplash.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\ColorMapCatalog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\NvidiaFrucRuntime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\ViewerWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexOpenGLCanvas.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexRuntime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexScene.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexVolumeBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexVolumeData.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\1_Development\LatticeUrbanWind\gui\build-vs2022\luw_studio_autogen\mocs_compilation_Release.cpp">
       <Filter>Source Files\Generated</Filter>
     </ClCompile>
@@ -121,6 +145,30 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\include\luwgui\StartupSplash.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\ColorMapCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\NvidiaFrucRuntime.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\ViewerWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexOpenGLCanvas.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexRuntime.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexScene.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexVolumeBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\1_Development\LatticeUrbanWind\gui\src\streamcenter\index\IndexVolumeData.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

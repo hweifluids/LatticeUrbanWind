@@ -1768,9 +1768,11 @@ def buildBC_dev(
         nz = int(nz_new)
         dz = float(z_new[1] - z_new[0]) if nz_new > 1 else 0.0
 
-        # Build a single global top plane for both CSV export and si_z_cfd:
-        # clip at (highest terrain + z_limit), then keep consistent everywhere.
-        z_top_from_wind = float((nz - 1) * dz) + float(base_height) if nz > 1 else float(base_height)
+        # Build a single global top plane for both CSV export and si_z_cfd.
+        # Vertical wind levels are AGL. With terrain enabled the fixed CFD top must
+        # sit above the highest terrain, then extend by the available/limited AGL
+        # wind height. Otherwise mountainous domains can place the top below terrain.
+        z_top_agl_from_wind = float((nz - 1) * dz) if nz > 1 else 0.0
         ground_z_max = float(base_height)
         if dem_grid is not None:
             dem_max_scaled = float(np.nanmax(dem_grid)) * float(elevation_scale)
@@ -1778,20 +1780,24 @@ def buildBC_dev(
                 dem_max_scaled = 0.0
             ground_z_max = float(base_height) + dem_max_scaled
 
-        z_top_output = float(z_top_from_wind)
+        z_top_agl_output = float(z_top_agl_from_wind)
         if z_limit_agl is not None:
-            z_cap_from_terrain = float(ground_z_max) + float(z_limit_agl)
-            if z_top_output > z_cap_from_terrain:
-                z_top_output = z_cap_from_terrain
+            z_top_agl_output = min(float(z_top_agl_output), float(z_limit_agl))
+            if z_top_agl_from_wind > z_limit_agl:
                 _log_info(
-                    f"Apply global top clipping by highest terrain + z_limit: "
-                    f"ground_max={ground_z_max:.3f} m, z_limit={z_limit_agl:.3f} m -> top={z_top_output:.3f} m"
+                    f"Apply global top clipping by z_limit AGL: "
+                    f"wind_top_agl={z_top_agl_from_wind:.3f} m, z_limit={z_limit_agl:.3f} m"
                 )
             else:
                 _log_info(
-                    f"Skip global top clipping: input top {z_top_output:.3f} m <= "
-                    f"highest-terrain cap {z_cap_from_terrain:.3f} m"
+                    f"Skip global top clipping: wind_top_agl {z_top_agl_from_wind:.3f} m <= "
+                    f"z_limit {z_limit_agl:.3f} m"
                 )
+        z_top_output = float(ground_z_max) + float(z_top_agl_output)
+        _log_info(
+            f"Global top plane: ground_max={ground_z_max:.3f} m + "
+            f"top_agl={z_top_agl_output:.3f} m -> top={z_top_output:.3f} m"
+        )
 
 
 

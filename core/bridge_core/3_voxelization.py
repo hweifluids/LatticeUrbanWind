@@ -1089,6 +1089,19 @@ def create_terrain_mesh(base_poly: Polygon, dem_points, dem_elevations, grid_res
                 f.write(f"{X[i, j]:.3f},{Y[i, j]:.3f},{Z[i, j]:.3f}\n")
     print(f"[INFO] Exported {nx * ny} interpolated elevation points to {csv_path}")
 
+    boundary_csv_path = proj_temp / "boundary_dem.csv"
+    print(f"[INFO] Exporting boundary DEM to {boundary_csv_path}")
+    boundary_count = 0
+    with open(boundary_csv_path, 'w') as f:
+        f.write("x,y,elevation\n")
+        for i in range(ny):
+            for j in range(nx):
+                if i != 0 and i != ny - 1 and j != 0 and j != nx - 1:
+                    continue
+                f.write(f"{X[i, j]:.3f},{Y[i, j]:.3f},{Z[i, j]:.3f}\n")
+                boundary_count += 1
+    print(f"[INFO] Exported {boundary_count} boundary elevation points to {boundary_csv_path}")
+
     # Verify the minimum is now ~0
     actual_min = Z.min()
     if abs(actual_min) > 0.01:
