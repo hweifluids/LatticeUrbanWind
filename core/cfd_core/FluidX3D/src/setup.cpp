@@ -2727,7 +2727,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-260523")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - v3.5-260531")+"|");
     println(hr_plain());
     info.print_logo();
  

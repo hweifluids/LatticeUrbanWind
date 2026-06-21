@@ -82,6 +82,11 @@ void apply_flux_correction(LBM& lbm,
     double S_in = 0.0;
     double S_out = 0.0;
     double net = 0.0;
+    double netZTop = 0.0;
+    double netXMin = 0.0;
+    double netXMax = 0.0;
+    double netYMin = 0.0;
+    double netYMax = 0.0;
     unsigned long long B = 0ull;
 
     for (const BoundaryCell& bc : boundary_cells) {
@@ -99,6 +104,14 @@ void apply_flux_correction(LBM& lbm,
             default: break;
         }
         net += static_cast<double>(vn);
+        switch (fk) {
+            case FaceKind::ZTop: netZTop += static_cast<double>(vn); break;
+            case FaceKind::XMin: netXMin += static_cast<double>(vn); break;
+            case FaceKind::XMax: netXMax += static_cast<double>(vn); break;
+            case FaceKind::YMin: netYMin += static_cast<double>(vn); break;
+            case FaceKind::YMax: netYMax += static_cast<double>(vn); break;
+            default: break;
+        }
         if (vn < 0.0f) S_in  += static_cast<double>(-vn);
         else           S_out += static_cast<double>( vn);
     }
@@ -185,6 +198,9 @@ void apply_flux_correction(LBM& lbm,
 
         println("| Flux correction | S_in=" + to_string(S_in, 3u) + ", S_out=" + to_string(S_out, 3u) +
                 ", net_before=" + to_string(net, 3u) + " |");
+        println("| Flux correction | net by face: Xn=" + to_string(netXMin, 3u) +
+                ", Xp=" + to_string(netXMax, 3u) + ", Yn=" + to_string(netYMin, 3u) +
+                ", Yp=" + to_string(netYMax, 3u) + ", Zp(w)=" + to_string(netZTop, 3u) + " |");
         println("| Flux correction | avg_dU=" + to_string(delta, 3u) + " m/s, corrected=" +
                 to_string((ulong)B_used) + ", net_after=" + to_string(net_after_val, 3u) + " |");
         println("| Flux correction | per-face dU: Xn=" + to_string(avgXMin, 3u) +

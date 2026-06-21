@@ -2172,6 +2172,7 @@ def buildBC_dev(
         if write_temp:
             _log_info("Append temperature column T (Kelvin) to boundary CSV")
         _log_info("Append patch column to boundary CSV: top=1, south=2, north=3, west=4, east=5, bottom=0")
+        _log_info("Preserve sampled vertical velocity w on top and side boundary patches")
 
         patch_bottom = 0
         patch_top = 1
@@ -2264,14 +2265,14 @@ def buildBC_dev(
                     if (not math.isfinite(ground_z)) or (not math.isfinite(z_top_here)) or (ground_z >= z_top_here):
                         continue
 
-                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                    uval, vval, wval, tval = _sample_wind_at_point(
                         j, i, z_top_here, ground_z, write_temp
                     )
 
                     _write_csv_row(
-                        f, x, y, z_top_here, uval, vval, 0.0, patch_top, tval
+                        f, x, y, z_top_here, uval, vval, wval, patch_top, tval
                     )
-                    bc_sum += np.array([uval, vval, 0.0])
+                    bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
             face_progress += 1
             _PROGRESS.progress(
@@ -2293,13 +2294,13 @@ def buildBC_dev(
                         continue
 
                     # ground point (always)
-                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                    uval, vval, wval, tval = _sample_wind_at_point(
                         j, i, ground_z, ground_z, write_temp
                     )
                     _write_csv_row(
-                        f, x, y, ground_z, uval, vval, 0.0, patch_side, tval
+                        f, x, y, ground_z, uval, vval, wval, patch_side, tval
                     )
-                    bc_sum += np.array([uval, vval, 0.0])
+                    bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
 
                     if dz <= 0.0 or (not math.isfinite(dz)):
@@ -2319,13 +2320,13 @@ def buildBC_dev(
                         if z_out >= z_top_here - 1e-6:
                             continue
 
-                        uval, vval, _w_interp, tval = _sample_wind_at_point(
+                        uval, vval, wval, tval = _sample_wind_at_point(
                             j, i, z_out, ground_z, write_temp
                         )
                         _write_csv_row(
-                            f, x, y, z_out, uval, vval, 0.0, patch_side, tval
+                            f, x, y, z_out, uval, vval, wval, patch_side, tval
                         )
-                        bc_sum += np.array([uval, vval, 0.0])
+                        bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
                 face_progress += 1
                 face_name = "south" if j == 0 else "north"
@@ -2349,13 +2350,13 @@ def buildBC_dev(
                         continue
 
                     # ground point (always)
-                    uval, vval, _w_interp, tval = _sample_wind_at_point(
+                    uval, vval, wval, tval = _sample_wind_at_point(
                         j, i, ground_z, ground_z, write_temp
                     )
                     _write_csv_row(
-                        f, x, y, ground_z, uval, vval, 0.0, patch_side, tval
+                        f, x, y, ground_z, uval, vval, wval, patch_side, tval
                     )
-                    bc_sum += np.array([uval, vval, 0.0])
+                    bc_sum += np.array([uval, vval, wval])
                     bc_cnt += 1
 
                     if dz <= 0.0 or (not math.isfinite(dz)):
@@ -2375,13 +2376,13 @@ def buildBC_dev(
                         if z_out >= z_top_here - 1e-6:
                             continue
 
-                        uval, vval, _w_interp, tval = _sample_wind_at_point(
+                        uval, vval, wval, tval = _sample_wind_at_point(
                             j, i, z_out, ground_z, write_temp
                         )
                         _write_csv_row(
-                            f, x, y, z_out, uval, vval, 0.0, patch_side, tval
+                            f, x, y, z_out, uval, vval, wval, patch_side, tval
                         )
-                        bc_sum += np.array([uval, vval, 0.0])
+                        bc_sum += np.array([uval, vval, wval])
                         bc_cnt += 1
                 face_progress += 1
                 face_name = "west" if i == 0 else "east"

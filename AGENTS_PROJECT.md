@@ -114,6 +114,12 @@ z_top = ground_z_max + min(wind_top_agl, z_limit_agl)
 
 其中 `ground_z_max = base_height + max(relative_dem)`。林芝 20 m 案例中 DEM 相对起伏约 1.39 km，原始风场最高层为 995 m AGL；若不按最高地形抬升顶面，边界 CSV 顶面会低于高山区域。
 
+## W 分量边界与通量修正
+
+`core/bridge_core/1_buildBC.py` 会读取输入 NetCDF 中的 `w`/`W` 变量；若不存在则回退为 0。当前边界 CSV 的 `top/south/north/west/east` patch 会保留采样得到的 `w` 分量，不再强制写成 0；`bottom` patch 仍用于地形/地面信息，不作为常规速度入口面。
+
+`core/cfd_core/FluidX3D/src/fluxcorrection.cpp` 的通量修正按外边界法向速度计算净通量：`x/y` 侧面使用对应水平法向分量，顶面 `Zp` 使用 `u.z`，因此带 W 的顶边界会进入通量平衡；侧边界上的 W 是切向分量，不应计入侧面法向通量。日志中 `Flux correction | net by face ... Zp(w)=...` 可用于确认 W 是否实际参与顶面通量修正。
+
 ## VK 入口面选择与 x 向波纹排查
 
 剖面工况中 VK turbulent inlet 默认业务语义由 `vk_inlet_inflow_only` 控制，且 top 面不作为默认 VK inlet：
