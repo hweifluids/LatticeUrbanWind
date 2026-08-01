@@ -421,3 +421,14 @@ Smagorinsky 与 kEqn LES，不能把它们当作 CULBM AV75 的同模型小尺�
 在 900 s 保留约 99.96% 的 100 m 高通 RMS 和 99.88% 的梯度 RMS，不是云图平滑的
 主因。详细可复现材料位于
 `core/cfd_core/CULBM/test-output/density-current-dualgpu-h5-validation-20260801_031341/diagnostics/turbulence-structure-20260801_163826/`。
+
+2026-08-01 的最终 force-aware D3Q19/D3Q19 常系数 Smagorinsky SGS 诊断运行
+（h=12.5 m、dt=0.05 s、900 s）得到近地前缘 14982.571 m，相对论文同闭合
+GEA Smagorinsky 中点低 6.435%，且全程峰值 Ma=0.280843；因此它确认 GPU SGS、
+标量耦合、force-aware 应力和性能约束均工作，但不能标为最终弱可压物理校验通过。
+统一 25 m 网格的梯度、二维涡量、短波能量与冷池周长代理都显示 SGS 解析出更多
+短尺度变化，但 AV75/SGS 对照同时改变基础输运、dt 和闭合，不能作单变量因果结论。
+正式报告保存在
+`output/reports/CULBM_density_current_sgs_comparison_report_20260801_211208.docx` 与
+`output/pdf/CULBM_density_current_sgs_comparison_report_20260801_211208.pdf`；下一项首要
+控制是同网格 dt=0.025 s 的时间步敏感性运行。
