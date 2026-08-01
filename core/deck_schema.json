@@ -475,6 +475,70 @@
       "kind": "boolean"
     },
     {
+      "key": "culbm_temperature_lattice",
+      "label": "CULBM temperature lattice",
+      "section": "physics",
+      "help": "Select the GPU temperature distribution lattice. D3Q19 uses more memory/bandwidth and provides the higher-isotropy scalar stencil.",
+      "kind": "enum",
+      "enum_values": ["D3Q7", "D3Q19"]
+    },
+    {
+      "key": "culbm_base_kinematic_viscosity_m2_s",
+      "label": "Base kinematic viscosity (m2/s)",
+      "section": "physics",
+      "help": "Positive finite molecular/base kinematic viscosity in SI m2/s, before any SGS eddy viscosity is added.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_base_thermal_diffusivity_m2_s",
+      "label": "Base thermal diffusivity (m2/s)",
+      "section": "physics",
+      "help": "Positive finite molecular/base thermal diffusivity in SI m2/s, before turbulent scalar diffusivity is added.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_sgs_enable",
+      "label": "SGS LES",
+      "section": "physics",
+      "help": "Enable the GPU Smagorinsky-Lilly subgrid-scale model.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_sgs_cs",
+      "label": "Smagorinsky Cs",
+      "section": "physics",
+      "help": "Non-negative traditional Smagorinsky constant Cs. Do not set together with culbm_sgs_cs_squared.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_sgs_cs_squared",
+      "label": "Smagorinsky Cs squared",
+      "section": "physics",
+      "help": "Optional non-negative Cs squared input; the solver takes its square root. Mutually exclusive with culbm_sgs_cs.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_sgs_scalar_coupling",
+      "label": "SGS scalar coupling",
+      "section": "physics",
+      "help": "Add turbulent thermal diffusivity alpha_t=nu_t/Pr_t to the GPU temperature collision.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_sgs_turbulent_prandtl",
+      "label": "Turbulent Prandtl",
+      "section": "physics",
+      "help": "Positive finite turbulent Prandtl number Pr_t used by SGS scalar coupling.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_sgs_diagnostics_interval",
+      "label": "SGS diagnostics stride",
+      "section": "physics",
+      "help": "Write GPU-derived spatial mean/maximum eddy-viscosity diagnostics every N LBM steps; 0 disables diagnostics.",
+      "kind": "integer"
+    },
+    {
       "key": "ibm_enabler",
       "label": "Immersed boundary",
       "section": "physics",

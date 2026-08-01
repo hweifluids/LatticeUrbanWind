@@ -156,6 +156,33 @@ bool deck_try_parse_bool(const std::string& raw, bool& out) {
     return true;
 }
 
+bool deck_try_parse_finite_double(const std::string& raw, double& out) {
+    const std::string normalized = deck_unquote(raw);
+    if (normalized.empty()) return false;
+    char* endptr = nullptr;
+    const double parsed = std::strtod(normalized.c_str(), &endptr);
+    if (endptr == normalized.c_str() || *endptr != '\0' ||
+        !std::isfinite(parsed)) {
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
+bool deck_try_parse_uint(const std::string& raw, uint& out) {
+    const std::string normalized = deck_unquote(raw);
+    if (normalized.empty() || normalized.front() == '-') return false;
+    char* endptr = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(normalized.c_str(), &endptr, 10);
+    if (endptr == normalized.c_str() || *endptr != '\0' ||
+        parsed > (unsigned long long)std::numeric_limits<uint>::max()) {
+        return false;
+    }
+    out = (uint)parsed;
+    return true;
+}
+
 struct ParsedDeck {
     std::unordered_map<std::string, std::string> values;
 };
@@ -3175,7 +3202,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-260731-thermal-lattices")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-260801-sgs-les")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -3206,6 +3233,15 @@ void main_setup() {
     std::string probes_raw_text;
     bool probes_output_defined = false;
     uint probes_output_steps = 0u;
+    bool culbm_sgs_enabled = get_subgrid_configuration().enabled;
+    double culbm_sgs_cs = 0.173265956;
+    bool culbm_sgs_cs_explicit = false;
+    bool culbm_sgs_cs_squared_explicit = false;
+    bool culbm_sgs_scalar_coupling = true;
+    double culbm_sgs_turbulent_prandtl = 1.0;
+    double culbm_base_kinematic_viscosity_m2_s = 1.48E-5;
+    double culbm_base_thermal_diffusivity_m2_s = 2.10E-5;
+    uint culbm_sgs_diagnostics_interval = 0u;
     culbm::particle_advection::Config particle_advection_settings;
 
     // ---------------------- read *.luw / *.luwdg ------------------------------
@@ -3373,6 +3409,11 @@ void main_setup() {
             auto parse_boolish_setting = [&](const std::string& txt, bool& out) -> bool {
                 return deck_try_parse_bool(txt, out);
             };
+            auto fail_culbm_setting = [&](const std::string& message) {
+                println("| ERROR: " + message + " |");
+                wait();
+                exit(-1);
+            };
             // Deck entries are already normalized here, so handlers stay insensitive
             // to original line order, section order, key aliases, and quoted bool tokens.
             for (const auto& entry : deck.values) {
@@ -3445,6 +3486,89 @@ void main_setup() {
                         wait();
                         exit(-1);
                     }
+                }
+                else if (key == "culbm_sgs_enable") {
+                    bool parsed = false;
+                    if (!deck_try_parse_bool(val, parsed)) {
+                        fail_culbm_setting(
+                            "culbm_sgs_enable must be a bool-like value.");
+                    }
+                    culbm_sgs_enabled = parsed;
+                }
+                else if (key == "culbm_sgs_cs") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed < 0.0 ||
+                        !std::isfinite((float)parsed)) {
+                        fail_culbm_setting(
+                            "culbm_sgs_cs must be a finite value >= 0.");
+                    }
+                    culbm_sgs_cs = parsed;
+                    culbm_sgs_cs_explicit = true;
+                }
+                else if (key == "culbm_sgs_cs_squared") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed < 0.0) {
+                        fail_culbm_setting(
+                            "culbm_sgs_cs_squared must be a finite value >= 0.");
+                    }
+                    const double cs = std::sqrt(parsed);
+                    if (!std::isfinite((float)cs)) {
+                        fail_culbm_setting(
+                            "sqrt(culbm_sgs_cs_squared) exceeds FP32 range.");
+                    }
+                    culbm_sgs_cs = cs;
+                    culbm_sgs_cs_squared_explicit = true;
+                }
+                else if (key == "culbm_sgs_scalar_coupling") {
+                    bool parsed = false;
+                    if (!deck_try_parse_bool(val, parsed)) {
+                        fail_culbm_setting(
+                            "culbm_sgs_scalar_coupling must be a bool-like value.");
+                    }
+                    culbm_sgs_scalar_coupling = parsed;
+                }
+                else if (key == "culbm_sgs_turbulent_prandtl") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed <= 0.0 ||
+                        !std::isfinite((float)parsed) ||
+                        !((float)parsed > 0.0f)) {
+                        fail_culbm_setting(
+                            "culbm_sgs_turbulent_prandtl must be finite and > 0.");
+                    }
+                    culbm_sgs_turbulent_prandtl = parsed;
+                }
+                else if (key == "culbm_base_kinematic_viscosity_m2_s") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed <= 0.0 ||
+                        !std::isfinite((float)parsed) ||
+                        !((float)parsed > 0.0f)) {
+                        fail_culbm_setting(
+                            "culbm_base_kinematic_viscosity_m2_s must be finite and > 0.");
+                    }
+                    culbm_base_kinematic_viscosity_m2_s = parsed;
+                }
+                else if (key == "culbm_base_thermal_diffusivity_m2_s") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed <= 0.0 ||
+                        !std::isfinite((float)parsed) ||
+                        !((float)parsed > 0.0f)) {
+                        fail_culbm_setting(
+                            "culbm_base_thermal_diffusivity_m2_s must be finite and > 0.");
+                    }
+                    culbm_base_thermal_diffusivity_m2_s = parsed;
+                }
+                else if (key == "culbm_sgs_diagnostics_interval") {
+                    uint parsed = 0u;
+                    if (!deck_try_parse_uint(val, parsed)) {
+                        fail_culbm_setting(
+                            "culbm_sgs_diagnostics_interval must be an integer >= 0.");
+                    }
+                    culbm_sgs_diagnostics_interval = parsed;
                 }
                 else if (key == "downstream_bc_yaw") downstream_bc_yaw = unquote(val);
                 else if (key == "downstream_open_face") {
@@ -3845,6 +3969,11 @@ void main_setup() {
 
 
             }
+            if (culbm_sgs_cs_explicit &&
+                culbm_sgs_cs_squared_explicit) {
+                fail_culbm_setting(
+                    "culbm_sgs_cs and culbm_sgs_cs_squared are mutually exclusive.");
+            }
             // si_size.z += z_si_offset;
             if (!memory) memory = 6000u;
             if (Dx == 0u) Dx = 1u;
@@ -3967,6 +4096,19 @@ void main_setup() {
     if (!temperature_lattice_applied &&
         !set_temperature_lattice(temperature_lattice_setting)) {
         println("| ERROR: requested temperature lattice is unsupported by this momentum build. |");
+        wait();
+        exit(-1);
+    }
+
+    Subgrid_Configuration subgrid_configuration;
+    subgrid_configuration.enabled = culbm_sgs_enabled;
+    subgrid_configuration.smagorinsky_constant = (float)culbm_sgs_cs;
+    subgrid_configuration.scalar_coupling = culbm_sgs_scalar_coupling;
+    subgrid_configuration.turbulent_prandtl =
+        (float)culbm_sgs_turbulent_prandtl;
+    subgrid_configuration.fixed_eddy_viscosity = -1.0f;
+    if (!set_subgrid_configuration(subgrid_configuration)) {
+        println("| ERROR: SGS configuration is invalid or was changed after constructing an LBM instance. |");
         wait();
         exit(-1);
     }
@@ -4109,6 +4251,26 @@ void main_setup() {
             ? string("auto (input Tmin/Tmax center)")
             : to_string(fmtf(boussinesq_reference_setting_kelvin)) + " K (explicit)") + " |");
     println("| Thermal Lattice | " + alignr(57u, string(get_temperature_lattice_name())) + " |");
+    println("| SGS LES         | " + alignr(57u, culbm_sgs_enabled
+            ? string("Smagorinsky-Lilly enabled") : string("disabled")) + " |");
+    println("| SGS Cs          | " + alignr(57u,
+            to_string(fmtf((float)culbm_sgs_cs, 9))) + " |");
+    println("| SGS scalar      | " + alignr(57u,
+            culbm_sgs_enabled && culbm_sgs_scalar_coupling
+                ? string("enabled") : string("disabled")) + " |");
+    println("| SGS Pr_t        | " + alignr(57u,
+            to_string(fmtf((float)culbm_sgs_turbulent_prandtl, 6))) + " |");
+    println("| SGS diagnostics | " + alignr(57u,
+            culbm_sgs_diagnostics_interval > 0u
+                ? "every " + to_string((ulong)culbm_sgs_diagnostics_interval) +
+                    " step(s)"
+                : string("off")) + " |");
+    println("| Requested nu SI | " + alignr(51u,
+            to_string(fmtf((float)culbm_base_kinematic_viscosity_m2_s, 9))) +
+            " m^2/s |" );
+    println("| Req. alpha SI   | " + alignr(51u,
+            to_string(fmtf((float)culbm_base_thermal_diffusivity_m2_s, 9))) +
+            " m^2/s |" );
     println("| VK inlet switch | " + alignr(57u, vk_inlet_settings.enable ? string("true") : string("false")) + " |");
     if (vk_inlet_settings.enable) {
         println("| VK TI (frac)    | " + alignr(57u, to_string(fmtf(vk_inlet_settings.ti))) + " |");
@@ -4128,7 +4290,7 @@ void main_setup() {
 
     const float lbm_ref_u = 0.10f; // 0.1731 is Ma=0.3
     float si_ref_u = 10.0f;
-    const float si_nu = 1.48E-5f, si_rho = 1.225f;
+    const float si_rho = 1.225f;
 
     // CUDA-only compact ground base. The preprocessor creates a closed slab
     // from the STL bottom to base_height. Drop only complete base cells from
@@ -4616,11 +4778,183 @@ void main_setup() {
     float u_scale = lbm_ref_u / si_ref_u;
     float z_off = units.x(z_si_offset);
 
-    float lbm_nu = units.nu(si_nu);
-    const float si_alpha_air = 2.10E-5f; // thermal diffusivity of air [m^2/s]
     const float si_beta_air = 1.0f / temperature_ref_kelvin; // volumetric thermal expansion [1/K]
     const float si_gravity = 9.80665f; // standard gravitational acceleration [m/s^2]
-    float lbm_alpha = units.alpha(si_alpha_air);
+    float lbm_nu = 0.0f;
+    float lbm_alpha = 0.0f;
+
+    struct BaseTransportResolution {
+        float common_scale = 1.0f;
+        float requested_nu_lbm = 0.0f;
+        float requested_alpha_lbm = 0.0f;
+        float requested_momentum_tau = 0.5f;
+        float requested_thermal_tau = 0.5f;
+        float effective_nu_si = 0.0f;
+        float effective_alpha_si = 0.0f;
+        float effective_nu_lbm = 0.0f;
+        float effective_alpha_lbm = 0.0f;
+        float effective_momentum_tau = 0.5f;
+        float effective_thermal_tau = 0.5f;
+    } base_transport;
+
+    auto evaluate_base_transport = [&](const float common_scale,
+                                       BaseTransportResolution& resolved) -> int {
+        if (!(common_scale >= 1.0f) || !std::isfinite(common_scale)) {
+            return -1;
+        }
+        const double effective_nu_si =
+            culbm_base_kinematic_viscosity_m2_s * (double)common_scale;
+        const double effective_alpha_si =
+            culbm_base_thermal_diffusivity_m2_s * (double)common_scale;
+        if (!(effective_nu_si > 0.0) || !(effective_alpha_si > 0.0) ||
+            !std::isfinite(effective_nu_si) || !std::isfinite(effective_alpha_si) ||
+            effective_nu_si > (double)std::numeric_limits<float>::max() ||
+            effective_alpha_si > (double)std::numeric_limits<float>::max()) {
+            return -1;
+        }
+
+        resolved.common_scale = common_scale;
+        resolved.requested_nu_lbm =
+            units.nu((float)culbm_base_kinematic_viscosity_m2_s);
+        resolved.requested_alpha_lbm =
+            units.alpha((float)culbm_base_thermal_diffusivity_m2_s);
+        resolved.requested_momentum_tau =
+            0.5f + 3.0f * resolved.requested_nu_lbm;
+        resolved.requested_thermal_tau =
+            get_temperature_tau(resolved.requested_alpha_lbm);
+        resolved.effective_nu_si = (float)effective_nu_si;
+        resolved.effective_alpha_si = (float)effective_alpha_si;
+        resolved.effective_nu_lbm = units.nu(resolved.effective_nu_si);
+        resolved.effective_alpha_lbm = units.alpha(resolved.effective_alpha_si);
+        resolved.effective_momentum_tau =
+            0.5f + 3.0f * resolved.effective_nu_lbm;
+        resolved.effective_thermal_tau =
+            get_temperature_tau(resolved.effective_alpha_lbm);
+
+        if (!std::isfinite(resolved.requested_nu_lbm) ||
+            !std::isfinite(resolved.requested_alpha_lbm) ||
+            !std::isfinite(resolved.requested_momentum_tau) ||
+            !std::isfinite(resolved.requested_thermal_tau) ||
+            !std::isfinite(resolved.effective_nu_lbm) ||
+            !std::isfinite(resolved.effective_alpha_lbm) ||
+            !std::isfinite(resolved.effective_momentum_tau) ||
+            !std::isfinite(resolved.effective_thermal_tau)) {
+            return -1;
+        }
+        return resolved.effective_momentum_tau > 0.5f &&
+               resolved.effective_thermal_tau > 0.5f ? 1 : 0;
+    };
+
+    auto fail_base_transport = [&](const std::string& scope) {
+        println("| ERROR: cannot represent positive base momentum/thermal relaxation in FP32. |");
+        print_kv_row("Transport units", scope);
+        print_kv_row("Requested SI", "nu=" +
+            to_string(culbm_base_kinematic_viscosity_m2_s) +
+            " m^2/s, alpha=" +
+            to_string(culbm_base_thermal_diffusivity_m2_s) + " m^2/s");
+        wait();
+        exit(-1);
+    };
+
+    auto print_base_transport = [&](const std::string& scope,
+                                    const BaseTransportResolution& resolved) {
+        print_kv_row("Transport units", scope);
+        print_kv_row("Requested SI", "nu=" +
+            to_string(culbm_base_kinematic_viscosity_m2_s) +
+            " m^2/s, alpha=" +
+            to_string(culbm_base_thermal_diffusivity_m2_s) + " m^2/s");
+        print_kv_row("Requested LBM", "nu=" +
+            to_string(resolved.requested_nu_lbm) + ", alpha=" +
+            to_string(resolved.requested_alpha_lbm));
+        print_kv_row("Requested tau", "momentum=" +
+            to_string(resolved.requested_momentum_tau) + ", thermal=" +
+            to_string(resolved.requested_thermal_tau));
+        print_kv_row("Transport scale", to_string(resolved.common_scale) +
+            " (common nu/alpha factor; base Pr preserved)");
+        print_kv_row("Effective SI", "nu=" +
+            to_string(resolved.effective_nu_si) + " m^2/s, alpha=" +
+            to_string(resolved.effective_alpha_si) + " m^2/s");
+        print_kv_row("Effective LBM", "nu=" +
+            to_string(resolved.effective_nu_lbm) + ", alpha=" +
+            to_string(resolved.effective_alpha_lbm));
+        print_kv_row("Effective tau", "momentum=" +
+            to_string(resolved.effective_momentum_tau) + ", thermal=" +
+            to_string(resolved.effective_thermal_tau));
+        if (resolved.common_scale > 1.0f) {
+            print_kv_row("WARNING",
+                "requested FP32 tau <= 0.5; effective base transport was increased");
+        }
+    };
+
+    auto resolve_base_transport = [&](const std::string& scope,
+                                      const bool show_info) {
+        BaseTransportResolution resolved;
+        int status = evaluate_base_transport(1.0f, resolved);
+        if (status < 0) {
+            fail_base_transport(scope);
+        }
+        if (status == 0) {
+            float lower = 1.0f;
+            float upper = 1.0f;
+            for (;;) {
+                if (upper > 0.5f * std::numeric_limits<float>::max()) {
+                    fail_base_transport(scope);
+                }
+                upper *= 2.0f;
+                BaseTransportResolution candidate;
+                status = evaluate_base_transport(upper, candidate);
+                if (status < 0) {
+                    fail_base_transport(scope);
+                }
+                if (status > 0) {
+                    resolved = candidate;
+                    break;
+                }
+                lower = upper;
+            }
+
+            // The predicate is monotonic for positive coefficients.  Search adjacent
+            // FP32 scale values so the selected common factor is the smallest one
+            // that produces both actual FP32 relaxation times strictly above 0.5.
+            const float infinity = std::numeric_limits<float>::infinity();
+            for (uint iteration = 0u; iteration < 512u; ++iteration) {
+                const float adjacent = std::nextafter(lower, infinity);
+                if (!(adjacent < upper)) {
+                    break;
+                }
+                const float midpoint = 0.5f * lower + 0.5f * upper;
+                if (!(midpoint > lower) || !(midpoint < upper)) {
+                    break;
+                }
+                BaseTransportResolution candidate;
+                status = evaluate_base_transport(midpoint, candidate);
+                if (status < 0) {
+                    fail_base_transport(scope);
+                }
+                if (status > 0) {
+                    upper = midpoint;
+                    resolved = candidate;
+                }
+                else {
+                    lower = midpoint;
+                }
+            }
+            status = evaluate_base_transport(upper, resolved);
+            if (status != 1) {
+                fail_base_transport(scope);
+            }
+        }
+
+        base_transport = resolved;
+        lbm_nu = resolved.effective_nu_lbm;
+        lbm_alpha = resolved.effective_alpha_lbm;
+        if (show_info) {
+            print_base_transport(scope, resolved);
+        }
+    };
+
+    resolve_base_transport(profile_generation ? "profile units" : "initial units",
+                           profile_generation);
     float lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
     float lbm_buoyancy_gz = buoyancy_enabled ? units.g(-si_gravity) : 0.0f;
     auto downstream_face_id_from_bc = [](const std::string& bc) -> int {
@@ -4816,9 +5150,8 @@ void main_setup() {
         else {
             println("| Temp Scale      | " + alignr(57u, to_string(fmtf(temperature_scale_kelvin)) + " K per 1.0 T_lbm (default)") + " |");
         }
-        println("| Thermal alpha   | " + alignr(57u, to_string(lbm_alpha, 8u)) + " |");
+        print_base_transport("initial units", base_transport);
         println("| Thermal lattice | " + alignr(57u, string(get_temperature_lattice_name())) + " |");
-        println("| Thermal tau_T   | " + alignr(57u, to_string(get_temperature_tau(lbm_alpha), 8u)) + " |");
         println("| Thermal beta    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_beta, 8u) : string("0 (disabled by buoyancy=false)")) + " |");
         println("| Buoyancy g_z    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_buoyancy_gz, 8u) : string("0 (disabled)")) + " |");
         if (buoyancy_enabled && boussinesq_temperature_range_checked) {
@@ -5166,6 +5499,8 @@ void main_setup() {
         Clock nested_build_clock;
         const double coarse_dx_si = cuda_vertical_nesting_plan.coarse_dx_si;
         culbm::NestedLbmPhysics nested_physics;
+        // lbm_nu/lbm_alpha are the effective coarse values selected by the
+        // common FP32 transport resolver for the current unit system.
         nested_physics.coarse_nu = lbm_nu;
         nested_physics.coarse_alpha = lbm_alpha;
         nested_physics.beta = lbm_beta;
@@ -5698,6 +6033,114 @@ void main_setup() {
         if (unsteady_interval > 0u) {
             print_kv_row("Unsteady u VTK", "every " + to_string(unsteady_interval) + " coarse step(s)");
         }
+        std::ofstream nested_sgs_diagnostics_output;
+        bool nested_sgs_diagnostics_warned = false;
+        if (culbm_sgs_diagnostics_interval > 0u && culbm::mpi_is_root()) {
+            const std::string diagnostics_filename =
+                vtk_prefix + datetime + "_culbm_sgs_diagnostics.csv";
+            const std::filesystem::path diagnostics_path =
+                std::filesystem::path(parent) / "RESULTS" /
+                diagnostics_filename;
+            std::filesystem::create_directories(diagnostics_path.parent_path());
+            nested_sgs_diagnostics_output.open(
+                diagnostics_path.string(), std::ios::out | std::ios::trunc);
+            if (!nested_sgs_diagnostics_output.is_open()) {
+                println("| ERROR: cannot create SGS diagnostics file: " +
+                    diagnostics_path.string() + " |");
+                wait();
+                exit(-1);
+            }
+            print_kv_row("SGS diagnostics", diagnostics_path.string());
+            nested_sgs_diagnostics_output
+                << "coarse_step,time_s,level,dx_m,dt_s,"
+                   "mean_nu_t_lbm,max_nu_t_lbm,"
+                   "mean_nu_t_m2_s,max_nu_t_m2_s,"
+                   "mean_mu_t_pa_s,max_mu_t_pa_s,count\n";
+        }
+        auto sample_nested_sgs_diagnostics = [&](const ulong coarse_step) {
+            if (culbm_sgs_diagnostics_interval == 0u ||
+                coarse_step % (ulong)culbm_sgs_diagnostics_interval != 0ull) {
+                return;
+            }
+            double nu_volume_sum = 0.0;
+            double mu_volume_sum = 0.0;
+            double physical_volume_sum = 0.0;
+            double max_nu_si = 0.0;
+            double max_mu_si = 0.0;
+            std::uint64_t total_count = 0ull;
+            bool has_valid_level = false;
+            for (const auto& owned : nested.levels) {
+                const Subgrid_Statistics statistics =
+                    owned.lbm->subgrid_statistics();
+                if (!statistics.valid || statistics.count == 0ull) continue;
+                const double ratio =
+                    (double)owned.plan.ratio_to_coarse;
+                const double level_dx_si = owned.plan.dx_si;
+                const double level_dt_si =
+                    nested_physics.coarse_dt_si / ratio;
+                const double nu_factor =
+                    level_dx_si * level_dx_si / level_dt_si;
+                const double rho_factor = (double)units.si_rho(1.0f);
+                const double mean_nu_si =
+                    (double)statistics.mean_nu_t * nu_factor;
+                const double level_max_nu_si =
+                    (double)statistics.max_nu_t * nu_factor;
+                const double mean_mu_si =
+                    (double)statistics.mean_rho_nu_t *
+                    rho_factor * nu_factor;
+                const double level_max_mu_si =
+                    (double)statistics.max_rho_nu_t *
+                    rho_factor * nu_factor;
+                const double cell_volume =
+                    level_dx_si * level_dx_si * level_dx_si;
+                const double level_volume =
+                    (double)statistics.count * cell_volume;
+                nu_volume_sum += mean_nu_si * level_volume;
+                mu_volume_sum += mean_mu_si * level_volume;
+                physical_volume_sum += level_volume;
+                max_nu_si = std::max(max_nu_si, level_max_nu_si);
+                max_mu_si = std::max(max_mu_si, level_max_mu_si);
+                total_count += (std::uint64_t)statistics.count;
+                has_valid_level = true;
+                if (culbm::mpi_is_root()) {
+                    nested_sgs_diagnostics_output << std::setprecision(12)
+                        << coarse_step << ','
+                        << (double)coarse_step * nested_physics.coarse_dt_si
+                        << ',' << owned.plan.label << ','
+                        << level_dx_si << ',' << level_dt_si << ','
+                        << statistics.mean_nu_t << ','
+                        << statistics.max_nu_t << ','
+                        << mean_nu_si << ',' << level_max_nu_si << ','
+                        << mean_mu_si << ',' << level_max_mu_si << ','
+                        << statistics.count << '\n';
+                }
+            }
+            if (!has_valid_level || !(physical_volume_sum > 0.0)) {
+                if (!nested_sgs_diagnostics_warned && culbm::mpi_is_root()) {
+                    print_kv_row(
+                        "SGS diagnostics",
+                        "nested hierarchy has no valid fluid-cell statistics");
+                    nested_sgs_diagnostics_warned = true;
+                }
+                return;
+            }
+            const double mean_nu_si = nu_volume_sum / physical_volume_sum;
+            const double mean_mu_si = mu_volume_sum / physical_volume_sum;
+            if (culbm::mpi_is_root()) {
+                nested_sgs_diagnostics_output << std::setprecision(12)
+                    << coarse_step << ','
+                    << (double)coarse_step * nested_physics.coarse_dt_si
+                    << ",volume_weighted_all_levels,,,,,"
+                    << mean_nu_si << ',' << max_nu_si << ','
+                    << mean_mu_si << ',' << max_mu_si << ','
+                    << total_count << '\n';
+                nested_sgs_diagnostics_output.flush();
+                print_kv_row(
+                    "SGS nu_t nested",
+                    "volume-weighted mean=" + to_string(mean_nu_si, 8u) +
+                    ", max=" + to_string(max_nu_si, 8u) + " m^2/s");
+            }
+        };
         scheduler.initialize();
         if (!probe_requests.empty()) {
             resolve_nested_probes(stitch_or_fail());
@@ -5709,6 +6152,7 @@ void main_setup() {
         for (ulong step = 0u; step < total_steps; ++step) {
             scheduler.advance_one_coarse_step();
             const ulong t = scheduler.coarse_step_count();
+            sample_nested_sgs_diagnostics(t);
             const bool sample_avg = avg_window > 0u && t >= avg_start_t &&
                 ((t - avg_start_t) % avg_stride) == 0u;
             const bool sample_probes = !nested_probes.empty() && t >= probe_start_t;
@@ -5885,6 +6329,70 @@ void main_setup() {
             print_kv_row("VTK z output", "core Nz=" + to_string((ulong)vtk_output_Nz) +
                 " of solver Nz=" + to_string((ulong)lbm.get_Nz()) + " (top sponge omitted)");
         }
+
+        std::ofstream sgs_diagnostics_output;
+        bool sgs_diagnostics_warned = false;
+        if (culbm_sgs_diagnostics_interval > 0u && culbm::mpi_is_root()) {
+            const std::string diagnostics_filename =
+                vtk_prefix + datetime + "_culbm_sgs_diagnostics.csv";
+            const std::filesystem::path diagnostics_path =
+                std::filesystem::path(parent) / "RESULTS" /
+                diagnostics_filename;
+            std::filesystem::create_directories(diagnostics_path.parent_path());
+            sgs_diagnostics_output.open(
+                diagnostics_path.string(), std::ios::out | std::ios::trunc);
+            if (!sgs_diagnostics_output.is_open()) {
+                println("| ERROR: cannot create SGS diagnostics file: " +
+                    diagnostics_path.string() + " |");
+                wait();
+                exit(-1);
+            }
+            print_kv_row("SGS diagnostics", diagnostics_path.string());
+            sgs_diagnostics_output
+                << "step,time_s,mean_nu_t_lbm,max_nu_t_lbm,"
+                   "mean_nu_t_m2_s,max_nu_t_m2_s,"
+                   "mean_mu_t_pa_s,max_mu_t_pa_s,count\n";
+        }
+        auto sample_sgs_diagnostics = [&]() {
+            const ulong step = lbm.get_t();
+            if (culbm_sgs_diagnostics_interval == 0u ||
+                step % (ulong)culbm_sgs_diagnostics_interval != 0ull) {
+                return;
+            }
+            const Subgrid_Statistics statistics = lbm.subgrid_statistics();
+            if (!statistics.valid) {
+                if (!sgs_diagnostics_warned && culbm::mpi_is_root()) {
+                    print_kv_row("SGS diagnostics", "no valid fluid-cell statistics");
+                    sgs_diagnostics_warned = true;
+                }
+                return;
+            }
+            const double nu_factor = (double)units.si_nu(1.0f);
+            const double mu_factor =
+                (double)units.si_rho(1.0f) * nu_factor;
+            const double mean_nu_si =
+                (double)statistics.mean_nu_t * nu_factor;
+            const double max_nu_si =
+                (double)statistics.max_nu_t * nu_factor;
+            const double mean_mu_si =
+                (double)statistics.mean_rho_nu_t * mu_factor;
+            const double max_mu_si =
+                (double)statistics.max_rho_nu_t * mu_factor;
+            if (culbm::mpi_is_root()) {
+                sgs_diagnostics_output << std::setprecision(12)
+                    << step << ',' << (double)units.si_t(step) << ','
+                    << statistics.mean_nu_t << ','
+                    << statistics.max_nu_t << ','
+                    << mean_nu_si << ',' << max_nu_si << ','
+                    << mean_mu_si << ',' << max_mu_si << ','
+                    << statistics.count << '\n';
+                sgs_diagnostics_output.flush();
+                print_kv_row(
+                    "SGS nu_t",
+                    "mean=" + to_string(mean_nu_si, 8u) +
+                    ", max=" + to_string(max_nu_si, 8u) + " m^2/s");
+            }
+        };
         std::vector<string> vtk_saved_files;
         vtk_saved_files.reserve(16u);
 
@@ -6834,6 +7342,7 @@ void main_setup() {
             }
             lbm.run(1u, total_steps);
             advance_particle_advection();
+            sample_sgs_diagnostics();
             maybe_write_unsteady_u();
             const bool avg_sampled = process_post_step_samples();
             update_runtime_eta(iteration_clock.stop(), avg_sampled);
@@ -7678,8 +8187,6 @@ void main_setup() {
                 units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
                 units.set_temperature_reference(1.0f, temperature_ref_kelvin);
                 z_off = units.x(z_si_offset);
-                lbm_nu = units.nu(si_nu);
-                lbm_alpha = units.alpha(si_alpha_air);
                 lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
                 lbm_buoyancy_gz = buoyancy_enabled ? units.g(-si_gravity) : 0.0f;
                 update_coriolis(false);
@@ -7690,6 +8197,7 @@ void main_setup() {
                 println("| Dataset case    | " + alignr(57u, case_label) + " |");
                 println("| Inflow / Angle  | " + alignr(57u, format_tag(inflow_si) + " m/s, " + format_tag(angle_deg) + " deg") + " |");
                 println("| SI Reference U  | " + alignr(57u, format_tag(si_ref_u) + " m/s") + " |");
+                resolve_base_transport("dataset case " + case_label, true);
 
                 const float3 inflow_lbmu = wind_velocity_lbmu(inflow_si, angle_deg, u_scale);
                 const std::string case_downstream_bc = profile_downstream_bc_from_dir(inflow_lbmu.x, inflow_lbmu.y);

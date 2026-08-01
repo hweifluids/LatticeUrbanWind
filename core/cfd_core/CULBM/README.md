@@ -220,17 +220,76 @@ NVRTC 编译失败时，无需设置环境变量也会自动保存完整编译�
 默认 `stream_collide` block size 保持实测更快的 64；最后一个环境变量仅用于
 设备专项调优，不建议写入通用 deck。
 
+## GPU SGS 大涡模型
+
+CULBM 的 Smagorinsky-Lilly SGS 在 `stream_collide` CUDA kernel 内计算，不把速度场
+回传 CPU。生产 deck 可在同一可执行文件中配置模型、基础输运系数及温度标量闭合：
+
+```text
+culbm_base_kinematic_viscosity_m2_s = 0.0000148
+culbm_base_thermal_diffusivity_m2_s = 0.0000210
+culbm_sgs_enable = true
+culbm_sgs_cs = 0.173265956
+culbm_sgs_scalar_coupling = true
+culbm_sgs_turbulent_prandtl = 1.0
+culbm_sgs_diagnostics_interval = 0
+```
+
+两个基础输运系数都是正的有限 SI 值；setup 在确定 `dx/dt` 后分别换算为
+`nu_lbm` 和 `alpha_lbm`，不再把动力黏度、运动黏度或热扩散率混为一个参数。缺省值
+分别为干空气近似的 `1.48e-5 m^2/s` 与 `2.10e-5 m^2/s`。SGS 关闭时，kernel 只使用
+这两个基础值。
+
+如果换算后的 FP32 运算令动量 `tau=0.5+3*nu_lbm` 或当前温度速度集的 `tau_T`
+不大于 `0.5`，setup 会在 FP32 可表示因子中选择使两者都严格大于 `0.5` 的最小共同
+放大系数，同时放大 `nu` 和 `alpha`，从而保持基础 `Pr=nu/alpha`。这会改变实际采用的
+分子输运系数，因此绝不静默处理：启动日志会打印 requested/effective 的 SI、LBM、
+两个松弛时间、共同 scale 和 `WARNING`。数据集模式在每个风速改变单位制后重新求解并
+打印这些值；垂直嵌套从该工况已经修正的粗层 LBM 值继续缩放。
+
+`culbm_sgs_cs` 是传统 Smagorinsky 常数 (C_s)，缺省为 `0.173265956`。需要沿用以
+`C_s^2` 记参的输入时，可改写为 `culbm_sgs_cs_squared`；setup 会取非负平方根。
+两个键不得同时出现，以免把 (C_s) 错当成 (C_s^2)。例如 GEA 密度流文献采用的
+式 (13) 给出的是 `C_s^2=C_k*sqrt(C_k/C_epsilon)=0.453989945`，不是传统
+`C_s=0.454`；对应传统常数为 `C_s=0.673787760`，kernel prefactor 为
+`18*sqrt(2)*C_s^2=11.5566973`。因此该算例推荐写
+`culbm_sgs_cs_squared=0.453989945`，或等价地写
+`culbm_sgs_cs=0.673787760`，不得把二者同时写入 deck。
+
+局部非平衡应力采用 Guo force-aware 形式
+`Pi_neq,corr=Pi_neq+(uF+Fu)/2`：`u` 是半力修正后的物理速度，`F` 是该格点进入碰撞的
+总力密度。浮力、Coriolis、buffer nudging、top sponge、逐点力和全局力都走同一修正，
+避免把均匀加速的领先阶力矩误当作解析尺度应变；诊断 kernel 与主碰撞复用同一公式。
+
+启用标量闭合时，同一格点的动量 SGS 涡黏度通过
+`alpha_t = nu_t / Pr_t` 加到温度扩散率；`Pr_t` 必须为正有限值。D3Q7 与 D3Q19
+继续使用各自的标量声速和松弛时间关系。`culbm_sgs_scalar_coupling` 缺省为 `true`，
+使新的未显式配置 deck 使用动量—温度一致的 LES；如需复现旧版“仅动量 SGS”的数值
+行为，必须显式设为 `false`。
+
+`culbm_sgs_diagnostics_interval=N` 可每 N 个 LBM 步输出一次流体格点上的瞬时空间
+平均/峰值 `nu_t`；`0`（缺省）关闭。诊断由 GPU 计算，只在指定采样步产生归约开销，
+结果写入 `RESULTS/<vtk_prefix><datetime>_culbm_sgs_diagnostics.csv`，避免数据集或
+多角度批量工况互相覆盖；标准单工况的 `vtk_prefix` 为空。文件同时给出 LBM/SI
+涡黏度、由实际
+`rho*nu_t` 归约得到的动力涡黏度及有效流体格点数；不应把该瞬时空间平均误写成
+时间平均。垂直嵌套会先逐层写出各自的 `dx/dt`，再以 `dx^3` 物理体积加权合并 SI
+均值；禁止直接按不同层的格点数或 LBM 值混合。启动日志同时打印实际采用的开关、
+`C_s`、`Pr_t`、基础 SI/LBM 输运系数和诊断间隔。SGS 配置是进程级求解配置，必须
+在构造第一个 LBM 对象之前确定；同一垂直嵌套层级使用相同的无量纲 `C_s/Pr_t`。
+
 ## GPU 温度输运
 
 动量核心固定使用编译时选择的 D3Q19；温度是独立的标量分布，可在同一
 CULBM 可执行文件中按 deck 运行时选择：
 
 ```text
-culbm_temperature_lattice = D3Q7
+culbm_temperature_lattice = D3Q19
 culbm_boussinesq_reference_temperature_k = auto
 ```
 
-也可设为 `D3Q19`。默认值是 D3Q7，以保持已有 deck 的存储规模和行为兼容。
+也可设为 `D3Q7`。未写此键时的求解器默认值仍是 D3Q7，以保持已有 deck 的存储规模
+和行为兼容；新建项目模板显式选择 D3Q19 作为高各向同性温度标量格式。
 该选择是进程级求解配置，setup 会在构造任何 LBM 对象之前设置本次运行的值。
 为防止已分配的 `gi` 尺寸与后续 kernel/halo 解释不一致，存在活动 LBM 实例时
 运行库会拒绝切换到另一种温度速度集。
@@ -274,10 +333,10 @@ culbm_boussinesq_reference_temperature_k = 298.15
 兼容。旧式无命名 7 列格式需要靠数值范围区分 `T` 与 `patch`，因此新输入应始终使用
 完整命名表头，避免该历史歧义。
 
-当前热力模型的可信范围是干空气、常参考温度、小密度差的 Boussinesq 近似。它不包含
-大气位温或虚位温、湿度对密度的贡献、凝结/蒸发潜热、静力可压缩分层，也没有独立的
-标量 SGS / 湍流 Prandtl 闭合。因此它适合近地层小温差热浮力与被动温度输运；水汽输送
-和相变污染物模型应在后续作为新的守恒标量与热力耦合扩展，不能把当前 `T` 字段直接
+当前热力模型的可信范围是干空气、常参考温度、小密度差的 Boussinesq 近似。它包含
+可选的温度 SGS / 湍流 Prandtl 闭合，但不包含大气位温或虚位温、湿度对密度的贡献、
+凝结/蒸发潜热或静力可压缩分层。因此它适合近地层小温差热浮力与被动温度输运；水汽
+输送和相变污染物模型仍应作为新的守恒标量与热力耦合扩展，不能把当前 `T` 字段直接
 解释为完整湿空气热力学。
 
 当 `downstream_open_face = true` 时，温度在所选下游侧面自动使用一阶零法向梯度

@@ -1,6 +1,7 @@
 # GEA 大气基准的 CULBM 数值验证
 
-本目录复现 arXiv:2302.04836 中的两个二维大气基准：
+本目录复现 arXiv:2302.04836 中的两个二维大气基准，并提供冻结的人工黏度（AV）
+基线与独立的 Smagorinsky-Lilly SGS/LES 敏感性目标：
 
 - rising thermal bubble（AV15）；
 - density current（AV75）。
@@ -69,7 +70,9 @@ x cell centers 之间线性插值。`front_bracket_left_m/right_m` 是 CULBM 相
 
 ## CULBM 映射
 
-主验证二进制固定使用：
+### 冻结的 AV 基线
+
+主验证二进制 `CULBM-gea-validation` 默认使用：
 
 - 动量 D3Q19；
 - 热标量 D3Q19；
@@ -107,6 +110,78 @@ beta_LBM = theta_scale / 300
 热泡默认 `theta_scale=2 K`，密度流默认 `15 K`，故浮力乘积始终为
 `theta_prime/300`。CULBM 的 `T` 在本验证中代表位温扰动的归一化标量，不是 GEA
 总能量方程中的热力学温度。
+
+### SGS/LES 目标与系数映射
+
+`CULBM-gea-validation-sgs` 是单独的 SGS 敏感性目标。其编译默认值为：
+
+| 设置 | 默认值 |
+|---|---:|
+| 动量 SGS | Smagorinsky-Lilly，开启 |
+| 热标量 SGS | 开启，`alpha_t=nu_t/Pr_t` |
+| `Pr_t` | `1` |
+| `Cs²` | `0.453989945` |
+| `Cs` | `sqrt(Cs²)=0.673787760` |
+| 请求的基础 `nu` / `alpha` | 均为 `1.48e-5 m²/s` |
+| 最小动量 tau | `0.5001`（进入 FP32 后按可表示值向上取整） |
+
+`--sgs-cs` 接受传统 Smagorinsky 常数 `Cs`，runner 内部将其平方；
+`--sgs-cs-squared` 直接接受 `Cs²`，二者互斥。默认 GEA 映射对应 kernel prefactor
+`18 sqrt(2) Cs² = 11.5566973`。`--sgs-scalar off` 只关闭热标量的湍流扩散耦合，
+不会关闭动量 SGS；`--sgs-pr-t` 控制开启耦合时的湍流 Prandtl 数。
+
+两个可执行文件的默认配置是整体配置，不能只靠切换 `--sgs` 得到彼此等价的算例：
+
+- AV 目标加 `--sgs on` 仍保留 AV 基础输运和 AV 目标的默认 `Cs²`；
+- SGS 目标加 `--sgs off` 仅关闭涡黏度，仍保留 SGS 目标的基础输运请求和 tau floor。
+
+因此正式 A/B 对照应记录完整命令，并以 `run_config.json` 中的请求值、有效值和
+SGS 参数为准。
+
+### tau floor、Pr 和有效基础输运
+
+SGS 目标不再把 D3Q7 与 D3Q19 的最小 thermal tau 都硬设为 `0.5001`。未显式传入
+`--min-thermal-tau` 时，runner 先由 FP32 可表示的动量下限求基础运动黏度下限，
+再保持请求的基础输运比：
+
+```text
+r = alpha_requested / nu_requested
+nu_floor,LBM    = (tau_floor,momentum - 0.5) / 3
+alpha_floor,LBM = r * nu_floor,LBM
+tau_floor,T     = 0.5 + alpha_floor,LBM / cs_T²
+
+cs_T² = 1/3  (D3Q19)
+cs_T² = 1/4  (D3Q7)
+```
+
+默认 `r=1`，所以两种热格子都保持 `alpha_floor=nu_floor`：D3Q19 的 thermal tau
+约为 `0.5001`，D3Q7 约为 `0.5001333`。这避免了“两个 tau 数值相同”在 D3Q7 下
+产生 `alpha/nu=0.75`。显式 `--min-thermal-tau VALUE` 始终优先，并将 derived 标志
+置为 false；显式传入 `0.5` 会关闭 thermal floor。其他显式值应由用户自行确认是否
+符合所需的基础 Prandtl 数。
+
+tau floor 是 FP32 稳定性/可表示性措施，不是分子物性。floor 触发后，实际基础输运为
+
+```text
+nu_effective,SI = nu_floor,LBM * h² / dt
+alpha_effective,SI = alpha_floor,LBM * h² / dt
+```
+
+所以它随网格间距 `h` 的平方增大、随 `dt` 的倒数增大。按名义
+`tau_floor=0.5001` 估算，`nu_floor,LBM≈3.333e-5`；例如 `dt=0.1 s` 时：
+
+| h | floor 后约等效基础 `nu` |
+|---:|---:|
+| `400 m` | `53.3 m²/s` |
+| `12.5 m` | `0.0521 m²/s` |
+| `5 m` | `0.00833 m²/s` |
+
+这些值均不能称为分子输运。`1.48e-5 m²/s` 只是 requested base transport；一旦
+floor 生效，报告必须使用 `effective_nu_m2_s` 和 `effective_alpha_m2_s`。由于 FP32
+向上取整，精确值以输出为准：`run_config.json` 的 `minimum_thermal_tau` 是实际解析后
+使用的 thermal floor，`minimum_thermal_tau_derived` 说明其是否由动量下限推导；
+console 的 `GEA_CONFIG` 始终输出同样信息，floor 实际触发时还会输出
+`GEA_TAU_FLOOR`。
 
 ## 完整网格矩阵
 
@@ -163,9 +238,35 @@ cmake -S core/cfd_core/CULBM `
   -DBUILD_TESTING=ON
 
 cmake --build core/cfd_core/CULBM/build `
-  --target CULBM-gea-validation CULBM-gea-validation-trt `
+  --target CULBM-gea-validation CULBM-gea-validation-sgs `
+           CULBM-gea-validation-trt `
   --parallel
 ```
+
+直接运行一个 SGS 算例：
+
+```powershell
+$sgsExe = 'core/cfd_core/CULBM/build/CULBM-gea-validation-sgs.exe'
+& $sgsExe `
+  --case density-current `
+  --h 50 `
+  --dt 0.1 `
+  --thermal D3Q19 `
+  --sample-seconds 5 `
+  --output D:\gea-validation\sgs-density-h50-new
+```
+
+也可让主矩阵脚本使用 SGS 可执行文件；建议先用 `-MainOnly`，避免把 AV 专用的
+numeric-viscosity 敏感性项混入 SGS 矩阵：
+
+```powershell
+core/cfd_core/CULBM/validation/gea/run_suite.ps1 `
+  -Executable $sgsExe `
+  -MainOnly `
+  -ResultsRoot D:\gea-validation\sgs-main-20260731
+```
+
+现有套件脚本不传 `-Executable` 时仍运行冻结的 `CULBM-gea-validation` AV 基线。
 
 在两张 GPU 上成对并行执行完整主矩阵和敏感性矩阵：
 

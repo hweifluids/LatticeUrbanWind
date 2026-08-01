@@ -45,6 +45,14 @@ unsteady_output = 0
 
 // Physics
 coriolis_term = true
+culbm_temperature_lattice = D3Q19
+culbm_base_kinematic_viscosity_m2_s = 0.0000148
+culbm_base_thermal_diffusivity_m2_s = 0.0000210
+culbm_sgs_enable = true
+culbm_sgs_cs = 0.173265956
+culbm_sgs_scalar_coupling = true
+culbm_sgs_turbulent_prandtl = 1.0
+culbm_sgs_diagnostics_interval = 0
 ibm_enabler = false
 enable_buffer_nudging = true
 buffer_thickness_m = 160.0

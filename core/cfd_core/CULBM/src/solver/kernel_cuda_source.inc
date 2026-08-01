@@ -9132,6 +9132,60 @@ flagsn&~TYPE_MS;
 }
 #endif
 
+#ifdef SUBGRID
+float calculate_subgrid_tau_eff(
+	const float* f,
+	const float rho,
+	const float ux,
+	const float uy,
+	const float uz,
+	const float fx,
+	const float fy,
+	const float fz)
+{
+#ifdef SUBGRID_FIXED_EDDY_VISCOSITY
+	return def_tau+3.0f*def_subgrid_fixed_nu_t;
+#else
+#if !defined(D3Q19)
+#error "CULBM subgrid model requires the D3Q19 momentum lattice"
+#endif
+	// The stored DDFs are shifted by their rho=1,u=0 equilibrium.  Their
+	// equilibrium diagonal second moment is therefore (rho-1)/3+rho*u_i^2;
+	// the off-diagonal moment remains rho*u_i*u_j.
+	const float shifted_pressure=(rho-1.0f)*0.3333333333333333f;
+	float Hxx=
+		f[1]+f[2]+f[7]+f[8]+f[9]+f[10]+f[13]+f[14]+f[15]+f[16]
+		-cuda_fma(rho,ux*ux,shifted_pressure);
+	float Hyy=
+		f[3]+f[4]+f[7]+f[8]+f[11]+f[12]+f[13]+f[14]+f[17]+f[18]
+		-cuda_fma(rho,uy*uy,shifted_pressure);
+	float Hzz=
+		f[5]+f[6]+f[9]+f[10]+f[11]+f[12]+f[15]+f[16]+f[17]+f[18]
+		-cuda_fma(rho,uz*uz,shifted_pressure);
+	float Hxy=f[7]+f[8]-f[13]-f[14]-rho*ux*uy;
+	float Hxz=f[9]+f[10]-f[15]-f[16]-rho*ux*uz;
+	float Hyz=f[11]+f[12]-f[17]-f[18]-rho*uy*uz;
+#ifdef VOLUME_FORCE
+	// Guo forcing reconstructs the physical velocity with F/(2*rho).
+	// Its strain-rate moment is Pi_neq + (uF+Fu)/2 (Chai-Zhao,
+	// Phys. Rev. E 86, 016705, Eq. 30).  Correcting this source moment
+	// prevents the leading-order part of uniform acceleration, buoyancy,
+	// nudging, and sponge forces from being interpreted as resolved shear.
+	Hxx=cuda_fma(ux,fx,Hxx);
+	Hyy=cuda_fma(uy,fy,Hyy);
+	Hzz=cuda_fma(uz,fz,Hzz);
+	Hxy=cuda_fma(0.5f,cuda_fma(ux,fy,uy*fx),Hxy);
+	Hxz=cuda_fma(0.5f,cuda_fma(ux,fz,uz*fx),Hxz);
+	Hyz=cuda_fma(0.5f,cuda_fma(uy,fz,uz*fy),Hyz);
+#endif
+	const float Q=sq(Hxx)+sq(Hyy)+sq(Hzz)+
+		2.0f*(sq(Hxy)+sq(Hxz)+sq(Hyz));
+	return 0.5f*(def_tau+
+		sqrt(sq(def_tau)+def_subgrid_prefactor*sqrt(Q)/rho));
+#endif
+}
+#endif
+
 
 extern "C" __global__ void stream_collide
 (
@@ -9972,6 +10026,10 @@ cuda_clamp(uzn,
 def_c);
 #endif
 }
+#ifdef SUBGRID
+const float subgrid_tau_eff=calculate_subgrid_tau_eff(
+	fhn,rhon,uxn,uyn,uzn,fxn,fyn,fzn);
+#endif
 #ifdef TEMPERATURE
 {
 float
@@ -9993,6 +10051,14 @@ geq[i];
 }
 else
 {
+#ifdef SUBGRID_SCALAR
+const float w_T=1.0f/cuda_fma(
+	subgrid_tau_eff-def_tau,
+	def_subgrid_scalar_tau_factor,
+	1.0f/def_w_T);
+#else
+const float w_T=def_w_T;
+#endif
 #ifdef UPDATE_FIELDS
 T[n]
 =
@@ -10004,9 +10070,9 @@ i<def_temperature_set;
 i++)
 ghn[i]
 =
-cuda_fma(1.0f-def_w_T,
+cuda_fma(1.0f-w_T,
 ghn[i],
-def_w_T*geq[i]);
+w_T*geq[i]);
 }
 store_g(n,
 ghn,
@@ -10086,64 +10152,10 @@ feq);
 float
 w
 =
-def_w;
 #ifdef SUBGRID
-{
-const
-float
-tau0
-=
-1.0f/w;
-float
-Hxx=0.0f,
-Hyy=0.0f,
-Hzz=0.0f,
-Hxy=0.0f,
-Hxz=0.0f,
-Hyz=0.0f;
-for(uint
-i=1u;
-i<def_velocity_set;
-i++)
-{
-const
-float
-fneqi
-=
-fhn[i]-feq[i];
-const
-float
-cxi=c(i),
-cyi=c(def_velocity_set+i),
-czi=c(2u*def_velocity_set+i);
-Hxx
-+=
-cxi*cxi*fneqi;
-Hxy
-+=
-cxi*cyi*fneqi;
-Hyy
-+=
-cyi*cyi*fneqi;
-Hxz
-+=
-cxi*czi*fneqi;
-Hyz
-+=
-cyi*czi*fneqi;
-Hzz
-+=
-czi*czi*fneqi;
-}
-const
-float
-Q
-=
-sq(Hxx)+sq(Hyy)+sq(Hzz)+2.0f*(sq(Hxy)+sq(Hxz)+sq(Hyz));
-w
-=
-2.0f/(tau0+sqrt(sq(tau0)+0.76421222f*sqrt(Q)/rhon));
-}
+1.0f/subgrid_tau_eff;
+#else
+def_w;
 #endif
 
 #if defined(EQUILIBRIUM_BOUNDARIES) && defined(VOLUME_FORCE)
@@ -11054,6 +11066,15 @@ float*
 T
 #endif
 
+#ifdef SUBGRID
+,
+const uint write_fields,
+const uint collect_subgrid_statistics,
+double* subgrid_sum,
+float* subgrid_max,
+ulong* subgrid_count
+#endif
+
 )
 {
 const
@@ -11061,8 +11082,16 @@ uxx
 n
 =
 cuda_global_thread_id(0);
+#ifdef SUBGRID
+float sampled_nu_t=0.0f,
+sampled_rho_nu_t=0.0f;
+ulong sampled_count=0ull;
+if(n<(uxx)def_N&&!is_halo(n))
+{
+#else
 if(n>=(uxx)def_N||is_halo(n))
 return;
+#endif
 const
 uchar
 flagsn
@@ -11072,8 +11101,13 @@ const
 uchar
 flagsn_bo=flagsn&TYPE_BO,
 flagsn_su=flagsn&TYPE_SU;
+#ifdef SUBGRID
+if(flagsn_bo!=TYPE_S&&flagsn_su!=TYPE_G)
+{
+#else
 if(flagsn_bo==TYPE_S||flagsn_su==TYPE_G)
 return;
+#endif
 uxx
 j[def_velocity_set];
 neighbors(n,
@@ -11385,6 +11419,9 @@ ghn[i];
 Tn
 +=
 1.0f;
+#ifdef SUBGRID
+if(write_fields!=0u)
+#endif
 T[n]
 =
 Tn;
@@ -11406,6 +11443,9 @@ float sigma_T=sin(1.5707963267948966f*xi);
 sigma_T=def_sponge_inv_tau*sigma_T*sigma_T;
 const uxx n_ref=index(cuda_uint3(xyz.x,xyz.y,(uint)def_top_local_z));
 Tn=cuda_fma(sigma_T,T[n_ref]-Tn,Tn);
+#ifdef SUBGRID
+if(write_fields!=0u)
+#endif
 T[n]=Tn;
 }
 }
@@ -11478,6 +11518,18 @@ cuda_clamp(uzn,
 def_c);
 #endif
 }
+#ifdef SUBGRID
+if(collect_subgrid_statistics!=0u&&flagsn_bo!=TYPE_E)
+{
+const float tau_eff=calculate_subgrid_tau_eff(
+	fhn,rhon,uxn,uyn,uzn,fxn,fyn,fzn);
+sampled_nu_t=(tau_eff-def_tau)*0.3333333333333333f;
+sampled_rho_nu_t=rhon*sampled_nu_t;
+sampled_count=1ull;
+}
+if(write_fields!=0u)
+{
+#endif
 #ifndef EQUILIBRIUM_BOUNDARIES
 rho[
 n]
@@ -11512,6 +11564,39 @@ uyn;
 u[2ull*def_N+(ulong)n]
 =
 uzn;
+}
+#endif
+#ifdef SUBGRID
+}
+}
+}
+if(collect_subgrid_statistics!=0u)
+{
+double sum_nu_t=(double)sampled_nu_t;
+double sum_rho_nu_t=(double)sampled_rho_nu_t;
+float max_nu_t=sampled_nu_t;
+float max_rho_nu_t=sampled_rho_nu_t;
+ulong count=sampled_count;
+#pragma unroll
+for(uint offset=16u; offset>0u; offset>>=1u)
+{
+sum_nu_t+=__shfl_down_sync(0xFFFFFFFFu,sum_nu_t,offset);
+sum_rho_nu_t+=__shfl_down_sync(0xFFFFFFFFu,sum_rho_nu_t,offset);
+max_nu_t=fmaxf(max_nu_t,
+	__shfl_down_sync(0xFFFFFFFFu,max_nu_t,offset));
+max_rho_nu_t=fmaxf(max_rho_nu_t,
+	__shfl_down_sync(0xFFFFFFFFu,max_rho_nu_t,offset));
+count+=__shfl_down_sync(0xFFFFFFFFu,count,offset);
+}
+if((threadIdx.x&31u)==0u)
+{
+atomicAdd(&subgrid_sum[0],sum_nu_t);
+atomicAdd(&subgrid_sum[1],sum_rho_nu_t);
+atomicMax((uint*)&subgrid_max[0],__float_as_uint(max_nu_t));
+atomicMax((uint*)&subgrid_max[1],__float_as_uint(max_rho_nu_t));
+atomicAdd((unsigned long long*)subgrid_count,
+	(unsigned long long)count);
+}
 }
 #endif
 }

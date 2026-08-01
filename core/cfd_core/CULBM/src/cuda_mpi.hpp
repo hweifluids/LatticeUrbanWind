@@ -104,6 +104,8 @@ void mpi_exchange_graphics_halo_pair_bytes(
 	int negative_tag);
 
 void mpi_allreduce_sum_float(float* values, std::uint32_t count);
+void mpi_allreduce_sum_double(double* values, std::uint32_t count);
+void mpi_allreduce_max_float(float* values, std::uint32_t count);
 void mpi_allreduce_sum_uint64(std::uint64_t* values, std::uint32_t count);
 
 } // namespace culbm

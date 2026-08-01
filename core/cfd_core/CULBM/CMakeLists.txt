@@ -241,6 +241,90 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(
+        CULBM-subgrid-formula-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_subgrid_formula.cpp")
+    target_compile_features(
+        CULBM-subgrid-formula-test PRIVATE cxx_std_17)
+    add_test(
+        NAME CULBM.SubgridFormula
+        COMMAND CULBM-subgrid-formula-test)
+    set_tests_properties(
+        CULBM.SubgridFormula PROPERTIES LABELS "subgrid;formula")
+
+    set(CULBM_SUBGRID_GPU_TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_subgrid_gpu.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        "${CULBM_SOLVER_SRC}/info.cpp"
+        "${CULBM_SOLVER_SRC}/kernel.cpp"
+        "${CULBM_SOLVER_SRC}/lbm.cpp"
+        "${CULBM_SOLVER_SRC}/shapes.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_mpi.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_nested_runtime.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_nested_solver.cpp")
+    add_executable(
+        CULBM-subgrid-gpu-test
+        ${CULBM_SUBGRID_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-subgrid-gpu-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-subgrid-gpu-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-subgrid-gpu-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-subgrid-gpu-test PRIVATE
+        CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+    add_test(
+        NAME CULBM.SubgridGPU
+        COMMAND CULBM-subgrid-gpu-test)
+    add_test(
+        NAME CULBM.SubgridMultiGPU
+        COMMAND CULBM-subgrid-gpu-test --multi-gpu)
+    set_tests_properties(
+        CULBM.SubgridGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;subgrid;temperature;analytic")
+    set_tests_properties(
+        CULBM.SubgridMultiGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;multi-gpu;subgrid;temperature;halo")
+
+    # Manual FP32 performance/diagnostic counterpart.  Large performance
+    # modes are intentionally not registered with default CTest.
+    add_executable(
+        CULBM-subgrid-gpu-fp32-test
+        EXCLUDE_FROM_ALL
+        ${CULBM_SUBGRID_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-subgrid-gpu-fp32-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-subgrid-gpu-fp32-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-subgrid-gpu-fp32-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-subgrid-gpu-fp32-test PRIVATE
+        CULBM_BACKEND=1
+        CULBM_DISABLE_FP16C=1
+        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+
+    add_executable(
         CULBM-temperature-analytic-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
@@ -408,11 +492,9 @@ if(BUILD_TESTING)
         CULBM_DISABLE_SUBGRID=1
         "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
 
-    # Diagnostic counterpart to the AV validation target.  This intentionally
-    # enables the solver's existing momentum-only Smagorinsky-Lilly kernel so
-    # SGS-on/off behavior can be tested without changing the published AV
-    # baseline executable.  The thermal population still has no scalar SGS
-    # or turbulent-Prandtl closure; the runner records that limitation.
+    # SGS counterpart to the frozen AV validation target.  Its runtime defaults
+    # select the GEA literature coefficient and full momentum/scalar closure;
+    # command-line overrides remain available for controlled A/B runs.
     add_executable(
         CULBM-gea-validation-sgs
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
@@ -440,6 +522,7 @@ if(BUILD_TESTING)
     target_compile_definitions(
         CULBM-gea-validation-sgs PRIVATE
         CULBM_BACKEND=1
+        CULBM_GEA_SGS_DEFAULT=1
         FREE_SLIP_BOUNDARIES=1
         CULBM_DISABLE_FP16C=1
         "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")

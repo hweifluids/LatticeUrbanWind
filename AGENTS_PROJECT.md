@@ -279,6 +279,40 @@ top sponge、逐点外力与温度浮力后，仅对普通流体加 `F/(2 rho)`�
 规定的物理 Dirichlet 速度。顶部标量 sponge 必须先更新 `T`，再用该温度计算浮力。
 对应非默认路径回归为 `CULBM.ManualFieldsForcingGPU`。
 
+### CULBM SGS LES
+
+生产 CULBM 的 Smagorinsky-Lilly 配置必须在构造任何 `LBM` 实例前通过
+`set_subgrid_configuration()` 固定，并由 `device_defines()` 作为 NVRTC 常量注入；
+不得把逐格 SGS 计算或温度涡扩散率移到 CPU。规范 deck 键为
+`culbm_sgs_enable`、`culbm_sgs_cs`（或互斥的 `culbm_sgs_cs_squared`）、
+`culbm_sgs_scalar_coupling`、`culbm_sgs_turbulent_prandtl`、
+`culbm_base_kinematic_viscosity_m2_s`、`culbm_base_thermal_diffusivity_m2_s` 和
+`culbm_sgs_diagnostics_interval`。传统 `C_s` 与 `C_s^2` 不得混用；GEA 式 (13)
+的 `0.453989945` 是 `C_s^2`，对应传统 `C_s=0.673787760`。该算例优先写
+`culbm_sgs_cs_squared=0.453989945`，不得误写成 `culbm_sgs_cs=0.454`。
+
+温度 SGS 使用与动量碰撞同一点的涡黏度，闭合为
+`alpha_t=nu_t/Pr_t`；D3Q7/D3Q19 必须分别使用其 `cs_T^2=1/4`、`1/3` 计算局部
+温度松弛率。基础 `nu` 与基础 `alpha` 是两个独立 SI 参数，不得为了复现 AV75 而在
+SGS 模式中把二者重新绑成同一个硬编码值。垂直嵌套各层保持相同无量纲 `C_s/Pr_t`，
+基础格子输运系数仍按各层 `dx/dt` 规则缩放。
+
+由非平衡二阶矩计算 SGS 应变时必须包含 Guo 力矩修正
+`Pi_neq,corr=Pi_neq+(uF+Fu)/2`，其中 `u` 是加过 `F/(2rho)` 的物理速度，`F` 是浮力、
+Coriolis、nudging、sponge、逐点力与全局力汇总后的力密度。主碰撞和诊断复算必须使用
+同一修正；不得把均匀体力产生的领先阶动量源误判为剪切应变。
+
+生产 FP32 碰撞若把请求的基础输运换算成 `tau<=0.5`，不得静默以零耗散继续运行。
+当前 setup 对 `nu/alpha` 使用同一个最小放大系数，直到动量和所选温度格子的实际 FP32
+`tau` 都严格大于 `0.5`；这样保持请求的基础 Prandtl 比，并在启动日志中同时报告请求值、
+有效 SI/LBM 值、共同倍数和告警。数据集模式每次改变参考速度/时间尺度后都必须重新求解
+该倍数。此修正只是 FP32 可表示性下限，不应在报告中仍称为原始分子输运系数。
+
+`nu_t` 平均/峰值诊断必须来自 GPU 所用的同一局部 SGS 公式；输出应明确是瞬时空间
+统计而非时间平均。诊断关闭或非采样步不能增加逐格 CPU 工作。性能验收必须用相同
+D3Q19/D3Q19 网格、步数、卡数与输出设置做 SGS off/on 稳态 A/B，并报告
+`steps/s_on / steps/s_off`；不得只比较包含 NVRTC 编译或文件写出的总墙钟时间。
+
 TRT 动量碰撞保持标准 magic parameter `Lambda=3/16`，kernel 与主机诊断应共享同一
 常量，不得为掩盖不稳定而静默 cap `omega-`。启动信息打印 `tau+/-`、`omega+/-` 和
 碰撞本征幅值；`|1-omega|>0.98` 只表示每次碰撞不足 2% 的幅值衰减并触发

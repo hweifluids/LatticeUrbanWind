@@ -799,6 +799,44 @@ void mpi_allreduce_sum_float(
 #endif
 }
 
+void mpi_allreduce_sum_double(
+	double* values, const std::uint32_t count) {
+#ifdef CULBM_ENABLE_MPI
+	ensure_initialized();
+	Mpi_Runtime& state = runtime();
+	if(state.size<=1 || count==0u) return;
+	std::lock_guard<std::recursive_mutex> mpi_lock(
+		state.simulation_call_mutex);
+	mpi_check(
+		MPI_Allreduce(
+			MPI_IN_PLACE, values, (int)count, MPI_DOUBLE, MPI_SUM,
+			state.simulation_communicator),
+		"MPI_Allreduce(double sum)");
+#else
+	(void)values;
+	(void)count;
+#endif
+}
+
+void mpi_allreduce_max_float(
+	float* values, const std::uint32_t count) {
+#ifdef CULBM_ENABLE_MPI
+	ensure_initialized();
+	Mpi_Runtime& state = runtime();
+	if(state.size<=1 || count==0u) return;
+	std::lock_guard<std::recursive_mutex> mpi_lock(
+		state.simulation_call_mutex);
+	mpi_check(
+		MPI_Allreduce(
+			MPI_IN_PLACE, values, (int)count, MPI_FLOAT, MPI_MAX,
+			state.simulation_communicator),
+		"MPI_Allreduce(float max)");
+#else
+	(void)values;
+	(void)count;
+#endif
+}
+
 void mpi_allreduce_sum_uint64(
 	std::uint64_t* values, const std::uint32_t count) {
 #ifdef CULBM_ENABLE_MPI

@@ -32,6 +32,32 @@ float get_temperature_lattice_cs2();
 float get_temperature_tau(const float alpha);
 const char* get_temperature_lattice_name();
 
+struct Subgrid_Configuration {
+#ifdef SUBGRID
+	bool enabled = true;
+#else
+	bool enabled = false;
+#endif
+	float smagorinsky_constant = 0.173265956f;
+	bool scalar_coupling = true;
+	float turbulent_prandtl = 1.0f;
+	// -1 selects the local stress-derived Smagorinsky value.  A non-negative
+	// value is an LBM-unit constant eddy viscosity for deterministic tests.
+	float fixed_eddy_viscosity = -1.0f;
+};
+
+struct Subgrid_Statistics {
+	double mean_nu_t = 0.0;
+	float max_nu_t = 0.0f;
+	double mean_rho_nu_t = 0.0;
+	float max_rho_nu_t = 0.0f;
+	std::uint64_t count = 0u;
+	bool valid = false;
+};
+
+bool set_subgrid_configuration(const Subgrid_Configuration& configuration);
+Subgrid_Configuration get_subgrid_configuration();
+
 // For one locally relaxed non-equilibrium collision mode, 1-omega is the
 // per-collision eigenvalue. The warning threshold is deliberately diagnostic:
 // it marks less than 2% damping per collision, but is not a stability proof.
@@ -105,6 +131,11 @@ private:
 	Kernel kernel_initialize; // initialization kernel
 	Kernel kernel_stream_collide; // main LBM kernel
 	Kernel kernel_update_fields; // reads DDFs and updates (rho, u, T) in device memory
+	uint update_fields_control_parameter = 0u;
+	uint update_fields_subgrid_parameter = 0u;
+	Memory<double> subgrid_sum;
+	Memory<float> subgrid_max;
+	Memory<ulong> subgrid_count;
 #ifdef TEMPERATURE
 	Kernel kernel_update_temperature_outlet; // first-order zero-normal-gradient scalar outlet
 	Kernel kernel_update_free_slip_boundaries; // mirror macro fields on validation-only free-slip outer walls
@@ -234,6 +265,8 @@ public:
 	void enqueue_update_free_slip_boundaries(const uint face_mask); // mirror outer-wall macro fields from adjacent interior cells
 	void enqueue_stream_collide(); // call kernel_stream_collide to perform one LBM time step
 	void enqueue_update_fields(); // update fields (rho, u, T) manually
+	void enqueue_subgrid_statistics();
+	Subgrid_Statistics read_subgrid_statistics();
 	bool enable_device_statistics(
 		const bool include_temperature,
 		const uint future_device_memory_mb=0u);
@@ -709,6 +742,9 @@ public:
 	}
 #endif // GRAPHICS
 	void update_fields(); // update fields (rho, u, T) manually
+	// Samples the current pre-collision DDF state on the GPU without advancing
+	// time or modifying rho/u/T.  The extra full-field work occurs only here.
+	Subgrid_Statistics subgrid_statistics();
 	// Make the current velocity and flag fields, including inter-domain halo
 	// cells, available to a following CUDA advection kernel.
 	void prepare_advection_fields();

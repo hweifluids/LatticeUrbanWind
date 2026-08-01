@@ -38,6 +38,8 @@ constexpr double kReferenceTheta = 300.0;
 constexpr double kGasConstant = 287.0;
 constexpr double kGroundPressure = 100000.0;
 constexpr uint kFreeSlipFaces = 1u | 2u | 16u | 32u;
+constexpr double kGeaSmagorinskyCsSquared = 0.453989945;
+constexpr double kDryAirMolecularNu = 1.48E-5;
 
 enum class CaseKind {
     RisingThermal,
@@ -62,12 +64,55 @@ struct Config {
     Temperature_Lattice thermal_lattice = Temperature_Lattice::Q19;
     ViscosityMode viscosity_mode =
         ViscosityMode::DynamicAtGroundDensity;
+#ifdef CULBM_GEA_SGS_DEFAULT
+    bool subgrid_enabled = true;
+    double subgrid_cs_squared = kGeaSmagorinskyCsSquared;
+    bool subgrid_scalar_coupling = true;
+    double subgrid_turbulent_prandtl = 1.0;
+    double base_nu_m2_s = kDryAirMolecularNu;
+    double base_alpha_m2_s = kDryAirMolecularNu;
+    double minimum_momentum_tau = 0.5001;
+    // Preserve the requested alpha/nu ratio when the momentum floor is used.
+    // The resolved thermal tau depends on the selected scalar lattice cs^2.
+    double minimum_thermal_tau = 0.5;
+    bool derive_minimum_thermal_tau = true;
+#else
+    bool subgrid_enabled = false;
+    double subgrid_cs_squared = 0.03002109145;
+    bool subgrid_scalar_coupling = false;
+    double subgrid_turbulent_prandtl = 1.0;
+    double base_nu_m2_s = std::numeric_limits<double>::quiet_NaN();
+    double base_alpha_m2_s = std::numeric_limits<double>::quiet_NaN();
+    // A value of 0.5 disables flooring and preserves the published AV runner.
+    double minimum_momentum_tau = 0.5;
+    double minimum_thermal_tau = 0.5;
+    bool derive_minimum_thermal_tau = false;
+#endif
     uint ny = 4u;
     uint dx = 1u;
     uint dz = 1u;
     bool write_slices = true;
     bool write_vtk = false;
     std::filesystem::path output;
+};
+
+struct TransportResolution {
+    double requested_nu_m2_s = 0.0;
+    double requested_nu_lbm = 0.0;
+    double requested_momentum_tau = 0.5;
+    double effective_nu_m2_s = 0.0;
+    double effective_nu_lbm = 0.0;
+    double effective_momentum_tau = 0.5;
+    bool momentum_floor_applied = false;
+    double requested_alpha_m2_s = 0.0;
+    double requested_alpha_lbm = 0.0;
+    double requested_thermal_tau = 0.5;
+    double effective_alpha_m2_s = 0.0;
+    double effective_alpha_lbm = 0.0;
+    double effective_thermal_tau = 0.5;
+    double minimum_thermal_tau = 0.5;
+    bool minimum_thermal_tau_derived = false;
+    bool thermal_floor_applied = false;
 };
 
 struct CaseSpec {
@@ -98,6 +143,16 @@ struct Metrics {
     double front_interpolated = std::numeric_limits<double>::quiet_NaN();
     double front_bracket_left = std::numeric_limits<double>::quiet_NaN();
     double front_bracket_right = std::numeric_limits<double>::quiet_NaN();
+    double subgrid_mean_nu_t_lbm = 0.0;
+    double subgrid_max_nu_t_lbm = 0.0;
+    double subgrid_mean_rho_nu_t_lbm = 0.0;
+    double subgrid_max_rho_nu_t_lbm = 0.0;
+    double subgrid_mean_nu_t_m2_s = 0.0;
+    double subgrid_max_nu_t_m2_s = 0.0;
+    double subgrid_mean_mu_t_pa_s = 0.0;
+    double subgrid_max_mu_t_pa_s = 0.0;
+    std::uint64_t subgrid_count = 0ull;
+    bool subgrid_statistics_valid = false;
     bool finite = true;
     bool positive_density = true;
 };
@@ -155,6 +210,14 @@ uint parse_uint(const std::string& text, const std::string& option) {
     return (uint)value;
 }
 
+bool parse_on_off(const std::string& text, const std::string& option) {
+    const std::string value = lowercase(text);
+    if(value=="on" || value=="true" || value=="1") return true;
+    if(value=="off" || value=="false" || value=="0") return false;
+    throw std::invalid_argument(
+        option+" must be on or off, got: "+text);
+}
+
 void print_usage(const char* executable) {
     std::cout
         << "Usage: " << executable
@@ -167,6 +230,15 @@ void print_usage(const char* executable) {
            "  --thermal D3Q7|D3Q19         Scalar lattice (default D3Q19)\n"
            "  --viscosity dynamic|numeric  mu/rho_ground or numeric nu\n"
            "  --rho-ref KG_M3              Reference density for dynamic mode\n"
+           "  --sgs on|off                 Enable Smagorinsky SGS\n"
+           "  --sgs-cs VALUE               Smagorinsky Cs (mutually exclusive with Cs^2)\n"
+           "  --sgs-cs-squared VALUE       Smagorinsky Cs^2 (GEA: 0.453989945)\n"
+           "  --sgs-scalar on|off          Couple nu_t/Pr_t to scalar diffusion\n"
+           "  --sgs-pr-t VALUE             Positive turbulent Prandtl number\n"
+           "  --base-nu-m2-s VALUE         Requested base kinematic viscosity\n"
+           "  --base-alpha-m2-s VALUE      Requested base scalar diffusivity\n"
+           "  --min-momentum-tau VALUE     Minimum base tau (>=0.5; 0.5 disables)\n"
+           "  --min-thermal-tau VALUE      Explicit base tau_T floor (0.5 disables)\n"
            "  --theta-scale K              Affine scalar perturbation scale\n"
            "  --bubble-center-x METRES     Default 0 (GEA half-domain case)\n"
            "  --ny CELLS                   Periodic thin direction (default 4)\n"
@@ -179,6 +251,8 @@ Config parse_arguments(const int argc, const char* const argv[]) {
     Config config;
     bool has_case = false;
     bool has_spacing = false;
+    bool has_subgrid_cs = false;
+    bool has_subgrid_cs_squared = false;
     for(int i=1; i<argc; ++i) {
         const std::string option = argv[i];
         const auto require_value = [&]() -> std::string {
@@ -217,6 +291,48 @@ Config parse_arguments(const int argc, const char* const argv[]) {
         } else if(option=="--rho-ref") {
             config.reference_density =
                 parse_double(require_value(), option);
+        } else if(option=="--sgs") {
+            config.subgrid_enabled =
+                parse_on_off(require_value(), option);
+        } else if(option=="--sgs-cs") {
+            if(has_subgrid_cs_squared) {
+                throw std::invalid_argument(
+                    "--sgs-cs and --sgs-cs-squared are mutually exclusive");
+            }
+            const double cs = parse_double(require_value(), option);
+            if(cs<0.0) {
+                throw std::invalid_argument("--sgs-cs must be non-negative");
+            }
+            config.subgrid_cs_squared = cs*cs;
+            has_subgrid_cs = true;
+        } else if(option=="--sgs-cs-squared") {
+            if(has_subgrid_cs) {
+                throw std::invalid_argument(
+                    "--sgs-cs and --sgs-cs-squared are mutually exclusive");
+            }
+            config.subgrid_cs_squared = parse_double(require_value(), option);
+            if(config.subgrid_cs_squared<0.0) {
+                throw std::invalid_argument(
+                    "--sgs-cs-squared must be non-negative");
+            }
+            has_subgrid_cs_squared = true;
+        } else if(option=="--sgs-scalar") {
+            config.subgrid_scalar_coupling =
+                parse_on_off(require_value(), option);
+        } else if(option=="--sgs-pr-t") {
+            config.subgrid_turbulent_prandtl =
+                parse_double(require_value(), option);
+        } else if(option=="--base-nu-m2-s") {
+            config.base_nu_m2_s = parse_double(require_value(), option);
+        } else if(option=="--base-alpha-m2-s") {
+            config.base_alpha_m2_s = parse_double(require_value(), option);
+        } else if(option=="--min-momentum-tau") {
+            config.minimum_momentum_tau =
+                parse_double(require_value(), option);
+        } else if(option=="--min-thermal-tau") {
+            config.minimum_thermal_tau =
+                parse_double(require_value(), option);
+            config.derive_minimum_thermal_tau = false;
         } else if(option=="--theta-scale") {
             config.theta_scale =
                 parse_double(require_value(), option);
@@ -274,6 +390,24 @@ Config parse_arguments(const int argc, const char* const argv[]) {
         throw std::invalid_argument(
             "Spacing, dt, sampling, density, and grid counts must be positive");
     }
+    if(!std::isfinite(config.subgrid_cs_squared) ||
+       !(config.subgrid_cs_squared>=0.0) ||
+       !std::isfinite(config.subgrid_turbulent_prandtl) ||
+       !(config.subgrid_turbulent_prandtl>0.0) ||
+       !std::isfinite(config.minimum_momentum_tau) ||
+       !(config.minimum_momentum_tau>=0.5) ||
+       !std::isfinite(config.minimum_thermal_tau) ||
+       !(config.minimum_thermal_tau>=0.5) ||
+       (!std::isnan(config.base_nu_m2_s) &&
+        (!std::isfinite(config.base_nu_m2_s) ||
+         !(config.base_nu_m2_s>0.0))) ||
+       (!std::isnan(config.base_alpha_m2_s) &&
+        (!std::isfinite(config.base_alpha_m2_s) ||
+         !(config.base_alpha_m2_s>=0.0)))) {
+        throw std::invalid_argument(
+            "SGS coefficients/base transport must be finite and non-negative; "
+            "Pr_t must be positive and tau floors must be at least 0.5");
+    }
     return config;
 }
 
@@ -319,20 +453,131 @@ const char* collision_operator_name() {
 #endif
 }
 
-const char* subgrid_model_name() {
-#ifdef SUBGRID
-    return "Smagorinsky-Lilly";
-#else
-    return "disabled";
-#endif
-}
+TransportResolution resolve_transport(
+    const Config& config,
+    const CaseSpec& spec) {
+    TransportResolution result;
+    const double legacy_nu =
+        config.viscosity_mode==ViscosityMode::DynamicAtGroundDensity
+        ? spec.artificial_dynamic_viscosity/config.reference_density
+        : spec.artificial_dynamic_viscosity;
+    result.requested_nu_m2_s = std::isfinite(config.base_nu_m2_s)
+        ? config.base_nu_m2_s : legacy_nu;
+    result.requested_alpha_m2_s =
+        std::isfinite(config.base_alpha_m2_s)
+        ? config.base_alpha_m2_s : result.requested_nu_m2_s;
 
-const char* subgrid_console_name() {
-#ifdef SUBGRID
-    return "smagorinsky-lilly-momentum-only";
-#else
-    return "off";
-#endif
+    const double lbm_scale =
+        config.dt/(config.spacing*config.spacing);
+    result.requested_nu_lbm = result.requested_nu_m2_s*lbm_scale;
+    result.requested_momentum_tau =
+        0.5+3.0*result.requested_nu_lbm;
+    float momentum_floor = (float)config.minimum_momentum_tau;
+    if((double)momentum_floor<config.minimum_momentum_tau) {
+        momentum_floor = std::nextafter(
+            momentum_floor, std::numeric_limits<float>::infinity());
+    }
+    float effective_nu = (float)result.requested_nu_lbm;
+    float effective_tau = 0.5f+3.0f*effective_nu;
+    result.momentum_floor_applied =
+        (double)effective_tau<config.minimum_momentum_tau;
+    if(result.momentum_floor_applied) {
+        effective_nu = (momentum_floor-0.5f)/3.0f;
+        effective_tau = 0.5f+3.0f*effective_nu;
+        while(effective_tau<momentum_floor) {
+            effective_nu = std::nextafter(
+                effective_nu, std::numeric_limits<float>::infinity());
+            effective_tau = 0.5f+3.0f*effective_nu;
+        }
+    }
+    if(!(std::isfinite(effective_nu) &&
+         std::isfinite(effective_tau) && effective_tau>0.5f)) {
+        throw std::invalid_argument(
+            "Momentum transport/floor cannot be represented in FP32");
+    }
+    result.effective_nu_lbm = (double)effective_nu;
+    result.effective_momentum_tau = (double)effective_tau;
+    result.effective_nu_m2_s =
+        result.effective_nu_lbm/lbm_scale;
+
+    const double thermal_cs2 =
+        config.thermal_lattice==Temperature_Lattice::Q19
+        ? 1.0/3.0 : 1.0/4.0;
+    result.requested_alpha_lbm =
+        result.requested_alpha_m2_s*lbm_scale;
+    result.requested_thermal_tau =
+        0.5+result.requested_alpha_lbm/thermal_cs2;
+    const float inverse_thermal_cs2 =
+        config.thermal_lattice==Temperature_Lattice::Q19 ? 3.0f : 4.0f;
+    const float thermal_cs2_float = 1.0f/inverse_thermal_cs2;
+    float derived_alpha_floor = 0.0f;
+    float thermal_floor = 0.5f;
+    if(config.derive_minimum_thermal_tau) {
+        float momentum_nu_floor = (momentum_floor-0.5f)/3.0f;
+        float momentum_tau_at_floor =
+            0.5f+3.0f*momentum_nu_floor;
+        while(momentum_tau_at_floor<momentum_floor) {
+            momentum_nu_floor = std::nextafter(
+                momentum_nu_floor,
+                std::numeric_limits<float>::infinity());
+            momentum_tau_at_floor =
+                0.5f+3.0f*momentum_nu_floor;
+        }
+        const double requested_alpha_over_nu =
+            result.requested_alpha_lbm/result.requested_nu_lbm;
+        const double derived_alpha_floor_double =
+            (double)momentum_nu_floor*requested_alpha_over_nu;
+        derived_alpha_floor = (float)derived_alpha_floor_double;
+        if((double)derived_alpha_floor<derived_alpha_floor_double) {
+            derived_alpha_floor = std::nextafter(
+                derived_alpha_floor,
+                std::numeric_limits<float>::infinity());
+        }
+        thermal_floor =
+            0.5f+derived_alpha_floor*inverse_thermal_cs2;
+        result.minimum_thermal_tau_derived = true;
+    } else {
+        thermal_floor = (float)config.minimum_thermal_tau;
+        if((double)thermal_floor<config.minimum_thermal_tau) {
+            thermal_floor = std::nextafter(
+                thermal_floor, std::numeric_limits<float>::infinity());
+        }
+    }
+    if(!(std::isfinite(thermal_floor) && thermal_floor>=0.5f &&
+         std::isfinite(derived_alpha_floor))) {
+        throw std::invalid_argument(
+            "Thermal transport floor cannot be represented in FP32");
+    }
+    result.minimum_thermal_tau = (double)thermal_floor;
+    float effective_alpha = (float)result.requested_alpha_lbm;
+    float effective_tau_t =
+        0.5f+effective_alpha*inverse_thermal_cs2;
+    result.thermal_floor_applied =
+        effective_tau_t<thermal_floor;
+    if(result.thermal_floor_applied) {
+        effective_alpha = config.derive_minimum_thermal_tau
+            ? derived_alpha_floor
+            : (thermal_floor-0.5f)*thermal_cs2_float;
+        effective_tau_t =
+            0.5f+effective_alpha*inverse_thermal_cs2;
+        while(effective_tau_t<thermal_floor) {
+            effective_alpha = std::nextafter(
+                effective_alpha,
+                std::numeric_limits<float>::infinity());
+            effective_tau_t =
+                0.5f+effective_alpha*inverse_thermal_cs2;
+        }
+    }
+    if(!(std::isfinite(effective_alpha) &&
+         std::isfinite(effective_tau_t) && effective_tau_t>=0.5f)) {
+        throw std::invalid_argument(
+            "Thermal transport/floor cannot be represented in FP32");
+    }
+    result.effective_alpha_lbm = (double)effective_alpha;
+    result.effective_thermal_tau = (double)effective_tau_t;
+    result.effective_alpha_m2_s =
+        result.effective_alpha_lbm/lbm_scale;
+    return result;
 }
 
 double initial_theta(
@@ -477,6 +722,34 @@ Metrics evaluate_metrics(
     return metrics;
 }
 
+void sample_subgrid_statistics(
+    LBM& lbm,
+    const Config& config,
+    Metrics& metrics) {
+    if(!config.subgrid_enabled) return;
+    const Subgrid_Statistics statistics = lbm.subgrid_statistics();
+    metrics.subgrid_statistics_valid = statistics.valid;
+    metrics.subgrid_count = statistics.count;
+    if(!statistics.valid) return;
+    const double diffusivity_scale =
+        config.spacing*config.spacing/config.dt;
+    metrics.subgrid_mean_nu_t_lbm = statistics.mean_nu_t;
+    metrics.subgrid_max_nu_t_lbm = (double)statistics.max_nu_t;
+    metrics.subgrid_mean_rho_nu_t_lbm = statistics.mean_rho_nu_t;
+    metrics.subgrid_max_rho_nu_t_lbm =
+        (double)statistics.max_rho_nu_t;
+    metrics.subgrid_mean_nu_t_m2_s =
+        statistics.mean_nu_t*diffusivity_scale;
+    metrics.subgrid_max_nu_t_m2_s =
+        (double)statistics.max_nu_t*diffusivity_scale;
+    metrics.subgrid_mean_mu_t_pa_s =
+        config.reference_density*statistics.mean_rho_nu_t*
+        diffusivity_scale;
+    metrics.subgrid_max_mu_t_pa_s =
+        config.reference_density*(double)statistics.max_rho_nu_t*
+        diffusivity_scale;
+}
+
 void write_metrics_header(std::ofstream& output) {
     output
         << "step,time_s,u_min_m_s,u_max_m_s,w_min_m_s,w_max_m_s,"
@@ -484,7 +757,10 @@ void write_metrics_header(std::ofstream& output) {
            "rho_max_lbm,rho_mean_lbm,theta_prime_mean_K,"
            "theta_prime_rms_K,max_speed_m_s,max_mach,"
            "max_y_theta_spread_K,front_x_m,front_bracket_left_m,"
-           "front_bracket_right_m,finite,positive_density\n";
+           "front_bracket_right_m,nu_t_mean_lbm,nu_t_max_lbm,"
+           "rho_nu_t_mean_lbm,rho_nu_t_max_lbm,nu_t_mean_m2_s,"
+           "nu_t_max_m2_s,mu_t_mean_Pa_s,mu_t_max_Pa_s,"
+           "subgrid_count,subgrid_statistics_valid,finite,positive_density\n";
 }
 
 void write_metrics_row(
@@ -505,6 +781,16 @@ void write_metrics_row(
            << metrics.front_interpolated << ','
            << metrics.front_bracket_left << ','
            << metrics.front_bracket_right << ','
+           << metrics.subgrid_mean_nu_t_lbm << ','
+           << metrics.subgrid_max_nu_t_lbm << ','
+           << metrics.subgrid_mean_rho_nu_t_lbm << ','
+           << metrics.subgrid_max_rho_nu_t_lbm << ','
+           << metrics.subgrid_mean_nu_t_m2_s << ','
+           << metrics.subgrid_max_nu_t_m2_s << ','
+           << metrics.subgrid_mean_mu_t_pa_s << ','
+           << metrics.subgrid_max_mu_t_pa_s << ','
+           << metrics.subgrid_count << ','
+           << (metrics.subgrid_statistics_valid ? 1 : 0) << ','
            << (metrics.finite ? 1 : 0) << ','
            << (metrics.positive_density ? 1 : 0) << '\n';
     output.flush();
@@ -532,6 +818,17 @@ void print_progress(
               << " max_Ma=" << metrics.max_mach;
     if(std::isfinite(metrics.front_interpolated)) {
         std::cout << " front_m=" << metrics.front_interpolated;
+    }
+    if(metrics.subgrid_statistics_valid) {
+        std::cout << " nu_t_mean_m2_s="
+                  << metrics.subgrid_mean_nu_t_m2_s
+                  << " nu_t_max_m2_s="
+                  << metrics.subgrid_max_nu_t_m2_s
+                  << " mu_t_mean_Pa_s="
+                  << metrics.subgrid_mean_mu_t_pa_s
+                  << " mu_t_max_Pa_s="
+                  << metrics.subgrid_max_mu_t_pa_s
+                  << " sgs_cells=" << metrics.subgrid_count;
     }
     std::cout << " steps_per_s=" << rate
               << " eta_s=" << remaining << '\n';
@@ -641,8 +938,7 @@ void write_metadata(
     const uint nx,
     const uint nz,
     const std::uint64_t steps,
-    const double nu_si,
-    const double nu_lbm,
+    const TransportResolution& transport,
     const double beta_lbm,
     const double gravity_lbm) {
     std::ofstream output(filename);
@@ -662,20 +958,27 @@ void write_metadata(
                ? "D3Q19" : "D3Q7") << "\",\n"
            << "  \"precision\": \"FP32 DDF\",\n"
            << "  \"subgrid_model\": \""
-           << subgrid_model_name() << "\",\n"
-#ifdef SUBGRID
-           << "  \"subgrid_scope\": \"momentum only\",\n"
-           << "  \"subgrid_cs\": 0.17326595583,\n"
-           << "  \"subgrid_cs_squared\": 0.03002109145,\n"
-           << "  \"subgrid_kernel_prefactor\": 0.76421222,\n"
-#else
-           << "  \"subgrid_scope\": \"none\",\n"
-           << "  \"subgrid_cs\": null,\n"
-           << "  \"subgrid_cs_squared\": null,\n"
-           << "  \"subgrid_kernel_prefactor\": null,\n"
-#endif
-           << "  \"subgrid_scalar_coupling\": false,\n"
-           << "  \"turbulent_prandtl\": null,\n"
+           << (config.subgrid_enabled
+               ? "Smagorinsky-Lilly" : "disabled") << "\",\n"
+           << "  \"subgrid_enabled\": "
+           << (config.subgrid_enabled ? "true" : "false") << ",\n"
+           << "  \"subgrid_scope\": \""
+           << (!config.subgrid_enabled
+               ? "none"
+               : config.subgrid_scalar_coupling
+                 ? "momentum and thermal scalar"
+                 : "momentum only") << "\",\n"
+           << "  \"subgrid_cs\": "
+           << std::sqrt(config.subgrid_cs_squared) << ",\n"
+           << "  \"subgrid_cs_squared\": "
+           << config.subgrid_cs_squared << ",\n"
+           << "  \"subgrid_kernel_prefactor\": "
+           << 18.0*std::sqrt(2.0)*config.subgrid_cs_squared << ",\n"
+           << "  \"subgrid_scalar_coupling\": "
+           << (config.subgrid_scalar_coupling ? "true" : "false")
+           << ",\n"
+           << "  \"turbulent_prandtl\": "
+           << config.subgrid_turbulent_prandtl << ",\n"
            << "  \"free_slip\": \"specular TYPE_S|TYPE_X ghost wall\",\n"
            << "  \"grid_registration\": \""
            << grid_registration_name(config.kind) << "\",\n"
@@ -691,14 +994,61 @@ void write_metadata(
            << "  \"mu_artificial_Pa_s\": "
            << spec.artificial_dynamic_viscosity << ",\n"
            << "  \"viscosity_mode\": \""
-           << (config.viscosity_mode==
+           << (std::isfinite(config.base_nu_m2_s)
+               ? "explicit base-nu-m2-s"
+               : config.viscosity_mode==
                ViscosityMode::DynamicAtGroundDensity
                ? "mu/rho_ref" : "numeric value treated as nu")
            << "\",\n"
-           << "  \"nu_m2_s\": " << nu_si << ",\n"
-           << "  \"nu_lbm\": " << nu_lbm << ",\n"
-           << "  \"tau\": " << 0.5+3.0*nu_lbm << ",\n"
-           << "  \"alpha_lbm\": " << nu_lbm << ",\n"
+           << "  \"requested_nu_m2_s\": "
+           << transport.requested_nu_m2_s << ",\n"
+           << "  \"requested_nu_lbm\": "
+           << transport.requested_nu_lbm << ",\n"
+           << "  \"requested_momentum_tau\": "
+           << transport.requested_momentum_tau << ",\n"
+           << "  \"minimum_momentum_tau\": "
+           << config.minimum_momentum_tau << ",\n"
+           << "  \"momentum_tau_floor_applied\": "
+           << (transport.momentum_floor_applied ? "true" : "false")
+           << ",\n"
+           << "  \"effective_nu_m2_s\": "
+           << transport.effective_nu_m2_s << ",\n"
+           << "  \"effective_nu_lbm\": "
+           << transport.effective_nu_lbm << ",\n"
+           << "  \"effective_momentum_tau\": "
+           << transport.effective_momentum_tau << ",\n"
+           << "  \"requested_alpha_m2_s\": "
+           << transport.requested_alpha_m2_s << ",\n"
+           << "  \"requested_alpha_lbm\": "
+           << transport.requested_alpha_lbm << ",\n"
+           << "  \"requested_thermal_tau\": "
+           << transport.requested_thermal_tau << ",\n"
+           << "  \"minimum_thermal_tau\": "
+           << transport.minimum_thermal_tau << ",\n"
+           << "  \"minimum_thermal_tau_derived\": "
+           << (transport.minimum_thermal_tau_derived ? "true" : "false")
+           << ",\n"
+           << "  \"thermal_tau_floor_applied\": "
+           << (transport.thermal_floor_applied ? "true" : "false")
+           << ",\n"
+           << "  \"effective_alpha_m2_s\": "
+           << transport.effective_alpha_m2_s << ",\n"
+           << "  \"effective_alpha_lbm\": "
+           << transport.effective_alpha_lbm << ",\n"
+           << "  \"effective_thermal_tau\": "
+           << transport.effective_thermal_tau << ",\n"
+           << "  \"nu_m2_s\": " << transport.effective_nu_m2_s
+           << ",\n"
+           << "  \"nu_lbm\": " << transport.effective_nu_lbm
+           << ",\n"
+           << "  \"tau\": " << transport.effective_momentum_tau
+           << ",\n"
+           << "  \"alpha_m2_s\": "
+           << transport.effective_alpha_m2_s << ",\n"
+           << "  \"alpha_lbm\": "
+           << transport.effective_alpha_lbm << ",\n"
+           << "  \"tau_T\": " << transport.effective_thermal_tau
+           << ",\n"
            << "  \"theta_scale_K\": " << spec.theta_scale << ",\n"
            << "  \"beta_lbm\": " << beta_lbm << ",\n"
            << "  \"gravity_z_lbm\": " << gravity_lbm << ",\n"
@@ -759,6 +1109,27 @@ void write_final_summary(
         output << "null";
     }
     output << ",\n"
+           << "  \"subgrid_statistics_valid\": "
+           << (metrics.subgrid_statistics_valid ? "true" : "false")
+           << ",\n"
+           << "  \"subgrid_count\": " << metrics.subgrid_count
+           << ",\n"
+           << "  \"nu_t_mean_lbm\": "
+           << metrics.subgrid_mean_nu_t_lbm << ",\n"
+           << "  \"nu_t_max_lbm\": "
+           << metrics.subgrid_max_nu_t_lbm << ",\n"
+           << "  \"rho_nu_t_mean_lbm\": "
+           << metrics.subgrid_mean_rho_nu_t_lbm << ",\n"
+           << "  \"rho_nu_t_max_lbm\": "
+           << metrics.subgrid_max_rho_nu_t_lbm << ",\n"
+           << "  \"nu_t_mean_m2_s\": "
+           << metrics.subgrid_mean_nu_t_m2_s << ",\n"
+           << "  \"nu_t_max_m2_s\": "
+           << metrics.subgrid_max_nu_t_m2_s << ",\n"
+           << "  \"mu_t_mean_Pa_s\": "
+           << metrics.subgrid_mean_mu_t_pa_s << ",\n"
+           << "  \"mu_t_max_Pa_s\": "
+           << metrics.subgrid_max_mu_t_pa_s << ",\n"
            << "  \"finite\": " << (metrics.finite ? "true" : "false")
            << ",\n"
            << "  \"positive_density\": "
@@ -800,14 +1171,21 @@ int run(Config config) {
         throw std::runtime_error(
             "Temperature lattice is locked by an existing LBM instance");
     }
+    Subgrid_Configuration subgrid;
+    subgrid.enabled = config.subgrid_enabled;
+    subgrid.smagorinsky_constant =
+        (float)std::sqrt(config.subgrid_cs_squared);
+    subgrid.scalar_coupling = config.subgrid_scalar_coupling;
+    subgrid.turbulent_prandtl =
+        (float)config.subgrid_turbulent_prandtl;
+    subgrid.fixed_eddy_viscosity = -1.0f;
+    if(!set_subgrid_configuration(subgrid)) {
+        throw std::runtime_error(
+            "Subgrid configuration is invalid or locked by an existing LBM instance");
+    }
 
-    const double nu_si =
-        config.viscosity_mode==
-        ViscosityMode::DynamicAtGroundDensity
-        ? spec.artificial_dynamic_viscosity/config.reference_density
-        : spec.artificial_dynamic_viscosity;
-    const double nu_lbm =
-        nu_si*config.dt/(config.spacing*config.spacing);
+    const TransportResolution transport =
+        resolve_transport(config, spec);
     const double beta_lbm = spec.theta_scale/kReferenceTheta;
     const double gravity_lbm =
         -kGravity*config.dt*config.dt/config.spacing;
@@ -828,6 +1206,34 @@ int run(Config config) {
         0.0f,
         (float)(0.5*spec.length_z+vtk_registration_shift));
 
+    if(transport.momentum_floor_applied) {
+        std::cout << std::setprecision(12)
+                  << "GEA_TAU_FLOOR field=momentum requested_tau="
+                  << transport.requested_momentum_tau
+                  << " minimum_tau=" << config.minimum_momentum_tau
+                  << " effective_tau="
+                  << transport.effective_momentum_tau
+                  << " requested_nu_m2_s="
+                  << transport.requested_nu_m2_s
+                  << " effective_nu_m2_s="
+                  << transport.effective_nu_m2_s << '\n';
+    }
+    if(transport.thermal_floor_applied) {
+        std::cout << std::setprecision(12)
+                  << "GEA_TAU_FLOOR field=thermal requested_tau="
+                  << transport.requested_thermal_tau
+                  << " minimum_tau=" << transport.minimum_thermal_tau
+                  << " minimum_tau_derived="
+                  << (transport.minimum_thermal_tau_derived
+                      ? "true" : "false")
+                  << " effective_tau="
+                  << transport.effective_thermal_tau
+                  << " requested_alpha_m2_s="
+                  << transport.requested_alpha_m2_s
+                  << " effective_alpha_m2_s="
+                  << transport.effective_alpha_m2_s << '\n';
+    }
+
     std::cout << std::setprecision(12)
               << "GEA_CONFIG case=" << spec.name
               << " h_m=" << config.spacing
@@ -842,10 +1248,36 @@ int run(Config config) {
               << (config.thermal_lattice==Temperature_Lattice::Q19
                   ? "D3Q19" : "D3Q7")
               << " precision=FP32 subgrid="
-              << subgrid_console_name()
-              << " nu_si=" << nu_si
-              << " nu_lbm=" << nu_lbm
-              << " tau=" << 0.5+3.0*nu_lbm
+              << (config.subgrid_enabled ? "smagorinsky-lilly" : "off")
+              << " sgs_cs_squared=" << config.subgrid_cs_squared
+              << " sgs_scalar="
+              << (config.subgrid_scalar_coupling ? "on" : "off")
+              << " sgs_Pr_t=" << config.subgrid_turbulent_prandtl
+              << " requested_nu_si=" << transport.requested_nu_m2_s
+              << " requested_nu_lbm=" << transport.requested_nu_lbm
+              << " requested_tau=" << transport.requested_momentum_tau
+              << " min_tau=" << config.minimum_momentum_tau
+              << " momentum_floor="
+              << (transport.momentum_floor_applied ? "applied" : "inactive")
+              << " effective_nu_si=" << transport.effective_nu_m2_s
+              << " effective_nu_lbm=" << transport.effective_nu_lbm
+              << " effective_tau=" << transport.effective_momentum_tau
+              << " requested_alpha_si="
+              << transport.requested_alpha_m2_s
+              << " requested_alpha_lbm="
+              << transport.requested_alpha_lbm
+              << " requested_tau_T=" << transport.requested_thermal_tau
+              << " min_tau_T=" << transport.minimum_thermal_tau
+              << " min_tau_T_derived="
+              << (transport.minimum_thermal_tau_derived
+                  ? "true" : "false")
+              << " thermal_floor="
+              << (transport.thermal_floor_applied ? "applied" : "inactive")
+              << " effective_alpha_si="
+              << transport.effective_alpha_m2_s
+              << " effective_alpha_lbm="
+              << transport.effective_alpha_lbm
+              << " effective_tau_T=" << transport.effective_thermal_tau
               << " beta_lbm=" << beta_lbm
               << " gz_lbm=" << gravity_lbm
               << " total_steps=" << total_steps << '\n';
@@ -853,9 +1285,9 @@ int run(Config config) {
     LBM lbm(
         nx, config.ny, nz,
         config.dx, 1u, config.dz,
-        (float)nu_lbm,
+        (float)transport.effective_nu_lbm,
         0.0f, 0.0f, 0.0f, 0.0f,
-        (float)nu_lbm,
+        (float)transport.effective_alpha_lbm,
         (float)beta_lbm);
     lbm.set_buoyancy_gravity(
         0.0f, 0.0f, (float)gravity_lbm);
@@ -891,7 +1323,7 @@ int run(Config config) {
     write_metadata(
         config.output/"run_config.json",
         config, spec, nx, nz, total_steps,
-        nu_si, nu_lbm, beta_lbm, gravity_lbm);
+        transport, beta_lbm, gravity_lbm);
 
     std::ofstream metrics_output(config.output/"metrics.csv");
     if(!metrics_output) {
@@ -933,6 +1365,7 @@ int run(Config config) {
         const double time = (double)step*config.dt;
         last = evaluate_metrics(lbm, config, spec, nx, nz);
         if(sample) {
+            sample_subgrid_statistics(lbm, config, last);
             write_metrics_row(metrics_output, step, time, last);
             print_progress(step, total_steps, time, last, start);
         }
@@ -985,6 +1418,17 @@ int run(Config config) {
               << " max_Ma=" << last.max_mach;
     if(std::isfinite(last.front_interpolated)) {
         std::cout << " front_m=" << last.front_interpolated;
+    }
+    if(last.subgrid_statistics_valid) {
+        std::cout << " nu_t_mean_m2_s="
+                  << last.subgrid_mean_nu_t_m2_s
+                  << " nu_t_max_m2_s="
+                  << last.subgrid_max_nu_t_m2_s
+                  << " mu_t_mean_Pa_s="
+                  << last.subgrid_mean_mu_t_pa_s
+                  << " mu_t_max_Pa_s="
+                  << last.subgrid_max_mu_t_pa_s
+                  << " sgs_cells=" << last.subgrid_count;
     }
     std::cout << '\n';
     if(last.max_mach>0.3) {

@@ -43,6 +43,7 @@ const uint transfers = 9u;
 
 namespace {
 Temperature_Lattice temperature_lattice = Temperature_Lattice::Q7;
+Subgrid_Configuration subgrid_configuration;
 std::atomic_uint active_lbm_instances{0u};
 
 constexpr std::uint64_t device_mib = 1048576u;
@@ -90,6 +91,44 @@ bool optional_device_memory_fits(
 	if(future_bytes > after_required) return false;
 	return after_required-future_bytes >= reserve_bytes;
 }
+}
+
+bool set_subgrid_configuration(
+	const Subgrid_Configuration& configuration) {
+	const bool valid_fixed =
+		configuration.fixed_eddy_viscosity==-1.0f ||
+		(std::isfinite(configuration.fixed_eddy_viscosity) &&
+		 configuration.fixed_eddy_viscosity>=0.0f);
+	if(!std::isfinite(configuration.smagorinsky_constant) ||
+	   configuration.smagorinsky_constant<0.0f ||
+	   !std::isfinite(configuration.turbulent_prandtl) ||
+	   configuration.turbulent_prandtl<=0.0f || !valid_fixed) return false;
+	const float prefactor = 18.0f*std::sqrt(2.0f)*
+		configuration.smagorinsky_constant*
+		configuration.smagorinsky_constant;
+	const float scalar_tau_factor = 1.0f/
+		(3.0f*configuration.turbulent_prandtl*(1.0f/4.0f));
+	if(!std::isfinite(prefactor) || !std::isfinite(scalar_tau_factor) ||
+	   (configuration.fixed_eddy_viscosity>=0.0f &&
+	    !std::isfinite(3.0f*configuration.fixed_eddy_viscosity))) return false;
+	const bool changes =
+		configuration.enabled!=subgrid_configuration.enabled ||
+		configuration.smagorinsky_constant!=
+			subgrid_configuration.smagorinsky_constant ||
+		configuration.scalar_coupling!=
+			subgrid_configuration.scalar_coupling ||
+		configuration.turbulent_prandtl!=
+			subgrid_configuration.turbulent_prandtl ||
+		configuration.fixed_eddy_viscosity!=
+			subgrid_configuration.fixed_eddy_viscosity;
+	if(!changes) return true;
+	if(active_lbm_instances.load(std::memory_order_acquire)>0u) return false;
+	subgrid_configuration = configuration;
+	return true;
+}
+
+Subgrid_Configuration get_subgrid_configuration() {
+	return subgrid_configuration;
 }
 
 bool set_temperature_lattice(const Temperature_Lattice lattice) {
@@ -561,6 +600,24 @@ void LBM_Domain::allocate(Device& device) {
 		rho, u, T, flags, (uint)0u);
 #endif // TEMPERATURE
 
+	if(get_subgrid_configuration().enabled) {
+		update_fields_control_parameter =
+			kernel_update_fields.get_number_of_parameters();
+		kernel_update_fields.add_parameters((uint)1u); // write rho/u/T
+		// These buffers are tiny and sampled infrequently.  Pinning their host
+		// mirrors lets all local GPU reductions overlap before the final read.
+		subgrid_sum = Memory<double>(
+			device, 1ull, 2u, true, true, 0.0, false);
+		subgrid_max = Memory<float>(
+			device, 1ull, 2u, true, true, 0.0f, false);
+		subgrid_count = Memory<ulong>(
+			device, 1ull, 1u, true, true, (ulong)0u, false);
+		update_fields_subgrid_parameter =
+			kernel_update_fields.get_number_of_parameters();
+		kernel_update_fields.add_parameters(
+			(uint)0u, subgrid_sum, subgrid_max, subgrid_count);
+	}
+
 #ifdef PARTICLES
 	particles = Memory<float>(device, (ulong)particles_N, 3u);
 	kernel_integrate_particles = Kernel(device, (ulong)particles_N, "integrate_particles", particles, u, flags, 1.0f);
@@ -633,10 +690,59 @@ void LBM_Domain::enqueue_update_fields() { // update fields (rho, u, T) manually
 #ifdef TEMPERATURE
 			, buoyancy_gx, buoyancy_gy, buoyancy_gz
 #endif // TEMPERATURE
-		).enqueue_run();
+		);
+		if(get_subgrid_configuration().enabled) {
+			kernel_update_fields.set_parameters(
+				update_fields_control_parameter, (uint)1u);
+			kernel_update_fields.set_parameters(
+				update_fields_subgrid_parameter, (uint)0u);
+		}
+		kernel_update_fields.enqueue_run();
 		t_last_update_fields = current_t;
 	}
 #endif // UPDATE_FIELDS
+}
+
+void LBM_Domain::enqueue_subgrid_statistics() {
+	if(!get_subgrid_configuration().enabled) return;
+	subgrid_sum.x[0] = 0.0;
+	subgrid_sum.y[0] = 0.0;
+	subgrid_max.x[0] = 0.0f;
+	subgrid_max.y[0] = 0.0f;
+	subgrid_count.x[0] = (ulong)0u;
+	subgrid_sum.enqueue_write_to_device();
+	subgrid_max.enqueue_write_to_device();
+	subgrid_count.enqueue_write_to_device();
+	kernel_update_fields.set_parameters(
+		4u, get_t(), fx, fy, fz, omega_x, omega_y, omega_z
+#ifdef TEMPERATURE
+		, buoyancy_gx, buoyancy_gy, buoyancy_gz
+#endif // TEMPERATURE
+	);
+	kernel_update_fields.set_parameters(
+		update_fields_control_parameter, (uint)0u);
+	kernel_update_fields.set_parameters(
+		update_fields_subgrid_parameter, (uint)1u);
+	kernel_update_fields.enqueue_run();
+	subgrid_sum.enqueue_read_from_device();
+	subgrid_max.enqueue_read_from_device();
+	subgrid_count.enqueue_read_from_device();
+}
+
+Subgrid_Statistics LBM_Domain::read_subgrid_statistics() {
+	Subgrid_Statistics statistics;
+	if(!get_subgrid_configuration().enabled) return statistics;
+	device.finish_queue();
+	statistics.count = (std::uint64_t)subgrid_count.x[0];
+	statistics.valid = statistics.count>0u;
+	if(!statistics.valid) return statistics;
+	statistics.mean_nu_t =
+		subgrid_sum.x[0]/(double)statistics.count;
+	statistics.max_nu_t = subgrid_max.x[0];
+	statistics.mean_rho_nu_t =
+		subgrid_sum.y[0]/(double)statistics.count;
+	statistics.max_rho_nu_t = subgrid_max.y[0];
+	return statistics;
 }
 
 bool LBM_Domain::enable_device_statistics(
@@ -1039,6 +1145,11 @@ void LBM_Domain::enqueue_unvoxelize_mesh_on_device(const Mesh* mesh, const uchar
 }
 
 string LBM_Domain::device_defines() const {
+	const Subgrid_Configuration subgrid = get_subgrid_configuration();
+	const float subgrid_prefactor = 18.0f*sqrt(2.0f)*
+		sq(subgrid.smagorinsky_constant);
+	const float subgrid_scalar_tau_factor = 1.0f/
+		(3.0f*subgrid.turbulent_prandtl*get_temperature_lattice_cs2());
 	const uint Nx_global = (Nx-2u*(Dx>1u))*Dx;
 	const uint Ny_global = (Ny-2u*(Dy>1u))*Dy;
 	const uint Nz_global = (Nz-2u*(Dz>1u))*Dz;
@@ -1090,6 +1201,7 @@ string LBM_Domain::device_defines() const {
 	"\n	#define def_transfers "+to_string(transfers)+"u"
 
 	"\n	#define def_c 0.57735027f"
+	"\n	#define def_tau "+to_string(get_tau())+"f"
 	"\n	#define def_w "+to_string(1.0f/get_tau())+"f"
 #if defined(TRT)
 	"\n	#define def_trt_magic "+to_string(trt_magic_parameter)+"f"
@@ -1193,9 +1305,21 @@ string LBM_Domain::device_defines() const {
 	"\n	#define def_T_avg "+to_string(T_avg)+"f"
 #endif
 
-#ifdef SUBGRID
-	"\n	#define SUBGRID"
-#endif
+	+ (subgrid.enabled
+		? "\n	#define SUBGRID"
+		  "\n	#define def_subgrid_prefactor "+
+			to_string(subgrid_prefactor)+"f"+
+		  (subgrid.fixed_eddy_viscosity>=0.0f
+			? "\n	#define SUBGRID_FIXED_EDDY_VISCOSITY"
+			  "\n	#define def_subgrid_fixed_nu_t "+
+				to_string(subgrid.fixed_eddy_viscosity)+"f"
+			: string(""))+
+		  (subgrid.scalar_coupling
+			? "\n	#define SUBGRID_SCALAR"
+			  "\n	#define def_subgrid_scalar_tau_factor "+
+				to_string(subgrid_scalar_tau_factor)+"f"
+			: string(""))
+		: string("")) +
 
 #ifdef PARTICLES
 	"\n\t#define PARTICLES"
@@ -1925,6 +2049,40 @@ void LBM::external_synchronize_flags() {
 void LBM::update_fields() { // update fields (rho, u, T) manually
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->enqueue_update_fields();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->finish_queue();
+}
+
+Subgrid_Statistics LBM::subgrid_statistics() {
+	Subgrid_Statistics statistics;
+	if(!initialized || !get_subgrid_configuration().enabled) return statistics;
+	for(uint d=0u; d<get_D(); ++d)
+		lbm_domain[d]->enqueue_subgrid_statistics();
+
+	double sums[2] = { 0.0, 0.0 };
+	float maxima[2] = { 0.0f, 0.0f };
+	std::uint64_t count = 0u;
+	for(uint d=0u; d<get_D(); ++d) {
+		const Subgrid_Statistics local =
+			lbm_domain[d]->read_subgrid_statistics();
+		if(!local.valid) continue;
+		sums[0] += local.mean_nu_t*(double)local.count;
+		sums[1] += local.mean_rho_nu_t*(double)local.count;
+		maxima[0] = std::max(maxima[0], local.max_nu_t);
+		maxima[1] = std::max(maxima[1], local.max_rho_nu_t);
+		count += local.count;
+	}
+	if(is_distributed()) {
+		culbm::mpi_allreduce_sum_double(sums, 2u);
+		culbm::mpi_allreduce_max_float(maxima, 2u);
+		culbm::mpi_allreduce_sum_uint64(&count, 1u);
+	}
+	statistics.count = count;
+	statistics.valid = count>0u;
+	if(!statistics.valid) return statistics;
+	statistics.mean_nu_t = sums[0]/(double)count;
+	statistics.max_nu_t = maxima[0];
+	statistics.mean_rho_nu_t = sums[1]/(double)count;
+	statistics.max_rho_nu_t = maxima[1];
+	return statistics;
 }
 
 void LBM::prepare_advection_fields() {
