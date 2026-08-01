@@ -432,3 +432,15 @@ GEA Smagorinsky 中点低 6.435%，且全程峰值 Ma=0.280843；因此它确认
 `output/reports/CULBM_density_current_sgs_comparison_report_20260801_211208.docx` 与
 `output/pdf/CULBM_density_current_sgs_comparison_report_20260801_211208.pdf`；下一项首要
 控制是同网格 dt=0.025 s 的时间步敏感性运行。
+
+融合对照中必须进一步区分黏性定义：GEA AV75 是常动力黏度 `75 Pa s`，CULBM
+AV75-like deck 使用 `viscosity_mode=mu/rho_ref`，即固定常运动黏度
+`nu=64.575 m2/s`；两者是名义映射而非相同本构。论文 Figure 7 的 AV75 h=25 m
+四时刻原图是
+`density-current-dualgpu-h5-validation-20260801_031341/diagnostics/turbulence-structure-20260801_163826/av75-page13-000..003.png`；
+`reference_rasters/gea-004..007.png` 实际属于 Figure 10 的 Smagorinsky h=25 m，
+不得标为 AV75。CULBM AV75-like h=5/h=12.5 在共同 25 m 网格的 900 s 指标为
+`r=0.975214`、冷池 IoU `0.902600`、L1 `0.042708 K`，但 Linf 达 `8.789068 K`，
+所以只能说明整体形态相近，不能声称逐点一致。对应融合报告保存在
+`output/reports/CULBM_density_current_fused_closure_report_20260801.docx` 与
+`output/pdf/CULBM_density_current_fused_closure_report_20260801.pdf`。
