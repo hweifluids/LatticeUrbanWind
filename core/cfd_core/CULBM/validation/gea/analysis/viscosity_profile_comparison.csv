@@ -1,0 +1,13 @@
+run_group,sensitivity_kind,rho_ref_kg_m3,nu_m2_s,metric,status,culbm_value,primary_value,relative_to_primary_percent,gea_reference_value,relative_to_gea_percent,run_name
+main,primary,1.161440186,12.915,w_min_m_s,complete,-8.868637378,-8.868637378,0,-10.05,11.75485196,rising_thermal_h31p25_dt0p1_d3q19_dynamic
+main,primary,1.161440186,12.915,w_max_m_s,complete,16.02217788,16.02217788,0,12.13,32.08720428,rising_thermal_h31p25_dt0p1_d3q19_dynamic
+main,primary,1.161440186,12.915,theta_prime_min_K,complete,-0.002882838249,-0.002882838249,0,-0.037,92.20854527,rising_thermal_h31p25_dt0p1_d3q19_dynamic
+main,primary,1.161440186,12.915,theta_prime_max_K,complete,1.513947487,1.513947487,0,1.01,49.89579078,rising_thermal_h31p25_dt0p1_d3q19_dynamic
+viscosity_profile,rho_ref_z3km,0.9,16.66666667,w_min_m_s,complete,-8.822113741,-8.868637378,0.5245860796,-10.05,12.21777372,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km
+viscosity_profile,rho_ref_z3km,0.9,16.66666667,w_max_m_s,complete,15.93863009,16.02217788,-0.5214508579,12.13,31.39843442,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km
+viscosity_profile,rho_ref_z3km,0.9,16.66666667,theta_prime_min_K,complete,-0.002645492554,-0.002882838249,8.233056279,-0.037,92.85002013,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km
+viscosity_profile,rho_ref_z3km,0.9,16.66666667,theta_prime_max_K,complete,1.470345497,1.513947487,-2.880019956,1.01,45.57876209,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km
+viscosity_profile,rho_ref_z8km,0.55,27.27272727,w_min_m_s,complete,-8.602109156,-8.868637378,3.005289441,-10.05,14.40687407,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km
+viscosity_profile,rho_ref_z8km,0.55,27.27272727,w_max_m_s,complete,15.59579046,16.02217788,-2.661232559,12.13,28.57205659,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km
+viscosity_profile,rho_ref_z8km,0.55,27.27272727,theta_prime_min_K,complete,-0.00210750103,-0.002882838249,26.89492619,-0.037,94.30405127,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km
+viscosity_profile,rho_ref_z8km,0.55,27.27272727,theta_prime_max_K,complete,1.352103472,1.513947487,-10.69020006,1.01,33.87163087,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km

@@ -8,6 +8,14 @@
 /core/cfd_core/FluidX3D/.vs/
 /core/cfd_core/FluidX3D/enc_temp_folder/
 /core/cfd_core/FluidX3D-3.5/
+/core/cfd_core/CULBM/build/
+/core/cfd_core/CULBM/build-*/
+/core/cfd_core/CULBM/bin/**
+/core/cfd_core/CULBM/test-output/
+/core/cfd_core/CULBM/*.out
+/core/cfd_core/CULBM/*.err
+/core/cfd_core/CULBM/tests/__pycache__/
+/core/cfd_core/CULBM/validation/gea/results/
 /core/bridge_core/__pycache__
 # Files anywhere
 *.vcxproj.user
@@ -21,6 +29,12 @@
 /database/**
 /gui/preferences.json
 /codexlog/
+/tmp/gea_dev/
+/tmp/pdfs/arxiv_2302_04836/
+/tmp/references/GEA/
+/tmp/report_runtime/
+/tmp/gea_report_chrome_profile/
+/tmp/gea_report_preview.png
 
 # Re-allow directories so we can unignore specific files
 !/example/**/

@@ -1,0 +1,369 @@
+#include "info.hpp"
+#include "lbm.hpp"
+
+namespace {
+constexpr uint k_progress_col_mlups = 9u;
+constexpr uint k_progress_col_bandwidth = 13u;
+constexpr uint k_progress_col_steps = 11u;
+constexpr uint k_progress_col_current = 19u;
+constexpr uint k_progress_col_time = 36u;
+constexpr double k_min_step_seconds = 1.0E-9;
+
+inline double sanitize_step_seconds(const double step_seconds) {
+	return step_seconds>k_min_step_seconds ? step_seconds : k_min_step_seconds;
+}
+inline void update_step_estimate(const double sample_seconds, double& estimate_seconds, ulong& samples) {
+	if(!(sample_seconds>0.0)) return;
+	if(samples==0ull) {
+		estimate_seconds = sample_seconds;
+	} else {
+		const double alpha = samples<8ull ? (1.0/(double)(samples+1ull)) : 0.2;
+		estimate_seconds += alpha*(sample_seconds-estimate_seconds);
+	}
+	samples++;
+}
+inline double to_steps_per_second(const double step_seconds) {
+	return step_seconds>0.0 ? 1.0/step_seconds : 0.0;
+}
+inline ulong count_remaining_avg_samples(const ulong current_t, const ulong total_steps, const ulong avg_start_t, const ulong avg_stride) {
+	if(avg_start_t==max_ulong||current_t>=total_steps) return 0ull;
+	const ulong stride = max(avg_stride, 1ull);
+	ulong first = max(current_t+1ull, avg_start_t);
+	const ulong offset = (first-avg_start_t)%stride;
+	if(offset!=0ull) first += stride-offset;
+	if(first>total_steps) return 0ull;
+	return 1ull+(total_steps-first)/stride;
+}
+
+inline string progress_separator_top() {
+	return "|---------.-------'-----.-----------.-------------------.------------------------------------|";
+}
+inline string progress_separator_bottom() {
+	return "|---------'-------------'-----------'-------------------'------------------------------------|";
+}
+inline string progress_header_row(const bool elapsed_time) {
+	return
+		"|"+alignc(k_progress_col_mlups, "MLUPs")+"|"+
+		alignc(k_progress_col_bandwidth, "Bandwidth")+"|"+
+		alignc(k_progress_col_steps, "Steps/s")+"|"+
+		alignc(k_progress_col_current, "Current Step")+"|"+
+		alignc(k_progress_col_time, elapsed_time ? "Elapsed Time" : "Time Remaining")+"|";
+}
+inline string progress_value_row(const Info& info) {
+	if(info.lbm==nullptr) return "";
+	const double dt_smooth = info.runtime_lbm_timestep_smooth>1.0E-9 ? info.runtime_lbm_timestep_smooth : 1.0E-9;
+	float progress_ratio = 1.0f;
+	if(info.steps>0ull) {
+		const float ratio_raw = (float)(info.lbm->get_t()-info.steps_last)/(float)info.steps;
+		progress_ratio = ratio_raw<0.0f ? 0.0f : (ratio_raw>1.0f ? 1.0f : ratio_raw);
+	}
+	const string current = info.steps==max_ulong
+		? to_string(info.lbm->get_t())
+		: to_string(info.lbm->get_t())+" "+print_percentage(progress_ratio);
+	return
+		"|"+alignc(k_progress_col_mlups, to_uint((double)info.lbm->get_N()*1E-6/dt_smooth))+"|"+
+		alignc(k_progress_col_bandwidth, to_string(to_uint((double)info.lbm->get_N()*(double)bandwidth_bytes_per_cell_device()*1E-9/dt_smooth))+" GB/s")+"|"+
+		alignc(k_progress_col_steps, to_uint(info.steps_per_second()))+"|"+
+		alignc(k_progress_col_current, current)+"|"+
+		alignc(k_progress_col_time, print_time(info.time()))+"|";
+}
+}
+
+Info info;
+
+void Info::clear_two_phase_eta() {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	phase_eta_enabled = false;
+	phase_total_steps = 0ull;
+	phase_avg_start_t = max_ulong;
+	phase_avg_steps = 0ull;
+	phase_avg_stride = 1ull;
+	phase_normal_step_s = 0.0;
+	phase_avg_step_s = 0.0;
+	phase_avg_sample_extra_s = 0.0;
+	phase_normal_runtime_sum = 0.0;
+	phase_avg_runtime_sum = 0.0;
+	phase_avg_extra_runtime_sum = 0.0;
+	phase_normal_samples = 0ull;
+	phase_avg_samples = 0ull;
+	phase_avg_extra_samples = 0ull;
+}
+void Info::configure_two_phase_eta(const ulong total_steps, const ulong avg_start_t, const ulong avg_steps, const double normal_steps_per_s_hint, const double avg_sample_extra_s_hint, const ulong avg_stride) {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	phase_eta_enabled = total_steps!=max_ulong;
+	phase_total_steps = total_steps;
+	phase_avg_steps = avg_steps;
+	phase_avg_start_t = avg_steps>0ull ? avg_start_t : max_ulong;
+	phase_avg_stride = max(avg_stride, 1ull);
+	phase_normal_step_s = normal_steps_per_s_hint>0.0 ? 1.0/normal_steps_per_s_hint : 0.0;
+	phase_avg_sample_extra_s = avg_sample_extra_s_hint>0.0 ? avg_sample_extra_s_hint : 0.0;
+	const double normal_step_s = phase_normal_step_s>0.0 ? phase_normal_step_s : 0.0;
+	phase_avg_step_s = normal_step_s+phase_avg_sample_extra_s/(double)phase_avg_stride;
+	phase_normal_runtime_sum = phase_normal_step_s>0.0 ? phase_normal_step_s : 0.0;
+	phase_avg_runtime_sum = 0.0;
+	phase_avg_extra_runtime_sum = phase_avg_sample_extra_s>0.0 ? phase_avg_sample_extra_s : 0.0;
+	phase_normal_samples = phase_normal_step_s>0.0 ? 1ull : 0ull;
+	phase_avg_samples = 0ull;
+	phase_avg_extra_samples = phase_avg_sample_extra_s>0.0 ? 1ull : 0ull;
+}
+void Info::update_two_phase_eta_step(const bool avg_phase, const double step_seconds, const bool avg_sampled) {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(!phase_eta_enabled) return;
+	if(!(step_seconds>0.0)) return;
+	if(avg_phase&&avg_sampled) {
+		const double normal_step_s = phase_normal_step_s>0.0 ? phase_normal_step_s : sanitize_step_seconds(runtime_lbm_timestep_smooth);
+		const double raw_extra_seconds = step_seconds-normal_step_s;
+		const double extra_seconds = raw_extra_seconds>0.0 ? raw_extra_seconds : 0.0;
+		phase_avg_extra_runtime_sum += extra_seconds;
+		phase_avg_extra_samples++;
+		phase_avg_sample_extra_s = phase_avg_extra_runtime_sum/(double)phase_avg_extra_samples;
+		phase_avg_runtime_sum += step_seconds;
+		phase_avg_samples++;
+	} else {
+		phase_normal_runtime_sum += step_seconds;
+		phase_normal_samples++;
+		phase_normal_step_s = phase_normal_runtime_sum/(double)phase_normal_samples;
+	}
+	const double normal_step_s = phase_normal_step_s>0.0 ? phase_normal_step_s : sanitize_step_seconds(runtime_lbm_timestep_smooth);
+	phase_avg_step_s = normal_step_s+phase_avg_sample_extra_s/(double)max(phase_avg_stride, 1ull);
+}
+double Info::normal_steps_per_second() const {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(phase_normal_step_s>0.0) return to_steps_per_second(phase_normal_step_s);
+	return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+}
+double Info::avg_steps_per_second() const {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(phase_avg_step_s>0.0) return to_steps_per_second(phase_avg_step_s);
+	if(phase_normal_step_s>0.0) return to_steps_per_second(phase_normal_step_s);
+	return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+}
+double Info::steps_per_second() const {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(!phase_eta_enabled||lbm==nullptr) return to_steps_per_second(sanitize_step_seconds(runtime_lbm_timestep_smooth));
+	const bool in_avg_phase = phase_avg_steps>0ull&&phase_avg_start_t!=max_ulong&&lbm->get_t()>=phase_avg_start_t;
+	return in_avg_phase ? avg_steps_per_second() : normal_steps_per_second();
+}
+
+void Info::append(const ulong steps, const ulong total_steps, const ulong t) {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(total_steps==max_ulong) { // total_steps is not provided/used
+		this->steps = steps; // has to be executed before info.print_initialize()
+		this->steps_last = t; // reset last step count if multiple run() commands are executed consecutively
+		this->runtime_total_last = this->runtime_total; // reset last runtime if multiple run() commands are executed consecutively
+		this->runtime_total = clock.stop();
+	} else { // total_steps has been specified
+		this->steps = total_steps; // has to be executed before info.print_initialize()
+	}
+}
+void Info::update(const double dt) {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	this->runtime_lbm_timestep_last = dt; // exact dt
+	update_step_estimate(dt, runtime_lbm_timestep_smooth, runtime_lbm_samples);
+	this->runtime_lbm += dt; // accumulated pure LBM kernel runtime
+	this->runtime_total = clock.stop();
+}
+double Info::time() const { // returns either elapsed time or remaining time
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(lbm==nullptr) return 0.0;
+	if(phase_eta_enabled&&phase_total_steps!=max_ulong) { // stage-aware ETA: normal solver stage + mean-field stage
+		const ulong t = min(lbm->get_t(), phase_total_steps);
+		ulong remaining_normal = 0ull;
+		ulong remaining_avg = 0ull;
+		ulong remaining_avg_samples = 0ull;
+		if(phase_avg_steps>0ull&&phase_avg_start_t!=max_ulong) {
+			if(t<phase_avg_start_t) {
+				const ulong normal_end = phase_avg_start_t>0ull ? phase_avg_start_t-1ull : 0ull;
+				remaining_normal = normal_end>t ? normal_end-t : 0ull;
+				remaining_avg = phase_total_steps>normal_end ? phase_total_steps-normal_end : 0ull;
+			} else {
+				remaining_avg = phase_total_steps>t ? phase_total_steps-t : 0ull;
+			}
+			remaining_avg_samples = count_remaining_avg_samples(t, phase_total_steps, phase_avg_start_t, phase_avg_stride);
+		} else {
+			remaining_normal = phase_total_steps>t ? phase_total_steps-t : 0ull;
+		}
+		const double normal_step_s = phase_normal_step_s>0.0 ? phase_normal_step_s : sanitize_step_seconds(runtime_lbm_timestep_smooth);
+		return (double)(remaining_normal+remaining_avg)*normal_step_s + (double)remaining_avg_samples*phase_avg_sample_extra_s;
+	}
+	return steps==max_ulong ? runtime_total : ((double)steps/(double)max(lbm->get_t()-steps_last, 1ull)-1.0)*(runtime_total-runtime_total_last); // time estimation on average so far
+	//return steps==max_ulong ? runtime_lbm : ((double)steps-(double)(lbm->get_t()-steps_last))*runtime_lbm_timestep_smooth; // instantaneous time estimation
+}
+void Info::print_logo() const {
+	const uint inner = (uint)CONSOLE_WIDTH-2u;
+	const vector<string> logo = {
+		" ______________   ______________ ",
+		"\\   ________  | |  ________   /",
+		" \\  \\       | | | |       /  /",
+		"  \\  \\   L  | | | |  U   /  /",
+		"   \\  \\     | | | |     /  /",
+		"    \\  \\_.-\"  | |  \"-._/  /",
+		"     \\    _.-\" _ \"-._    /",
+		"      \\.-\" _.-\" \"-._ \"-./",
+		"       .-\"  .-\"-.  \"-.",
+		"       \\  v\"     \"v  /",
+		"        \\  \\  W  /  /",
+		"         \\  \\   /  /",
+		"          \\  \\ /  /",
+		"           \\  '  /",
+		"            \\   /",
+		"             \\ /",
+		"              '      CULBM Version 3.5",
+		"       CUDA lattice-Boltzmann solver for LatticeUrbanWind"
+	};
+	print("|"+string(inner, '-')+"|\n");
+	for(const string& line : logo) print("|"+alignc(inner, line)+"|\n");
+	print("|"+string(inner, '-')+"|\n");
+}
+void Info::print_initialize(LBM* lbm) {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	info.allow_printing.lock(); // disable print_update() until print_initialize() has finished
+	this->lbm = lbm;
+	runtime_lbm = 0.0;
+	runtime_total = 0.0;
+	runtime_total_last = 0.0;
+	runtime_lbm_timestep_last = 1.0;
+	runtime_lbm_timestep_smooth = 1.0;
+	runtime_lbm_samples = 0ull;
+	clear_two_phase_eta();
+	progress_console_enabled = !luw_progress_gui_mode();
+#if defined(SRT)
+	collision = "SRT";
+#elif defined(TRT)
+	collision = "TRT";
+#endif // TRT
+#if defined(FP16S)
+	collision += " (FP32/FP16S)";
+#elif defined(FP16C)
+	collision += " (FP32/FP16C)";
+#else // FP32
+	collision += " (FP32/FP32)";
+#endif // FP32
+	bool all_domains_use_ram = true; // reset cpu/gpu_mem_required to get valid values for consecutive simulations
+	for(uint d=0u; d<lbm->get_D(); d++) {
+		all_domains_use_ram = all_domains_use_ram&&lbm->lbm_domain[d]->get_device().info.uses_ram;
+	}
+	if(all_domains_use_ram) {
+		cpu_mem_required = lbm->get_D()*lbm->lbm_domain[0]->get_device().info.memory_used;
+		gpu_mem_required = 0u;
+	} else {
+		cpu_mem_required = (uint)(lbm->get_N()*(ulong)bytes_per_cell_host()/1048576ull);
+		gpu_mem_required = lbm->lbm_domain[0]->get_device().info.memory_used;
+	}
+	const float Re = lbm->get_Re_max();
+#ifdef TRT
+	const TRT_Relaxation_Diagnostic trt_relaxation =
+		get_trt_relaxation_diagnostic(lbm->get_tau());
+#endif // TRT
+#ifdef TEMPERATURE
+	const Relaxation_Branch_Diagnostic thermal_relaxation =
+		get_relaxation_branch_diagnostic(
+			get_temperature_tau(lbm->get_alpha()));
+#endif // TEMPERATURE
+	println("|-----------------.-----------------------------------------------------------|");
+	println("| Grid Resolution | "+alignr(57u, to_string(lbm->get_Nx())+" x "+to_string(lbm->get_Ny())+" x "+to_string(lbm->get_Nz())+" = "+to_string(lbm->get_N()))+" |");
+	println("| Grid Domains    | "+alignr(57u, to_string(lbm->get_Dx())+" x "+to_string(lbm->get_Dy())+" x "+to_string(lbm->get_Dz())+" = "+to_string(lbm->get_global_D()))+" |");
+	println("| LBM Type        | "+alignr(57u, /***************/ "D"+to_string(lbm->get_velocity_set()==9?2:3)+"Q"+to_string(lbm->get_velocity_set())+" "+collision)+" |");
+	println("| Memory Usage    | "+alignr(54u, /*******/ "CPU "+to_string(cpu_mem_required)+" MB/rank, GPU "+to_string(lbm->get_global_D())+"x "+to_string(gpu_mem_required))+" MB |");
+	println("| Max Alloc Size  | "+alignr(54u, /*************/ (uint)(lbm->get_N()/(ulong)lbm->get_global_D()*(ulong)(lbm->get_velocity_set()*sizeof(fpxx))/1048576ull))+" MB |");
+	println("| Time Steps      | "+alignr(57u, /***************************************************************/ (steps==max_ulong ? "infinite" : to_string(steps)))+" |");
+	println("| Kin. Viscosity  | "+alignr(57u, /*************************************************************************************/ to_string(lbm->get_nu(), 8u))+" |");
+	println("| Relaxation Time | "+alignr(57u, /************************************************************************************/ to_string(lbm->get_tau(), 8u))+" |");
+#ifdef TRT
+	println("| TRT Lambda      | "+alignr(57u, to_string(trt_relaxation.magic_parameter, 8u)+" (standard 3/16; unchanged)")+" |");
+	println("| TRT Tau (+/-)   | "+alignr(57u, "+ "+to_string(trt_relaxation.plus.tau, 8u)+", - "+to_string(trt_relaxation.minus.tau, 8u))+" |");
+	println("| TRT Omega (+/-) | "+alignr(57u, "+ "+to_string(trt_relaxation.plus.omega, 8u)+", - "+to_string(trt_relaxation.minus.omega, 8u))+" |");
+	println("| TRT Eigen Amp   | "+alignr(57u, "+ "+to_string(trt_relaxation.plus.eigenvalue_magnitude, 8u)+", - "+to_string(trt_relaxation.minus.eigenvalue_magnitude, 8u))+" |");
+#endif // TRT
+	println("| Reynolds Number | "+alignr(57u, /******************************************/ "Re < "+string(Re>=100.0f ? to_string(to_uint(Re)) : to_string(Re, 6u)))+" |");
+	println("| Coriolis Omega  | "+alignr(57u, alignr(15u, to_string(lbm->get_omega_x(), 8u))+","+alignr(15u, to_string(lbm->get_omega_y(), 8u))+","+alignr(15u, to_string(lbm->get_omega_z(), 8u)))+" |");
+#ifdef SURFACE
+	println("| Surface Tension | "+alignr(57u, /**********************************************************************************/ to_string(lbm->get_sigma(), 8u))+" |");
+#endif // SURFACE
+#ifdef TEMPERATURE
+	println("| Thermal Lattice | "+alignr(57u, get_temperature_lattice_name())+" |");
+	println("| Thermal Diff.   | "+alignr(57u, /**********************************************************************************/ to_string(lbm->get_alpha(), 8u))+" |");
+	println("| Thermal Tau     | "+alignr(57u, /***********************************************************************************/ to_string(get_temperature_tau(lbm->get_alpha()), 8u))+" |");
+	println("| Thermal Omega   | "+alignr(57u, to_string(thermal_relaxation.omega, 8u))+" |");
+	println("| Thermal EigAmp  | "+alignr(57u, to_string(thermal_relaxation.eigenvalue_magnitude, 8u))+" |");
+	println("| Thermal Exp.    | "+alignr(57u, /***********************************************************************************/ to_string(lbm->get_beta(), 8u))+" |");
+	const float3 gravity = lbm->get_buoyancy_gravity();
+	println("| Buoyancy g      | "+alignr(57u, alignr(15u, to_string(gravity.x, 8u))+","+alignr(15u, to_string(gravity.y, 8u))+","+alignr(15u, to_string(gravity.z, 8u)))+" |");
+	const int temperature_outlet_face = lbm->get_temperature_outlet_face();
+	const string temperature_outlet_name =
+		temperature_outlet_face==(int)Temperature_Outlet_Face::West ? "west (-x), zero-gradient" :
+		temperature_outlet_face==(int)Temperature_Outlet_Face::East ? "east (+x), zero-gradient" :
+		temperature_outlet_face==(int)Temperature_Outlet_Face::South ? "south (-y), zero-gradient" :
+		temperature_outlet_face==(int)Temperature_Outlet_Face::North ? "north (+y), zero-gradient" :
+		"off";
+	println("| Thermal Outlet  | "+alignr(57u, temperature_outlet_name)+" |");
+#endif // TEMPERATURE
+#ifdef TRT
+	if(trt_relaxation.plus.near_marginal) {
+		print_warning(
+			"TRT symmetric (+) collision eigenbranch is close to the "
+			"unit-circle margin (|1-omega+|="+
+			to_string(trt_relaxation.plus.eigenvalue_magnitude, 8u)+
+			" > "+to_string(collision_eigenvalue_warning_threshold, 2u)+
+			"). Stability is case-dependent; Lambda=3/16 and the "
+			"relaxation coefficients are not modified.");
+	}
+	if(trt_relaxation.minus.near_marginal) {
+		print_warning(
+			"TRT antisymmetric (-) collision eigenbranch is close to the "
+			"unit-circle margin (|1-omega-|="+
+			to_string(trt_relaxation.minus.eigenvalue_magnitude, 8u)+
+			" > "+to_string(collision_eigenvalue_warning_threshold, 2u)+
+			"). Stability is case-dependent; Lambda=3/16 and the "
+			"relaxation coefficients are not modified.");
+	}
+#endif // TRT
+#ifdef TEMPERATURE
+	if(thermal_relaxation.near_marginal) {
+		print_warning(
+			"The temperature SRT collision branch is close to the "
+			"unit-circle margin (|1-omega_T|="+
+			to_string(thermal_relaxation.eigenvalue_magnitude, 8u)+
+			" > "+to_string(collision_eigenvalue_warning_threshold, 2u)+
+			"). Stability is case-dependent, including the cell Peclet "
+			"number and boundaries; tau_T is not modified.");
+	}
+#endif // TEMPERATURE
+	if(progress_console_enabled) {
+#ifndef INTERACTIVE_GRAPHICS_ASCII
+		println(progress_separator_top());
+		println(progress_header_row(steps==max_ulong));
+		println("|"+string((uint)CONSOLE_WIDTH-2u, ' ')+"|");
+#else // INTERACTIVE_GRAPHICS_ASCII
+		println("'-----------------'-----------------------------------------------------------'");
+#endif // INTERACTIVE_GRAPHICS_ASCII
+	}
+	clock.start();
+	info.allow_printing.unlock();
+}
+void Info::print_update() const {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(lbm==nullptr) return;
+	if(!progress_console_enabled) return;
+	info.allow_printing.lock();
+	reprint(progress_value_row(*this));
+#ifdef GRAPHICS
+	if(key_G) { // print camera settings
+		const string camera_position = "float3("+alignr(9u, to_string(camera.pos.x/(float)lbm->get_Nx(), 6u))+"f*(float)Nx, "+alignr(9u, to_string(camera.pos.y/(float)lbm->get_Ny(), 6u))+"f*(float)Ny, "+alignr(9u, to_string(camera.pos.z/(float)lbm->get_Nz(), 6u))+"f*(float)Nz)";
+		const string camera_rx_ry_fov = alignr(6u, to_string(degrees(camera.rx)-90.0, 1u))+"f, "+alignr(5u, to_string(180.0-degrees(camera.ry), 1u))+"f, "+alignr(5u, to_string(camera.fov, 1u))+"f";
+		const string camera_zoom = alignr(8u, to_string(camera.zoom*(float)fmax(fmax(lbm->get_Nx(), lbm->get_Ny()), lbm->get_Nz())/(float)min(camera.width, camera.height), 6u))+"f";
+		if(camera.free) println("\rlbm.graphics.set_camera_free("+camera_position+", "+camera_rx_ry_fov+");");
+		else println("\rlbm.graphics.set_camera_centered("+camera_rx_ry_fov+", "+camera_zoom+");          ");
+		key_G = false;
+	}
+#endif // GRAPHICS
+	info.allow_printing.unlock();
+}
+void Info::print_finalize() {
+	std::lock_guard<std::recursive_mutex> state_lock(state_mutex);
+	if(lbm!=nullptr&&progress_console_enabled) {
+		println();
+	}
+	lbm = nullptr;
+	if(progress_console_enabled) println(progress_separator_bottom());
+}

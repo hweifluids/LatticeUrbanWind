@@ -1,0 +1,11 @@
+case,h_m,dt_s,status,metric,value,max_mach,baseline_dt_s,baseline_value,relative_to_dt0p1_percent,next_coarser_dt_s,next_coarser_dt_value,relative_to_next_coarser_dt_percent,run_name
+density_current,12.5,0.1,complete,front_x_m,15756.19554,0.4167857499,0.1,15756.19554,0,,,,density_current_h12p5_dt0p1_d3q19_dynamic
+density_current,12.5,0.05,complete,front_x_m,15718.25861,0.2131663731,0.1,15756.19554,-0.2407747111,0.1,15756.19554,-0.2407747111,density_current_h12p5_dt0p05_d3q19_dynamic
+density_current,12.5,0.025,complete,front_x_m,15705.03827,0.1069847883,0.1,15756.19554,-0.3246803808,0.05,15718.25861,-0.08410818099,density_current_h12p5_dt0p025_d3q19_dynamic
+density_current,25,0.1,complete,front_x_m,15357.237,0.2046111165,0.1,15357.237,0,,,,density_current_h25_dt0p1_d3q19_dynamic
+density_current,25,0.05,complete,front_x_m,15337.44953,0.1024261997,0.1,15357.237,-0.1288478728,0.1,15357.237,-0.1288478728,density_current_h25_dt0p05_d3q19_dynamic
+rising_thermal,7.8125,0.1,complete,w_max_m_s,17.56486599,0.3894174762,0.1,17.56486599,0,,,,rising_thermal_h7p8125_dt0p1_d3q19_dynamic
+rising_thermal,7.8125,0.05,complete,w_max_m_s,16.38364163,0.1816147182,0.1,17.56486599,-6.724926689,0.1,17.56486599,-6.724926689,rising_thermal_h7p8125_dt0p05_d3q19_dynamic
+rising_thermal,7.8125,0.025,complete,w_max_m_s,16.13372704,0.08942219185,0.1,17.56486599,-8.147736247,0.05,16.38364163,-1.525390983,rising_thermal_h7p8125_dt0p025_d3q19_dynamic
+rising_thermal,15.625,0.1,complete,w_max_m_s,16.37627021,0.1815330053,0.1,16.37627021,0,,,,rising_thermal_h15p625_dt0p1_d3q19_dynamic
+rising_thermal,15.625,0.05,complete,w_max_m_s,16.10002131,0.08923537578,0.1,16.37627021,-1.686885344,0.1,16.37627021,-1.686885344,rising_thermal_h15p625_dt0p05_d3q19_dynamic

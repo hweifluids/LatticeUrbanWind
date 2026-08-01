@@ -1,0 +1,6 @@
+grid,h_m,culbm_w_max,gea_av15_w_max,difference_m_s,relative_difference_percent,culbm_theta_max,gea_av15_theta_max,theta_relative_difference_percent,status,grid_registration
+h=125 m,125.0,16.00953517,11.97,4.039535175,33.74716103,1.629217625,1.06,53.69977591,complete,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+h=62.5 m,62.5,15.85015329,12.09,3.760153286,31.10135059,1.53238821,1.03,48.7755544,complete,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+h=31.25 m,31.25,16.02217788,12.13,3.892177879,32.08720428,1.513947487,1.01,49.89579078,complete,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+h=15.625 m,15.625,16.37627021,12.17,4.206270214,34.56261474,1.533142805,1.0,53.31428051,complete,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+h=7.8125 m,7.8125,17.56486599,,,,1.563768864,,,complete,GEA cell-centred coordinates (bounds -h/2 to L-h/2)

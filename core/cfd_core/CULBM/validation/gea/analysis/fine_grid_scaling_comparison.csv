@@ -1,0 +1,7 @@
+case,scaling,baseline_h_m,baseline_dt_s,refined_h_m,refined_dt_s,metric,status,baseline_value,refined_value,relative_change_percent,baseline_tau,refined_tau,baseline_max_mach,refined_max_mach,run_name
+rising_thermal,fixed_dt,15.625,0.1,7.8125,0.1,w_max_m_s,complete,16.37627021,17.56486599,7.25803717,0.515869952,0.563479808,0.1815330053,0.3894174762,rising_thermal_h7p8125_dt0p1_d3q19_dynamic
+rising_thermal,acoustic_dt_proportional_h,15.625,0.1,7.8125,0.05,w_max_m_s,complete,16.37627021,16.38364163,0.04501280269,0.515869952,0.531739904,0.1815330053,0.1816147182,rising_thermal_h7p8125_dt0p05_d3q19_dynamic
+rising_thermal,diffusive_dt_proportional_h2,15.625,0.1,7.8125,0.025,w_max_m_s,complete,16.37627021,16.13372704,-1.481064802,0.515869952,0.515869952,0.1815330053,0.08942219185,rising_thermal_h7p8125_dt0p025_d3q19_dynamic
+density_current,fixed_dt,25,0.1,12.5,0.1,front_x_m,complete,15357.237,15756.19554,2.597853667,0.530996,0.623984,0.2046111165,0.4167857499,density_current_h12p5_dt0p1_d3q19_dynamic
+density_current,acoustic_dt_proportional_h,25,0.1,12.5,0.05,front_x_m,complete,15357.237,15718.25861,2.350823981,0.530996,0.561992,0.2046111165,0.2131663731,density_current_h12p5_dt0p05_d3q19_dynamic
+density_current,diffusive_dt_proportional_h2,25,0.1,12.5,0.025,front_x_m,complete,15357.237,15705.03827,2.264738565,0.530996,0.530996,0.2046111165,0.1069847883,density_current_h12p5_dt0p025_d3q19_dynamic

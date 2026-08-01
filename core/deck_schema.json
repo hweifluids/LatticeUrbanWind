@@ -333,6 +333,13 @@
       "kind": "float"
     },
     {
+      "key": "cuda_vertical_nesting_agl",
+      "label": "CUDA nesting height above compact ground top (m)",
+      "section": "cfd",
+      "help": "Optional CUDA-only fixed horizontal interface heights in SI meters above the top of the compacted ground layer (not terrain-relative AGL): [] disables nesting; [h] uses half the base cell size below h; [h_low, h_high] uses quarter size below h_low, half size from h_low to h_high, and the base size above h_high. Interfaces use conservative 4-to-1 averaging.",
+      "kind": "float_list"
+    },
+    {
       "key": "validation",
       "label": "Validation status",
       "section": "cfd",
@@ -381,6 +388,41 @@
       "section": "output",
       "help": "Write unsteady VTK every N steps.",
       "kind": "integer"
+    },
+    {
+      "key": "culbm_output_global_vtk",
+      "label": "CULBM global VTK",
+      "section": "output",
+      "help": "CULBM only: write one final structured VTK in STL metric coordinates. z=0 is the non-basement STL datum.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_output_global_netcdf",
+      "label": "CULBM global NetCDF",
+      "section": "output",
+      "help": "CULBM only: write one final structured NetCDF-3 file in STL metric coordinates. z=0 is the non-basement STL datum.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_output_global_vtkhdf",
+      "label": "CULBM global VTKHDF",
+      "section": "output",
+      "help": "CULBM only: write one final HDF5-backed VTKHDF ImageData file in STL metric coordinates. z=0 is the non-basement STL datum; HDF5 support is required at build time.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_output_agl_vtk",
+      "label": "CULBM AGL point VTK",
+      "section": "output",
+      "help": "CULBM only: read proj_temp/interpolated_dem.csv, remove points at/below terrain, and write final AGL point-data VTK.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_output_agl_netcdf",
+      "label": "CULBM AGL point NetCDF",
+      "section": "output",
+      "help": "CULBM only: read proj_temp/interpolated_dem.csv, remove points at/below terrain, and write final AGL point NetCDF-3 data.",
+      "kind": "boolean"
     },
     {
       "key": "probes_output",

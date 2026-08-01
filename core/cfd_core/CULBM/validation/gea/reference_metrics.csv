@@ -1,0 +1,24 @@
+case,scheme,h_m,time_s,metric,reference_value,reference_lower,reference_upper,units,source,source_location,notes
+rising_thermal,GEA AV15,250,1020,w_min_m_s,-9.59,-9.59,-9.59,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,250,1020,w_max_m_s,11.23,11.23,11.23,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,250,1020,theta_prime_min_K,-0.069,-0.069,-0.069,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,250,1020,theta_prime_max_K,0.89,0.89,0.89,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,125,1020,w_min_m_s,-10.02,-10.02,-10.02,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,125,1020,w_max_m_s,11.97,11.97,11.97,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,125,1020,theta_prime_min_K,-0.042,-0.042,-0.042,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,125,1020,theta_prime_max_K,1.06,1.06,1.06,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,62.5,1020,w_min_m_s,-10.08,-10.08,-10.08,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,62.5,1020,w_max_m_s,12.09,12.09,12.09,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,62.5,1020,theta_prime_min_K,-0.037,-0.037,-0.037,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,62.5,1020,theta_prime_max_K,1.03,1.03,1.03,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,31.25,1020,w_min_m_s,-10.05,-10.05,-10.05,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,31.25,1020,w_max_m_s,12.13,12.13,12.13,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,31.25,1020,theta_prime_min_K,-0.037,-0.037,-0.037,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,31.25,1020,theta_prime_max_K,1.01,1.01,1.01,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,15.625,1020,w_min_m_s,-10.02,-10.02,-10.02,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,15.625,1020,w_max_m_s,12.17,12.17,12.17,m/s,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,15.625,1020,theta_prime_min_K,-0.038,-0.038,-0.038,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+rising_thermal,GEA AV15,15.625,1020,theta_prime_max_K,1.00,1.00,1.00,K,arXiv:2302.04836,Table 1,Artificial viscosity mu_a=15 Pa s; Pr=1
+density_current,GEA AV75,100,900,front_x_m,15282,15269,15295,m,arXiv:2302.04836,Section 4.3 and Table 3,Midpoint of published front bracket; use theta_prime=-1 K crossing because the paper prose saying +1 K is an evident sign typo for a negative-anomaly cold pool
+density_current,GEA AV75,50,900,front_x_m,15154,15141,15167,m,arXiv:2302.04836,Section 4.3 and Table 3,Midpoint of published front bracket; use theta_prime=-1 K crossing because the paper prose saying +1 K is an evident sign typo for a negative-anomaly cold pool
+density_current,GEA AV75,25,900,front_x_m,14795.5,14783,14808,m,arXiv:2302.04836,Section 4.3 and Table 3,Midpoint of published front bracket; use theta_prime=-1 K crossing because the paper prose saying +1 K is an evident sign typo for a negative-anomaly cold pool

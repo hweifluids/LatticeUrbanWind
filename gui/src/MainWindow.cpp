@@ -2775,7 +2775,7 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     }
 
     pushNode("cfd_compute", "Computational control", "GPU layout, mesh-control mode, and run-length controls.", "cfd_control",
-             {"n_gpu", "mesh_control", "gpu_memory", "cell_size", "run_nstep"});
+             {"n_gpu", "mesh_control", "gpu_memory", "cell_size", "cuda_vertical_nesting_agl", "run_nstep"});
 
     pushNode("cfd_output", "Output", "Output groups are organized by mean, instantaneous, and probe-related controls.", "cfd_control");
     pushNode("output_mean_fields", "Mean fields", "Mean-field outputs and averaging windows.", "cfd_output",
@@ -5516,6 +5516,8 @@ QString MainWindow::buildSkeletonText(RunMode mode, const QString& caseName) con
     lines << "mesh_control = \"gpu_memory\"";
     lines << "gpu_memory = 20000";
     lines << "cell_size = ";
+    lines << "// CUDA-only: optional [] / [h] / [h_low, h_high] in SI m above the compacted ground-layer top; fixed horizontal planes, not terrain-relative AGL; empty disables nesting.";
+    lines << "cuda_vertical_nesting_agl = ";
     lines << "validation = pass";
     lines << "high_order = true";
     lines << "flux_correction = true";
