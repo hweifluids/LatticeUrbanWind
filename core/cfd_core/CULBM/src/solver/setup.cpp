@@ -405,6 +405,32 @@ static uint estimate_particle_advection_extra_mb_per_device(
         memory_mb, std::numeric_limits<uint>::max());
 }
 
+static uint estimate_statistics_extra_mb_per_device(const uint3& grid) {
+    // Device-side time-averaging statistics buffers allocated by
+    // LBM_Domain::enable_device_statistics(): mean_u (3 float), mean_rho
+    // (1 float), M2_u (3 float), and mean_T (1 float when temperature is
+    // compiled in).  They are enabled whenever purge-average / research
+    // output is active, so the mesh fit must reserve them here; otherwise
+    // the core buffers consume the entire per-device budget and the later
+    // statistics allocation overflows device VRAM at runtime.
+    if (purge_avg_steps == 0u && research_output_steps == 0u) return 0u;
+    const std::uint64_t local_nx =
+        (std::uint64_t)(grid.x / Dx + 2u * (Dx > 1u));
+    const std::uint64_t local_ny =
+        (std::uint64_t)(grid.y / Dy + 2u * (Dy > 1u));
+    const std::uint64_t local_nz =
+        (std::uint64_t)(grid.z / Dz + 2u * (Dz > 1u));
+    const std::uint64_t local_cells = local_nx * local_ny * local_nz;
+    uint memory_mb = 0u;
+    memory_mb += tracked_buffer_mb_setup(local_cells * 3ull * sizeof(float)); // statistics_mean_u
+    memory_mb += tracked_buffer_mb_setup(local_cells * sizeof(float));        // statistics_mean_rho
+    memory_mb += tracked_buffer_mb_setup(local_cells * 3ull * sizeof(float)); // statistics_M2_u
+#ifdef TEMPERATURE
+    memory_mb += tracked_buffer_mb_setup(local_cells * sizeof(float));        // statistics_mean_T
+#endif // TEMPERATURE
+    return memory_mb;
+}
+
 static ProjectGpuMemoryEstimate estimate_project_gpu_memory_from_grid(
     const uint3& grid,
     const culbm::particle_advection::Config* const advection = nullptr) {
@@ -415,7 +441,8 @@ static ProjectGpuMemoryEstimate estimate_project_gpu_memory_from_grid(
         (std::uint64_t)estimate_vk_inlet_extra_mb_per_device(
             grid.x, grid.y, grid.z) +
         (std::uint64_t)estimate_particle_advection_extra_mb_per_device(
-            grid, advection);
+            grid, advection) +
+        (std::uint64_t)estimate_statistics_extra_mb_per_device(grid);
     estimate.extra_per_device_mb = (uint)std::min<std::uint64_t>(
         extra_mb, std::numeric_limits<uint>::max());
     const std::uint64_t total_mb =
