@@ -444,3 +444,27 @@ AV75-like deck 使用 `viscosity_mode=mu/rho_ref`，即固定常运动黏度
 所以只能说明整体形态相近，不能声称逐点一致。对应融合报告保存在
 `output/reports/CULBM_density_current_fused_closure_report_20260801.docx` 与
 `output/pdf/CULBM_density_current_fused_closure_report_20260801.pdf`。
+## CULBM 几何与节点坐标（261116）
+
+STL 最低坐标映射到格点坐标 `+0.5`，整数索引表示节点中心。均匀网格
+raw SI 坐标因此为 `stl_min + (index - 0.5) * dx`；z 再加上实际移除的
+地基厚度 `cuda_ground_trim_si`。全局物理输出仍按
+`stl_min_z + base_height` 重设地面 datum。整格基础板压缩后，保留的固体
+地面节点为 z=-dx/2，首个空气节点为 z=+dx/2，半格反弹壁面位于 z=0。
+
+几何平移、边界样本、平地/DEM 的 profile AGL 参考和输出原点必须使用同一
+变换。DEM 的原始高程先以未压缩的基础板顶面为基准，再减去实际移除的
+格层数；不能在已减小的 base_height 上再次减去 STL 最低高程。
+
+嵌套网格沿用既有的地面面映射：粗、细格点坐标中的地面均为 +0.5。
+去掉最细固体地面行后，首个导出节点的 raw z 为
+`stl_min_z + cuda_ground_trim_si + finest_dx/2`；不能从粗网格平移量
+与细网格总层数重新推导这个 z 原点。
+
+体素化射线交点保留浮点距离，并在同一个节点使用共同的舍入容差判断交点。
+不能把交点截断到整数格层，否则共面基础板/建筑底面会被分到不同层，
+非整格屋顶也会丢失有效固体节点。零交点射线不得读取未初始化的距离。
+
+此修复会改变旧版本的固体占据和坐标标签。已有流场检查点及按旧原点处理的
+结果应保留版本标识；更新几何后从初始条件重新计算，不能只平移旧结果
+代替重算。

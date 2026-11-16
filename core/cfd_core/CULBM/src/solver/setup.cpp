@@ -3202,7 +3202,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-260801-sgs-les")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-261116-geometry-coordinates")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -4776,7 +4776,7 @@ void main_setup() {
     units.set_temperature_reference(1.0f, temperature_ref_kelvin); // T_lbm=1.0 maps to the selected auto/explicit T_ref
 
     float u_scale = lbm_ref_u / si_ref_u;
-    float z_off = units.x(z_si_offset);
+    float z_off = units.x(z_si_offset) + 0.5f;
 
     const float si_beta_air = 1.0f / temperature_ref_kelvin; // volumetric thermal expansion [1/K]
     const float si_gravity = 9.80665f; // standard gravitational acceleration [m/s^2]
@@ -5208,7 +5208,7 @@ void main_setup() {
         ulong out_of_temp_range = 0ul;
         for (const auto& s : samples_si) {
             SamplePoint sp;
-            sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z-cuda_ground_trim_si));
+            sp.p = float3(units.x(s.p.x), units.x(s.p.y), units.x(s.p.z-cuda_ground_trim_si)) + float3(0.5f);
             sp.u = s.u * u_scale;
             sp.patch = s.patch;
             if (use_temperature_bc) {
@@ -5373,12 +5373,15 @@ void main_setup() {
         units.si_x(0.5f - 0.5f * (float)lbm_N.x),
         units.si_x(0.5f - 0.5f * (float)lbm_N.y),
         units.si_x(0.5f - 0.5f * (float)lbm_N.z));
-    vtk_origin_shift = stl_min_si - domain_min_si;
+    // Integer lattice indices are node centres; the STL minimum lies
+    // halfway between the boundary node and the first interior node.
+    // Use the inverse of the geometry transform for every SI output.
+    vtk_origin_shift = stl_min_si - domain_min_si - float3(units.si_x(0.5f));
     if (cuda_ground_compaction_active) vtk_origin_shift.z += cuda_ground_trim_si;
     const float target_lbm_x = units.x(si_size.x);
     const float scale_geom = target_lbm_x / stl_size_si.x;
     mesh->scale(scale_geom);
-    mesh->translate(float3(1.0f - mesh->pmin.x, 1.0f - mesh->pmin.y, 1.0f - mesh->pmin.z));
+    mesh->translate(float3(0.5f - mesh->pmin.x, 0.5f - mesh->pmin.y, 0.5f - mesh->pmin.z));
     if (cuda_ground_compaction_active) {
         mesh->translate(float3(0.0f, 0.0f, -(float)cuda_ground_geometry_shift_cells));
         print_kv_row("CUDA ground", "geometry shifted down by " + to_string((ulong)cuda_ground_geometry_shift_cells) + " lattice cells");
@@ -5670,12 +5673,15 @@ void main_setup() {
             // The stitched field omits exactly one compact ground row. The
             // z origin must therefore be shifted by one finest cell, not by
             // the refinement ratio of the old coarse ground row.
-            const float full_nz = (float)fields.nz + 1.0f;
-            return float3(
+            float3 origin = float3(
                 fields.dx_si * (0.5f - 0.5f * (float)fields.nx),
                 fields.dx_si * (0.5f - 0.5f * (float)fields.ny),
-                fields.dx_si * (0.5f - 0.5f * full_nz + 1.0f)
-            ) + vtk_origin_shift;
+                0.0f) + vtk_origin_shift;
+            // The nested vertical map anchors the ground face at +0.5
+            // on both lattices. The first exported air node is half a
+            // finest cell above the compacted STL datum.
+            origin.z = stl_min_si.z + cuda_ground_trim_si + 0.5f * fields.dx_si;
+            return origin;
         };
         auto stitch_or_fail = [&]() {
             culbm::NestedStitchedFields fields;
@@ -7827,7 +7833,7 @@ void main_setup() {
         else if (use_high_order) {
             KNNInterpolatorHD knn_hd(std::move(P), std::move(Uv));
             // Calculate z base threshold in LBM units
-            const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu;
+            const float z_base_threshold_lbmu = units.x(z_si_offset) + z0_lbmu + 0.5f;
             InletVelocityFieldHD inlet_hd(knn_hd, z_base_threshold_lbmu);
             apply_inlet_outlet_hd(lbm, downstream_bc, inlet_hd, downstream_open_face, 500000ull, true, top_sponge_side_ref_z_cap);
 
@@ -8186,7 +8192,7 @@ void main_setup() {
                 u_scale = lbm_ref_u / si_ref_u;
                 units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
                 units.set_temperature_reference(1.0f, temperature_ref_kelvin);
-                z_off = units.x(z_si_offset);
+                z_off = units.x(z_si_offset) + 0.5f;
                 lbm_beta = buoyancy_enabled ? units.beta(si_beta_air) : 0.0f;
                 lbm_buoyancy_gz = buoyancy_enabled ? units.g(-si_gravity) : 0.0f;
                 update_coriolis(false);
@@ -8294,7 +8300,9 @@ void main_setup() {
             0.5f - 0.5f * (float)lbm_N.y,
             0.5f - 0.5f * (float)lbm_N.z
         );
-        const float flat_ground_lbmu = origin_lbmu.z + units.x(z_si_offset);
+        const float flat_ground_lbmu = origin_lbmu.z + 0.5f +
+            cuda_ground_base_height_si * scale_geom -
+            (float)cuda_ground_geometry_shift_cells;
         GroundTemperaturePlane2D profile_ground_plane;
         bool use_profile_dem_ground = false;
         float ground_z_min_lbm = flat_ground_lbmu;
@@ -8324,11 +8332,13 @@ void main_setup() {
                 for (const auto& dp : profile_dem_points_raw) {
                     const float x_stl_raw = stl_min_si.x + (dp.x - profile_dem_xmin) * dem_to_stl_sx;
                     const float y_stl_raw = stl_min_si.y + (dp.y - profile_dem_ymin) * dem_to_stl_sy;
-                    const float z_stl_raw = z_si_offset + dp.elevation;
+                    const float z_stl_raw = stl_min_si.z + cuda_ground_base_height_si + dp.elevation;
 
-                    const float x_lbm = origin_lbmu.x + (x_stl_raw - stl_min_si.x) * scale_geom;
-                    const float y_lbm = origin_lbmu.y + (y_stl_raw - stl_min_si.y) * scale_geom;
-                    const float z_lbm = origin_lbmu.z + (z_stl_raw - stl_min_si.z) * scale_geom;
+                    const float x_lbm = origin_lbmu.x + 0.5f + (x_stl_raw - stl_min_si.x) * scale_geom;
+                    const float y_lbm = origin_lbmu.y + 0.5f + (y_stl_raw - stl_min_si.y) * scale_geom;
+                    const float z_lbm = origin_lbmu.z + 0.5f +
+                        (z_stl_raw - stl_min_si.z) * scale_geom -
+                        (float)cuda_ground_geometry_shift_cells;
 
                     if (!std::isfinite(x_lbm) || !std::isfinite(y_lbm) || !std::isfinite(z_lbm)) continue;
                     SamplePoint sp;

@@ -13794,7 +13794,8 @@ cuda_float3((float)(direction==0u),
 uint
 intersections=0u,
 intersections_check=0u;
-ushort
+// Retain sub-cell crossings; integer bins split coincident base faces.
+float
 distances[64];
 const
 bool
@@ -13869,7 +13870,7 @@ if(d>0.0f)
 if(intersections<64u&&d<65536.0f)
 distances[intersections]
 =
-(ushort)d;
+d;
 intersections++;
 }
 else
@@ -13894,7 +13895,7 @@ i
 intersections_sort;
 i++)
 {
-ushort
+float
 t
 =
 distances[i];
@@ -13968,18 +13969,18 @@ direction==1u
 0,
 (int)def_Nz);
 const
-uint
-hmesh
-=
-h0+(uint)distances[cuda_min(intersections-1u,
-63u)];
+float hmesh = intersections>0u ?
+(float)h0+distances[cuda_min(intersections-1u, 63u)] : (float)h0;
 for(uint
 h=h0;
 h<hmax;
 h++)
 {
-while(intersection<intersections&&h>h0+(uint)distances[cuda_min(intersection,
-63u)])
+// Use one tolerance for every crossing at this node, so coincident
+// foundation/building faces change parity together.
+const float ray_tolerance = 8.0f*1.1920928955078125e-7f*
+fmax(1.0f, fmax(fabs((float)h), fabs(hmesh)));
+while(intersection<intersections&&(float)h>(float)h0+distances[cuda_min(intersection, 63u)]+ray_tolerance)
 {
 inside
 =
@@ -13988,7 +13989,7 @@ intersection++;
 }
 inside
 =
-inside&&(intersection<intersections&&h<hmesh);
+inside&&(intersection<intersections&&(float)h<hmesh-ray_tolerance);
 const
 uxx
 n
