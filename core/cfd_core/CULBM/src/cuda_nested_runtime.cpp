@@ -522,7 +522,67 @@ NestedMacroPlane NestedMacroPlaneBridge::prolong_1_to_4(
     return fine;
 }
 
+struct NestedDeviceFace {
+    LBM_Domain* upper_domain;
+    LBM_Domain* lower_domain;
+    Memory<uint> invalid;
+    Kernel exchange;
+
+    NestedDeviceFace(NestedLbmLevel& upper, NestedLbmLevel& lower)
+        : upper_domain(upper.lbm->lbm_domain[0]),
+          lower_domain(lower.lbm->lbm_domain[0]),
+          invalid(upper_domain->get_device(), 1u, 1u, true, true, 0u) {
+        auto& c = *upper_domain;
+        auto& f = *lower_domain;
+        const ulong cp = (ulong)c.get_Nx()*c.get_Ny();
+        const ulong fp = (ulong)f.get_Nx()*f.get_Ny();
+        exchange = Kernel(c.get_device(), cp, "culbm_nested_face_exchange",
+            c.rho, c.u, c.flags,
+#ifdef TEMPERATURE
+            c.T,
+#else
+            c.rho,
+#endif
+            f.rho, f.u, f.flags,
+#ifdef TEMPERATURE
+            f.T,
+#else
+            f.rho,
+#endif
+            c.get_Nx(), cp, fp, c.get_N(), f.get_N(),
+            (ulong)upper.physical_first_z, (ulong)upper.lower_ghost_z,
+            (ulong)(lower.physical_end_z-1u), (ulong)lower.upper_ghost_z, invalid);
+    }
+};
+
 void NestedMacroPlaneBridge::exchange(NestedLbmLevel& upper,
+                                      NestedLbmLevel& lower,
+                                      const NestedPlaneWriteOptions options) {
+#ifdef UPDATE_FIELDS
+    if (upper.lbm && lower.lbm && !upper.lbm->is_distributed() &&
+        !lower.lbm->is_distributed() && upper.lbm->get_D()==1u &&
+        lower.lbm->get_D()==1u && lower.lbm->get_Nx()==2u*upper.lbm->get_Nx() &&
+        lower.lbm->get_Ny()==2u*upper.lbm->get_Ny() &&
+        upper.lbm->lbm_domain[0]->get_device().get_cuda_context()==
+        lower.lbm->lbm_domain[0]->get_device().get_cuda_context()) {
+        auto& face = upper.lower_face_cache;
+        if (!face || face->upper_domain != upper.lbm->lbm_domain[0] ||
+            face->lower_domain != lower.lbm->lbm_domain[0])
+            face = std::make_shared<NestedDeviceFace>(upper, lower);
+        // Each level owns a separate stream. Finish the fine donor before
+        // launching on the coarse stream. Reading the single error word
+        // publishes both ghost rows before either slab can advance again.
+        face->lower_domain->finish_queue();
+        face->exchange.enqueue_run();
+        face->invalid.read_from_device();
+        nested_require(face->invalid[0]==0u, "non-finite macro or non-positive interface density");
+        return;
+    }
+#endif
+    exchange_host(upper, lower, options);
+}
+
+void NestedMacroPlaneBridge::exchange_host(NestedLbmLevel& upper,
                                       NestedLbmLevel& lower,
                                       const NestedPlaneWriteOptions options) {
     // Donor/aperture data always comes from adjacent *interior* rows.  The

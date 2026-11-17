@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 extern float coriolis_Omegax_lbmu;
 extern float coriolis_Omegay_lbmu;
 extern float coriolis_Omegaz_lbmu;
@@ -325,6 +326,8 @@ uint bytes_per_cell_host() { // returns the number of Bytes per cell allocated i
 }
 uint bytes_per_cell_device() { // returns the number of Bytes per cell allocated in device memory
 	uint bytes_per_cell = velocity_set*sizeof(fpxx)+17u; // fi, rho, u, flags
+	if(culbm::surface_ibm::get_config().enabled)
+		bytes_per_cell += 13u; // independent FP32 force plus active mask
 #ifdef FORCE_FIELD
 	bytes_per_cell += 12u; // F
 #endif // FORCE_FIELD
@@ -338,6 +341,12 @@ uint bytes_per_cell_device() { // returns the number of Bytes per cell allocated
 }
 uint bandwidth_bytes_per_cell_device() { // returns the bandwidth in Bytes per cell per time step from/to device memory
 	uint bandwidth_bytes_per_cell = velocity_set*2u*sizeof(fpxx)+1u; // lattice.set()*2*fi, flags
+	if(culbm::surface_ibm::get_config().enabled) {
+		// stream_collide reads one byte everywhere; force, predictor, reset,
+		// cumulative-delta replacement, interpolation and spreading touch only
+		// the unique marker-support active-cell/fragment lists.
+		bandwidth_bytes_per_cell += 1u;
+	}
 #ifdef UPDATE_FIELDS
 	bandwidth_bytes_per_cell += 16u; // rho, u
 #ifdef TEMPERATURE
@@ -424,6 +433,12 @@ uint vram_required_mb_per_device(const uint Nx, const uint Ny, const uint Nz, co
 	memory_mb += tracked_allocation_mb(local_N*sizeof(float)); // rho
 	memory_mb += tracked_allocation_mb(local_N*3ull*sizeof(float)); // u
 	memory_mb += tracked_allocation_mb(local_N*sizeof(uchar)); // flags
+	if(culbm::surface_ibm::get_config().enabled) {
+		memory_mb += tracked_allocation_mb(
+			local_N*3ull*sizeof(float)); // SurfaceIBM force
+		memory_mb += tracked_allocation_mb(
+			local_N*sizeof(uchar)); // SurfaceIBM active mask
+	}
 #ifdef FORCE_FIELD
 	memory_mb += tracked_allocation_mb(local_N*3ull*sizeof(float)); // F
 	memory_mb += tracked_allocation_mb(4ull*sizeof(float)); // object_sum
@@ -505,6 +520,9 @@ LBM_Domain::LBM_Domain(const Device_Info& device_info, const uint Nx, const uint
 	this->alpha = alpha; this->beta = beta;
 	this->particles_N = particles_N;
 	this->particles_rho = particles_rho;
+	// This must be frozen before NVRTC compilation: disabled domains retain
+	// the exact pre-IBM kernel signatures and allocate no extra cell field.
+	surface_ibm_enabled = surface_ibm_config_.enabled;
 	string cuda_kernel_source;
 #ifdef GRAPHICS
 	graphics = Graphics(this);
@@ -618,6 +636,25 @@ void LBM_Domain::allocate(Device& device) {
 			(uint)0u, subgrid_sum, subgrid_max, subgrid_count);
 	}
 
+	if(surface_ibm_enabled) {
+		surface_ibm_force = Memory<float>(
+			device, N, 3u, false, true, 0.0f);
+		surface_ibm_active_mask = Memory<uchar>(
+			device, N, 1u, false, true, (uchar)0u);
+		// Keep the optional parameter last.  In particular this follows all
+		// compile-time FORCE_FIELD/SURFACE/TEMPERATURE arguments and the
+		// runtime SUBGRID controls.
+		kernel_stream_collide.add_parameters(
+			surface_ibm_force, surface_ibm_active_mask);
+		// The force pointer is a same-size placeholder for the active-index
+		// device pointer until SurfaceIBM attaches its immutable support list.
+		kernel_update_fields.add_parameters(surface_ibm_force);
+		update_fields_surface_ibm_parameter =
+			kernel_update_fields.get_number_of_parameters();
+		kernel_update_fields.add_parameters(
+			surface_ibm_force, (ulong)0ull, (uint)0u);
+	}
+
 #ifdef PARTICLES
 	particles = Memory<float>(device, (ulong)particles_N, 3u);
 	kernel_integrate_particles = Kernel(device, (ulong)particles_N, "integrate_particles", particles, u, flags, 1.0f);
@@ -697,10 +734,41 @@ void LBM_Domain::enqueue_update_fields() { // update fields (rho, u, T) manually
 			kernel_update_fields.set_parameters(
 				update_fields_subgrid_parameter, (uint)0u);
 		}
+		if(surface_ibm_enabled) {
+			kernel_update_fields.set_ranges(get_N());
+			kernel_update_fields.set_parameters(
+				update_fields_surface_ibm_parameter+1u,
+				(ulong)0ull, (uint)0u);
+		}
 		kernel_update_fields.enqueue_run();
 		t_last_update_fields = current_t;
 	}
 #endif // UPDATE_FIELDS
+}
+
+void LBM_Domain::enqueue_surface_ibm_base_predictor(
+	Memory<ulong>& active_cells, const ulong active_count) {
+	if(!surface_ibm_enabled || active_count==0ull) return;
+	// Unlike enqueue_update_fields(), this is intentionally not elided when
+	// UPDATE_FIELDS is compiled in.  SurfaceIBM needs a base macro velocity
+	// reconstructed from the current DDFs after its own force field was reset.
+	kernel_update_fields.set_parameters(
+		4u, get_t(), fx, fy, fz, omega_x, omega_y, omega_z
+#ifdef TEMPERATURE
+		, buoyancy_gx, buoyancy_gy, buoyancy_gz
+#endif // TEMPERATURE
+	);
+	if(get_subgrid_configuration().enabled) {
+		kernel_update_fields.set_parameters(
+			update_fields_control_parameter, (uint)1u);
+		kernel_update_fields.set_parameters(
+			update_fields_subgrid_parameter, (uint)0u);
+	}
+	kernel_update_fields.set_ranges(active_count);
+	kernel_update_fields.set_parameters(
+		update_fields_surface_ibm_parameter,
+		active_cells, active_count, (uint)1u);
+	kernel_update_fields.enqueue_run();
 }
 
 void LBM_Domain::enqueue_subgrid_statistics() {
@@ -723,6 +791,12 @@ void LBM_Domain::enqueue_subgrid_statistics() {
 		update_fields_control_parameter, (uint)0u);
 	kernel_update_fields.set_parameters(
 		update_fields_subgrid_parameter, (uint)1u);
+	if(surface_ibm_enabled) {
+		kernel_update_fields.set_ranges(get_N());
+		kernel_update_fields.set_parameters(
+			update_fields_surface_ibm_parameter+1u,
+			(ulong)0ull, (uint)0u);
+	}
 	kernel_update_fields.enqueue_run();
 	subgrid_sum.enqueue_read_from_device();
 	subgrid_max.enqueue_read_from_device();
@@ -1321,6 +1395,15 @@ string LBM_Domain::device_defines() const {
 			: string(""))
 		: string("")) +
 
+	(surface_ibm_enabled
+		? "\n\t#define SURFACE_IBM" +
+		  (surface_ibm_config_.support_z_min >= 0
+			? "\n\t#define SURFACE_IBM_BOUNDED_Z"
+			  "\n\t#define def_ibm_z_min " + to_string(surface_ibm_config_.support_z_min) +
+			  "\n\t#define def_ibm_z_max " + to_string(surface_ibm_config_.support_z_max)
+			: string(""))
+		: string("")) +
+
 #ifdef PARTICLES
 	"\n\t#define PARTICLES"
 	"\n\t#define def_particles_N " + to_string(particles_N) + "ull"
@@ -1805,13 +1888,63 @@ LBM::~LBM() {
 	   graphics_session_id)
 		graphics_active_session.store(0ull, std::memory_order_release);
 #endif // GRAPHICS
+	// Runtime-owned Memory objects are linked to the domain Device objects.
+	// Release them while those devices are still alive.
+	surface_ibm_.reset();
 	info.print_finalize();
 	for(uint d=0u; d<get_D(); d++) delete lbm_domain[d];
 	delete[] lbm_domain;
 	active_lbm_instances.fetch_sub(1u, std::memory_order_acq_rel);
 }
 
+void LBM::attach_surface_ibm(
+	const vector<culbm::surface_ibm::Marker>& markers) {
+	const culbm::surface_ibm::Config config =
+		surface_ibm_config_;
+	bool storage_enabled = true;
+	for(uint d=0u; d<get_D(); ++d) {
+		storage_enabled = storage_enabled &&
+			lbm_domain[d]->surface_ibm_enabled;
+	}
+	// This must be the first rejecting operation: all ranks participate even
+	// when enabled or the attachment lifecycle differs locally.
+	culbm::surface_ibm::verify_attach_preflight(
+		config, markers, initialized || ever_initialized,
+		surface_ibm_ != nullptr, storage_enabled);
+	try {
+		surface_ibm_ =
+			std::make_unique<culbm::surface_ibm::Runtime>(
+				*this, markers, config);
+	} catch(const std::bad_alloc&) {
+		// This also covers allocation of the Runtime wrapper itself, which
+		// occurs before its constructor-level allocation guard can run.
+		if(culbm::mpi_is_distributed())
+			culbm::mpi_abort(
+				"SurfaceIBM runtime allocation failed during collective attach");
+		throw;
+	}
+}
+
+culbm::surface_ibm::Statistics LBM::surface_ibm_statistics() const {
+	return surface_ibm_ ? surface_ibm_->statistics()
+		: culbm::surface_ibm::Statistics{};
+}
+
 void LBM::sanity_checks_constructor(const vector<Device_Info>& device_infos, const uint Nx, const uint Ny, const uint Nz, const uint Dx, const uint Dy, const uint Dz, const float nu, const float fx, const float fy, const float fz, const float sigma, const float alpha, const float beta, const uint particles_N, const float particles_rho) { // sanity checks on grid resolution and extension support
+	if(culbm::surface_ibm::get_config().enabled) {
+#ifndef UPDATE_FIELDS
+		print_error("SurfaceIBM requires UPDATE_FIELDS so each forcing "
+			"iteration can reconstruct physical macro velocity.");
+#endif // UPDATE_FIELDS
+#ifndef VOLUME_FORCE
+		print_error("SurfaceIBM requires VOLUME_FORCE for Guo forcing in "
+			"stream_collide and update_fields.");
+#endif // VOLUME_FORCE
+#ifdef D2Q9
+		print_error("SurfaceIBM's Roma3 surface implementation requires a "
+			"three-dimensional lattice.");
+#endif // D2Q9
+	}
 	if((ulong)Nx*(ulong)Ny*(ulong)Nz==0ull) print_error("Grid point number is 0: "+to_string(Nx)+"x"+to_string(Ny)+"x"+to_string(Nz)+" = 0.");
 	if(Dx*Dy*Dz==0u) print_error("You specified 0 LBM grid domains ("+to_string(Dx)+"x"+to_string(Dy)+"x"+to_string(Dz)+"). There has to be at least 1 domain in every direction. Check your input in LBM constructor.");
 	const uint local_Nx=Nx/Dx+2u*(Dx>1u), local_Ny=Ny/Dy+2u*(Dy>1u), local_Nz=Nz/Dz+2u*(Dz>1u);
@@ -1914,6 +2047,9 @@ void LBM::sanity_checks_initialization() { // sanity checks during initializatio
 }
 
 void LBM::initialize() { // write all data fields to device and call kernel_initialize
+	if(get_D()>0u && lbm_domain[0]->surface_ibm_enabled && !surface_ibm_)
+		print_error("SurfaceIBM is enabled, but no marker set was attached "
+			"before LBM initialization.");
 #ifndef BENCHMARK
 	sanity_checks_initialization();
 #endif // BENCHMARK
@@ -1964,6 +2100,7 @@ void LBM::do_time_step() { // call kernel_stream_collide to perform one LBM time
 	for(uint d=0u; d<get_D(); d++)
 		lbm_domain[d]->enqueue_update_temperature_outlet();
 #endif // TEMPERATURE
+	if(surface_ibm_) surface_ibm_->prepare_step();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->enqueue_stream_collide(); // run LBM stream_collide kernel after domain communication
 #ifdef SURFACE
 	communicate_rho_u_flags(); // rho/u/flags halo data is required for SURFACE extension

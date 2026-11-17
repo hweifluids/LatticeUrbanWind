@@ -322,6 +322,12 @@ Guo/温度/边界实现；在 `tau+`、`tau_T` 都逼近 0.5 的 GEA 长时算�
 
 ### CULBM CUDA 高度嵌套网格
 
+嵌套 SurfaceIBM 对每层裁剪 STL 表面积分片，使用本层格距、时间步和归一化物理行支撑。
+单卡与同一 CUDA primary context 内的相邻层可在设备上完成双向面交换。
+`CULBM.NestedSurfaceIBMGPU` 检查跨两个接口的斜向建筑面积、虚拟行零力、
+欧拉力与壁面反力。双卡可运行 `CULBM-nested-surface-ibm-test --dual`。
+平地使用压缩固体行的半格反弹，固体定温壁继续沿用热边界处理。
+
 `cuda_vertical_nesting_agl` 只由 CULBM 解析，值是压缩单层地基顶面的固定水平 SI
 高度（m），不是随 DEM 变化的 local AGL：`[h]` 表示地面至 `h` 使用粗尺度的 1/2；
 `[h0,h1]` 表示依次使用 1/4、1/2、1 倍粗尺度。计划必须分别满足每层 SI 厚度整格、

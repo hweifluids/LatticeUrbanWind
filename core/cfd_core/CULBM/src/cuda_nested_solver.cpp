@@ -2,6 +2,7 @@
 
 #include "cuda_nested_interface.hpp"
 #include "lbm.hpp"
+#include "surface_ibm_geometry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -156,6 +157,48 @@ struct CommonFinestRasterLayout {
         -std::numeric_limits<float>::max();
     std::unique_ptr<Mesh> mesh;
 };
+
+bool make_nested_surface_markers(const Mesh& source,
+                                const VerticalNestingLevelPlan& level,
+                                const surface_ibm::Config& config,
+                                std::vector<surface_ibm::Marker>& markers,
+                                std::string& error) {
+    const float ratio = (float)level.ratio_to_coarse;
+    const auto transform = [&](const float3& point) {
+        return float3((point.x+0.5f)*ratio-0.5f,
+                      (point.y+0.5f)*ratio-0.5f,
+                      (point.z-0.5f)*ratio + (float)level.physical_first_z()-0.5f -
+                          (float)(level.z_begin_agl_si/level.dx_si));
+    };
+    Mesh mesh(source.triangle_number, transform(source.center));
+    for(uint32_t triangle=0u; triangle<source.triangle_number; ++triangle) {
+        mesh.p0[triangle] = transform(source.p0[triangle]);
+        mesh.p1[triangle] = transform(source.p1[triangle]);
+        mesh.p2[triangle] = transform(source.p2[triangle]);
+    }
+    mesh.find_bounds();
+    surface_ibm::GeometrySlab slab;
+    slab.lower_z_lu = (double)level.physical_first_z()-0.5;
+    slab.upper_z_lu = (double)level.physical_end_z()-0.5;
+    slab.include_lower_plane = level.z_begin_agl_si > 0.0;
+    surface_ibm::GeometryReport report;
+    if(!surface_ibm::build_surface_ibm_geometry(
+            mesh, config, markers, report, error, &slab)) return false;
+    // Preserve global x/y boundary ownership. Vertical clipping is handled
+    // by the normalized physical-slab specialization, including wall feet.
+    const auto fits = [](const float p, const uint32_t n) {
+        const int center = (int)std::floor((double)p+0.5);
+        return center >= 2 && center <= (int)n-3;
+    };
+    markers.erase(std::remove_if(markers.begin(), markers.end(),
+        [&](const surface_ibm::Marker& marker) {
+            const float3 surface = marker.position_lu + config.retraction_lu*marker.normal;
+            return !fits(marker.position_lu.x, level.nx) ||
+                   !fits(marker.position_lu.y, level.ny) ||
+                   !fits(surface.x, level.nx) || !fits(surface.y, level.ny);
+        }), markers.end());
+    return true;
+}
 
 bool make_common_finest_raster_layout(
     const VerticalNestingPlan& plan,
@@ -764,6 +807,10 @@ std::uint64_t nested_full_height_raster_vram_required_mb_per_device(
         static_cast<std::uint32_t>(rows_real),
         domains_z, rounded_ok);
     if (!rounded_ok || nz == 0u) return invalid;
+    // The temporary voxelization lattice never allocates IBM force fields.
+    auto raster_ibm = surface_ibm::get_config();
+    raster_ibm.enabled = false;
+    const surface_ibm::ScopedConfig geometry_scope(raster_ibm);
     return vram_required_mb_per_device(
         nx, ny, nz, domains_x, domains_y, domains_z);
 }
@@ -915,6 +962,10 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
     const std::uint64_t hierarchy_total_mb =
         hierarchy_core_mb +
         physics.additional_gpu_memory_per_device_mb;
+    const surface_ibm::Config original_ibm = surface_ibm::get_config();
+    surface_ibm::Config raster_ibm = original_ibm;
+    raster_ibm.enabled = false;
+    const surface_ibm::ScopedConfig geometry_scope(raster_ibm);
     const std::uint64_t raster_core_mb =
         vram_required_mb_per_device(
             raster_layout.nx, raster_layout.ny, raster_layout.nz,
@@ -941,6 +992,8 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
 
     std::vector<std::vector<unsigned char>> physical_masks;
     NestedGeometrySummary geometry;
+    // Geometry-only rasters never run IBM. Do not allocate its force and
+    // active-mask fields for this temporary common-finest lattice.
     if (!make_common_finest_masks(plan, raster_layout,
                                   domains_x, domains_y, domains_z,
                                   physics, physical_masks, geometry, error,
@@ -960,7 +1013,21 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
     const int saved_buffer_n_cells = buffer_n_cells;
     const float saved_buffer_inv_tau_lbmu = buffer_inv_tau_lbmu;
     const bool saved_top_sponge_active = top_sponge_active;
+    struct RestoreLayerControls {
+        bool buffer_active;
+        int buffer_cells;
+        float buffer_rate;
+        bool sponge_active;
+        ~RestoreLayerControls() {
+            buffer_nudging_active = buffer_active;
+            buffer_n_cells = buffer_cells;
+            buffer_inv_tau_lbmu = buffer_rate;
+            top_sponge_active = sponge_active;
+        }
+    } restore_controls{saved_buffer_nudging_active, saved_buffer_n_cells,
+                       saved_buffer_inv_tau_lbmu, saved_top_sponge_active};
     // Reverse compact-ground -> sky planning order into scheduler order.
+    std::uint64_t total_markers = 0;
     for (std::size_t reverse = plan.levels.size(); reverse > 0u; --reverse) {
         const std::size_t plan_index = reverse - 1u;
         const VerticalNestingLevelPlan& level_plan = plan.levels[plan_index];
@@ -976,6 +1043,27 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
         // ghost must not be mistaken for an outer sponge boundary.
         const bool is_coarsest_sky_level = plan_index + 1u == plan.levels.size();
         top_sponge_active = saved_top_sponge_active && is_coarsest_sky_level;
+        std::vector<surface_ibm::Marker> markers;
+        auto level_ibm = original_ibm;
+        if(level_ibm.enabled) {
+            level_ibm.support_z_min = (int)level_plan.physical_first_z();
+            level_ibm.support_z_max = (int)level_plan.physical_end_z()-1;
+            if(!make_nested_surface_markers(transformed_mesh, level_plan,
+                                             level_ibm, markers, error)) {
+                out = NestedVerticalLbm{};
+                return false;
+            }
+            // A sky layer without immersed surfaces keeps the ordinary LBM
+            // allocation and kernels, with no empty IBM runtime to update.
+            level_ibm.enabled = !markers.empty();
+            if (markers.size() > original_ibm.max_markers - total_markers) {
+                error = "nested SurfaceIBM exceeds the marker budget across all slabs";
+                out = NestedVerticalLbm{};
+                return false;
+            }
+            total_markers += markers.size();
+        }
+        const surface_ibm::ScopedConfig level_scope(level_ibm);
         std::unique_ptr<LBM> level_lbm = std::make_unique<LBM>(
             uint3(level_plan.nx, level_plan.ny, level_plan.allocated_nz),
             domains_x, domains_y, domains_z,
@@ -1003,17 +1091,29 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
                                  is_finest_ground_level,
                                  is_coarsest_sky_level,
                                  *level_lbm);
+        if(level_ibm.enabled) {
+            try {
+                level_lbm->attach_surface_ibm(markers);
+            } catch(const std::exception& exception) {
+                error = "nested " + level_plan.label + " SurfaceIBM: " + exception.what();
+                out = NestedVerticalLbm{};
+                return false;
+            }
+        }
 
         NestedOwnedLbmLevel owned;
         owned.plan = level_plan;
         owned.plan_level_index = static_cast<uint32_t>(plan_index);
+        for(const auto& marker : markers)
+            owned.surface_ibm_area_si += marker.area_lu2 * level_plan.dx_si * level_plan.dx_si;
         owned.lbm = std::move(level_lbm);
         out.levels.push_back(std::move(owned));
     }
-    buffer_nudging_active = saved_buffer_nudging_active;
-    buffer_n_cells = saved_buffer_n_cells;
-    buffer_inv_tau_lbmu = saved_buffer_inv_tau_lbmu;
-    top_sponge_active = saved_top_sponge_active;
+    if (original_ibm.enabled && total_markers == 0) {
+        error = "nested SurfaceIBM has no eligible immersed surfaces above the compact ground";
+        out = NestedVerticalLbm{};
+        return false;
+    }
     return out.valid();
 }
 

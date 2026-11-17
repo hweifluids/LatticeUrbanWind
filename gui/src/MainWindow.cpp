@@ -2765,6 +2765,19 @@ QVector<MainWindow::TreeNodeInfo> MainWindow::buildTreeNodes() const {
     if (boolEnabled("downstream_open_face")) {
         pushNode("bc_downstream_open", "Downstream open", "Downstream open is currently controlled by its parent switch.", "cfd_boundary_conditions");
     }
+    if (boolEnabled("ibm_enabler")) {
+        pushNode(
+            "bc_surface_ibm",
+            "Surface immersed boundary",
+            "Direct-forcing momentum SurfaceIBM settings for improved curved/oblique wall representation. The voxel solid core remains; outer-shell and solid-temperature walls retain explicit limitations.",
+            "cfd_boundary_conditions",
+            {"culbm_surface_ibm_delta_kernel", "culbm_surface_ibm_geometry_policy",
+             "culbm_surface_ibm_marker_spacing_lu", "culbm_surface_ibm_forcing_iterations",
+             "culbm_surface_ibm_relaxation", "culbm_surface_ibm_residual_tolerance",
+             "culbm_surface_ibm_retraction_lu", "culbm_surface_ibm_support_thickness_lu",
+             "culbm_surface_ibm_max_markers", "culbm_surface_ibm_strict_geometry",
+             "culbm_surface_ibm_diagnostics_interval"});
+    }
     if (boolEnabled("enable_buffer_nudging")) {
         pushNode("bc_buffer_nudging", "Buffer nudging", "Detailed buffer-nudging settings.", "cfd_boundary_conditions",
                  {"buffer_nudge_vertical", "buffer_thickness_m", "buffer_tau_s"});
@@ -5535,6 +5548,17 @@ QString MainWindow::buildSkeletonText(RunMode mode, const QString& caseName) con
     lines << "";
     lines << "// Physics";
     lines << "ibm_enabler = false";
+    lines << "culbm_surface_ibm_delta_kernel = roma3_point";
+    lines << "culbm_surface_ibm_geometry_policy = exterior_union";
+    lines << "culbm_surface_ibm_marker_spacing_lu = 0.75";
+    lines << "culbm_surface_ibm_forcing_iterations = 8";
+    lines << "culbm_surface_ibm_relaxation = 1.0";
+    lines << "culbm_surface_ibm_residual_tolerance = 0.001";
+    lines << "culbm_surface_ibm_retraction_lu = 0.5";
+    lines << "culbm_surface_ibm_support_thickness_lu = 0.75";
+    lines << "culbm_surface_ibm_max_markers = 5000000";
+    lines << "culbm_surface_ibm_strict_geometry = false";
+    lines << "culbm_surface_ibm_diagnostics_interval = 0";
     lines << "enable_buffer_nudging = 1";
     lines << "buffer_thickness_m = 160.000000";
     lines << "buffer_tau_s = 300.000000";

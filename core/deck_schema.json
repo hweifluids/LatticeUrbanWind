@@ -540,10 +540,89 @@
     },
     {
       "key": "ibm_enabler",
-      "label": "Immersed boundary",
+      "label": "SurfaceIBM",
       "section": "physics",
-      "help": "Enable immersed-boundary handling.",
+      "help": "Enable the optional direct-forcing momentum SurfaceIBM for interior curved/oblique walls. False preserves the voxel-wall path; global-shell and solid-temperature walls are not converted.",
       "kind": "boolean"
+    },
+    {
+      "key": "culbm_surface_ibm_delta_kernel",
+      "label": "SurfaceIBM delta kernel",
+      "section": "physics",
+      "help": "Regularized delta stencil used for Eulerian/Lagrangian interpolation and force spreading.",
+      "kind": "enum",
+      "enum_values": ["roma3_point"]
+    },
+    {
+      "key": "culbm_surface_ibm_geometry_policy",
+      "label": "SurfaceIBM geometry policy",
+      "section": "physics",
+      "help": "exterior_union requires watertight manifold components and uses marker-patch sampling to filter duplicate/internal surfaces; all_triangles retains every unique valid triangle only for intentional open-sheet or diagnostic cases.",
+      "kind": "enum",
+      "enum_values": ["exterior_union", "all_triangles"]
+    },
+    {
+      "key": "culbm_surface_ibm_marker_spacing_lu",
+      "label": "SurfaceIBM marker spacing (lu)",
+      "section": "physics",
+      "help": "Positive target Lagrangian marker spacing in lattice units.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_surface_ibm_forcing_iterations",
+      "label": "SurfaceIBM forcing iterations",
+      "section": "physics",
+      "help": "Maximum coupling-normalized multi-direct-forcing corrections per LBM step; supported range is 1 to 32 and convergence may stop earlier.",
+      "kind": "integer"
+    },
+    {
+      "key": "culbm_surface_ibm_relaxation",
+      "label": "SurfaceIBM relaxation",
+      "section": "physics",
+      "help": "Finite relaxation applied to each direct-forcing correction; must be greater than 0 and strictly less than 2.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_surface_ibm_residual_tolerance",
+      "label": "SurfaceIBM residual tolerance",
+      "section": "physics",
+      "help": "Absolute marker-slip tolerance in lattice velocity units used for early convergence; an exhausted iteration limit is reported explicitly.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_surface_ibm_retraction_lu",
+      "label": "SurfaceIBM marker retraction (lu)",
+      "section": "physics",
+      "help": "Non-negative solid-side normal retraction in lattice units. The validated Roma3 surface-wall profile uses 0.5 lu to register the hydrodynamic wall with the input surface.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_surface_ibm_support_thickness_lu",
+      "label": "SurfaceIBM effective thickness (lu)",
+      "section": "physics",
+      "help": "Positive effective surface-quadrature thickness used in marker volume/force weighting. If omitted, it follows marker spacing.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_surface_ibm_max_markers",
+      "label": "SurfaceIBM maximum markers",
+      "section": "physics",
+      "help": "Positive marker hard cap; attach also checks exact fragment buffers against live per-device free memory.",
+      "kind": "integer"
+    },
+    {
+      "key": "culbm_surface_ibm_strict_geometry",
+      "label": "SurfaceIBM strict geometry",
+      "section": "physics",
+      "help": "Reject non-finite, degenerate, same-winding duplicate, open/non-manifold, or ambiguous geometry; opposite coincident faces in an exterior union cancel.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_surface_ibm_diagnostics_interval",
+      "label": "SurfaceIBM diagnostics stride",
+      "section": "physics",
+      "help": "Report marker-slip and reaction-force diagnostics every N LBM steps; 0 disables periodic diagnostics.",
+      "kind": "integer"
     },
     {
       "key": "enable_buffer_nudging",

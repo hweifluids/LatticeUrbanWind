@@ -37,6 +37,8 @@
 #include "physical_output.hpp"
 #include "particle_advection.hpp"
 #include "particle_advection_config.hpp"
+#include "surface_ibm_config.hpp"
+#include "surface_ibm_geometry.hpp"
 extern float coriolis_f_lbmu;
 
 namespace {
@@ -3202,7 +3204,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-261116-geometry-coordinates")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-261117-surface-ibm-nesting")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -3243,6 +3245,7 @@ void main_setup() {
     double culbm_base_thermal_diffusivity_m2_s = 2.10E-5;
     uint culbm_sgs_diagnostics_interval = 0u;
     culbm::particle_advection::Config particle_advection_settings;
+    culbm::surface_ibm::Config surface_ibm_settings;
 
     // ---------------------- read *.luw / *.luwdg ------------------------------
     std::string parent; // project directory that contains the configure file
@@ -3402,6 +3405,20 @@ void main_setup() {
                 wait();
                 exit(-1);
             }
+            std::string surface_ibm_error;
+            if (!culbm::surface_ibm::parse_config(
+                    deck.values,
+                    surface_ibm_settings,
+                    surface_ibm_error)) {
+                println("| ERROR: invalid CULBM SurfaceIBM config: " +
+                        surface_ibm_error + " |");
+                wait();
+                exit(-1);
+            }
+            // Memory fitting below consults the immutable runtime snapshot, so
+            // publish SurfaceIBM immediately after strict deck validation and
+            // before any grid-size/VRAM estimate or LBM construction.
+            culbm::surface_ibm::set_config(surface_ibm_settings);
             std::string mesh_control_val, gpu_memory_val, cell_size_val;
             auto parse_bool_setting = [&](const std::string& txt, bool& out) -> bool {
                 return deck_try_parse_bool(txt, out);
@@ -4265,6 +4282,24 @@ void main_setup() {
                 ? "every " + to_string((ulong)culbm_sgs_diagnostics_interval) +
                     " step(s)"
                 : string("off")) + " |");
+    println("| SurfaceIBM      | " + alignr(57u,
+            surface_ibm_settings.enabled
+                ? string("enabled (direct forcing)")
+                : string("disabled (voxel wall path)")) + " |");
+    if (surface_ibm_settings.enabled) {
+        println("| IBM delta       | " + alignr(57u,
+                string(culbm::surface_ibm::delta_kernel_name(
+                    surface_ibm_settings.delta_kernel))) + " |");
+        println("| IBM geometry    | " + alignr(57u,
+                string(culbm::surface_ibm::geometry_policy_name(
+                    surface_ibm_settings.geometry_policy))) + " |");
+        println("| IBM spacing     | " + alignr(53u,
+                to_string(fmtf(surface_ibm_settings.marker_spacing_lu, 4))) +
+                " lu |" );
+        println("| IBM iterations  | " + alignr(57u,
+                to_string((ulong)surface_ibm_settings.forcing_iterations)) +
+                " |");
+    }
     println("| Requested nu SI | " + alignr(51u,
             to_string(fmtf((float)culbm_base_kinematic_viscosity_m2_s, 9))) +
             " m^2/s |" );
@@ -5387,6 +5422,199 @@ void main_setup() {
         print_kv_row("CUDA ground", "geometry shifted down by " + to_string((ulong)cuda_ground_geometry_shift_cells) + " lattice cells");
     }
 
+    std::vector<culbm::surface_ibm::Marker> surface_ibm_markers;
+    culbm::surface_ibm::GeometryReport surface_ibm_geometry_report;
+    std::size_t surface_ibm_dropped_external_support = 0u;
+    double surface_ibm_active_marker_area_lu2 = 0.0;
+    if (surface_ibm_settings.enabled && !cuda_vertical_nesting_plan.enabled) {
+        std::string surface_ibm_geometry_error;
+        if (!culbm::surface_ibm::build_surface_ibm_geometry(
+                *mesh,
+                surface_ibm_settings,
+                surface_ibm_markers,
+                surface_ibm_geometry_report,
+                surface_ibm_geometry_error)) {
+            println("| ERROR: SurfaceIBM marker construction failed: " +
+                    surface_ibm_geometry_error + " |");
+            wait();
+            exit(-1);
+        }
+        if (surface_ibm_markers.empty()) {
+            println("| ERROR: SurfaceIBM is enabled, but the transformed STL produced no markers.  |");
+            println("|        Check geometry policy, STL topology, and marker-spacing settings.     |");
+            wait();
+            exit(-1);
+        }
+
+        // Roma's three-point kernel needs one neighbor on either side of the
+        // nearest cell. Keep that complete support away from the global outer
+        // cell, whose existing inlet/outlet/side boundary conditions remain in
+        // charge. This also prevents double application at STL base/envelope
+        // faces that were scaled exactly onto the computational box.
+        const auto ibm_support_fits = [](const float coordinate,
+                                         const uint extent) -> bool {
+            if (!std::isfinite(coordinate) || extent < 5u) return false;
+            const long long center =
+                (long long)std::floor((double)coordinate + 0.5);
+            return center >= 2ll &&
+                   center <= (long long)extent - 3ll;
+        };
+        const auto first_dropped_marker = std::remove_if(
+            surface_ibm_markers.begin(),
+            surface_ibm_markers.end(),
+            [&](const culbm::surface_ibm::Marker& marker) {
+                // Geometry retraction moves a retained marker into the solid.
+                // Test both the original surface centroid and the retracted
+                // location so retraction cannot pull an artificial outer-box
+                // facet just far enough inward to bypass ownership filtering.
+                const float3 surface_position =
+                    marker.position_lu +
+                    surface_ibm_settings.retraction_lu * marker.normal;
+                return !ibm_support_fits(surface_position.x, lbm_N.x) ||
+                       !ibm_support_fits(surface_position.y, lbm_N.y) ||
+                       !ibm_support_fits(surface_position.z, lbm_N.z) ||
+                       !ibm_support_fits(marker.position_lu.x, lbm_N.x) ||
+                       !ibm_support_fits(marker.position_lu.y, lbm_N.y) ||
+                       !ibm_support_fits(marker.position_lu.z, lbm_N.z);
+            });
+        surface_ibm_dropped_external_support = (std::size_t)(
+            surface_ibm_markers.end() - first_dropped_marker);
+        surface_ibm_markers.erase(first_dropped_marker, surface_ibm_markers.end());
+        for (const culbm::surface_ibm::Marker& marker : surface_ibm_markers) {
+            surface_ibm_active_marker_area_lu2 += (double)marker.area_lu2;
+        }
+        if (surface_ibm_markers.empty()) {
+            println("| ERROR: SurfaceIBM has no marker with complete in-domain Roma support.       |");
+            println("|        Outer-box STL faces remain owned by the existing domain boundaries.  |");
+            println("|        Move/trim the immersed surface away from the global outer cells.      |");
+            wait();
+            exit(-1);
+        }
+
+        print_kv_row(
+            "SurfaceIBM",
+            "direct-forcing / " +
+                string(culbm::surface_ibm::delta_kernel_name(
+                    surface_ibm_settings.delta_kernel)) +
+                ", spacing=" +
+                to_string(surface_ibm_settings.marker_spacing_lu, 4u) +
+                " lu, iterations=" +
+                to_string((ulong)surface_ibm_settings.forcing_iterations));
+        print_kv_row(
+            "IBM markers",
+            "active/generated=" +
+                to_string((ulong)surface_ibm_markers.size()) + "/" +
+                to_string((ulong)surface_ibm_geometry_report.markers) +
+                ", dropped outer support=" +
+                to_string((ulong)surface_ibm_dropped_external_support));
+        print_kv_row(
+            "IBM triangles",
+            "input=" +
+                to_string((ulong)surface_ibm_geometry_report.input_triangles) +
+                ", valid=" +
+                to_string((ulong)surface_ibm_geometry_report.valid_triangles) +
+                ", retained=" +
+                to_string((ulong)surface_ibm_geometry_report.retained_triangles));
+        print_kv_row(
+            "IBM filtered",
+            "degenerate=" +
+                to_string((ulong)surface_ibm_geometry_report.degenerate_triangles) +
+                ", duplicate=" +
+                to_string((ulong)surface_ibm_geometry_report.duplicate_triangles) +
+                ", coincident union pairs=" +
+                to_string((ulong)surface_ibm_geometry_report.coincident_union_pairs) +
+                ", internal=" +
+                to_string((ulong)surface_ibm_geometry_report.internal_triangles) +
+                ", ambiguous=" +
+                to_string((ulong)surface_ibm_geometry_report.ambiguous_triangles));
+        print_kv_row(
+            "IBM patches",
+            "internal=" +
+                to_string((ulong)surface_ibm_geometry_report.internal_patches) +
+                ", ambiguous=" +
+                to_string((ulong)surface_ibm_geometry_report.ambiguous_patches));
+        print_kv_row(
+            "IBM topology",
+            "components=" +
+                to_string((ulong)surface_ibm_geometry_report.connected_components) +
+                ", watertight=" +
+                to_string((ulong)surface_ibm_geometry_report.watertight_components) +
+                ", open/nonmanifold edges=" +
+                to_string((ulong)surface_ibm_geometry_report.open_edges) + "/" +
+                to_string((ulong)surface_ibm_geometry_report.nonmanifold_edges));
+        print_kv_row(
+            "IBM area check",
+            "input/retained/generated/active=" +
+                to_string(surface_ibm_geometry_report.input_area_lu2, 6u) + "/" +
+                to_string(surface_ibm_geometry_report.retained_area_lu2, 6u) + "/" +
+                to_string(surface_ibm_geometry_report.marker_area_lu2, 6u) +
+                "/" + to_string(surface_ibm_active_marker_area_lu2, 6u) +
+                " lu^2");
+        for (const std::string& warning : surface_ibm_geometry_report.warnings) {
+            print_kv_row("IBM warning", warning);
+        }
+
+        // Portable Runtime owns position(3), interpolation partial(6), and
+        // force(3) buffers.  The single-GPU device-resident path adds wall
+        // velocity(3), volume(1), and coupling(1).  Budget the larger 17-float
+        // layout here.  Runtime repeats the check with exact fragment and
+        // active-cell counts plus live free memory at attach.
+        constexpr std::uint64_t ibm_fragment_bytes_per_marker =
+            17ull * sizeof(float);
+        const std::uint64_t marker_count =
+            (std::uint64_t)surface_ibm_markers.size();
+        if (marker_count >
+            std::numeric_limits<std::uint64_t>::max() /
+                ibm_fragment_bytes_per_marker) {
+            println("| ERROR: SurfaceIBM marker-buffer size overflow.                              |");
+            wait();
+            exit(-1);
+        }
+        const std::uint64_t marker_buffer_bytes =
+            marker_count * ibm_fragment_bytes_per_marker;
+        const std::uint64_t marker_buffer_mb =
+            marker_buffer_bytes / 1048576ull +
+            (marker_buffer_bytes % 1048576ull != 0ull ? 1ull : 0ull);
+        const std::uint64_t ibm_runtime_peak_mb =
+            saturated_add_mb(uniform_core_mb, marker_buffer_mb);
+        print_kv_row(
+            "IBM GPU budget",
+            "<= " + to_string((ulong)marker_buffer_mb) +
+                " MB marker buffers/device, runtime peak <= " +
+                to_string((ulong)ibm_runtime_peak_mb) + " MB/device");
+        if (ibm_runtime_peak_mb >
+            (std::uint64_t)gpu_memory_estimate.total_per_device_mb) {
+            gpu_memory_estimate.total_per_device_mb =
+                (uint)std::min<std::uint64_t>(
+                    ibm_runtime_peak_mb, std::numeric_limits<uint>::max());
+            gpu_memory_estimate.extra_per_device_mb =
+                ibm_runtime_peak_mb >= gpu_memory_estimate.core_per_device_mb
+                    ? (uint)std::min<std::uint64_t>(
+                        ibm_runtime_peak_mb-
+                            gpu_memory_estimate.core_per_device_mb,
+                        std::numeric_limits<uint>::max())
+                    : 0u;
+            const std::uint64_t domain_count =
+                (std::uint64_t)Dx*(std::uint64_t)Dy*(std::uint64_t)Dz;
+            const std::uint64_t project_peak_mb =
+                domain_count!=0u && ibm_runtime_peak_mb>
+                    std::numeric_limits<std::uint64_t>::max()/domain_count
+                    ? std::numeric_limits<std::uint64_t>::max()
+                    : ibm_runtime_peak_mb*domain_count;
+            gpu_memory_estimate.total_project_mb =
+                (uint)std::min<std::uint64_t>(
+                    project_peak_mb, std::numeric_limits<uint>::max());
+        }
+        if (gpu_memory_mesh_control_requested &&
+            ibm_runtime_peak_mb >
+                (std::uint64_t)usable_gpu_memory_request_mb(memory)) {
+            println("| ERROR: SurfaceIBM runtime buffers exceed the requested per-device budget.  |");
+            println("|        Reduce marker density/grid size or increase gpu_memory.              |");
+            wait();
+            exit(-1);
+        }
+    }
+
     print_kv_row("Geometry STL", stl_path);
     print_kv_row("STL bounds SI", "x=[" + to_string(stl_min_si.x, 3u) + ", " + to_string(stl_max_si.x, 3u) +
             "], y=[" + to_string(stl_min_si.y, 3u) + ", " + to_string(stl_max_si.y, 3u) +
@@ -5561,6 +5789,17 @@ void main_setup() {
                 " direct-majority physical cells");
         }
 
+        if (surface_ibm_settings.enabled) {
+            print_kv_row("Nested SurfaceIBM", "native marker spacing; half-open surface ownership; normalized physical-row support");
+            print_kv_row("Nested ground", "one compact solid row; halfway bounce-back at physical z=0");
+            for (const auto& owned : nested.levels) {
+                const auto statistics = owned.lbm->surface_ibm_statistics();
+                print_kv_row("Nested IBM layer", owned.plan.label + ": markers=" +
+                    to_string(statistics.markers) + ", active cells=" + to_string(statistics.active_cells) +
+                    ", device-resident=" + string(statistics.device_resident ? "yes" : "no"));
+            }
+        }
+
         std::vector<culbm::NestedLbmLevel> scheduler_levels =
             nested.make_scheduler_levels();
         culbm::NestedLbmScheduler scheduler(std::move(scheduler_levels));
@@ -5571,7 +5810,7 @@ void main_setup() {
                 culbm::NestedMacroPlaneBridge::exchange(upper, lower);
             });
         print_kv_row("Nested interface",
-            "strict 4-to-1 bridge with batched CUDA plane DMA");
+            "strict 4-to-1 bridge; same-device kernel or batched plane DMA");
 
         std::vector<std::unique_ptr<VonKarmanInletUpdater>> nested_vk_updaters;
         if (vk_inlet_settings.enable) {
@@ -6255,6 +6494,30 @@ void main_setup() {
                     to_string((ulong)Nx_ground * (ulong)Ny_ground) +
                     " cells, repaired=" + to_string(repaired_ground_cells) + "                 |");
         }
+        if (surface_ibm_settings.enabled && !lbm.has_surface_ibm()) {
+            try {
+                lbm.attach_surface_ibm(surface_ibm_markers);
+                const culbm::surface_ibm::Statistics statistics =
+                    lbm.surface_ibm_statistics();
+                print_kv_row(
+                    "SurfaceIBM attach",
+                    to_string((ulong)statistics.markers) +
+                        " markers, " + to_string((ulong)statistics.fragments) +
+                        " domain fragments, " +
+                        to_string((ulong)statistics.active_cells) +
+                        " active cells, cleared " +
+                        to_string((ulong)statistics.cleared_solid_cells) +
+                        " support-band solid cells, mode=" +
+                        std::string(statistics.device_resident
+                            ? "device-resident" : "portable-domain"));
+            }
+            catch (const std::exception& exception) {
+                println("| ERROR: SurfaceIBM attachment failed: " +
+                    std::string(exception.what()) + " |");
+                wait();
+                exit(-1);
+            }
+        }
         Clock case_solver_clock;
         print_section_title("LBM SOLVER INFORMATION");
 
@@ -6358,6 +6621,32 @@ void main_setup() {
                 << "step,time_s,mean_nu_t_lbm,max_nu_t_lbm,"
                    "mean_nu_t_m2_s,max_nu_t_m2_s,"
                    "mean_mu_t_pa_s,max_mu_t_pa_s,count\n";
+        }
+        std::ofstream surface_ibm_diagnostics_output;
+        bool surface_ibm_diagnostics_warned = false;
+        if (surface_ibm_settings.enabled &&
+            surface_ibm_settings.diagnostics_interval > 0u &&
+            culbm::mpi_is_root()) {
+            const std::string diagnostics_filename =
+                vtk_prefix + datetime + "_surface_ibm_diagnostics.csv";
+            const std::filesystem::path diagnostics_path =
+                std::filesystem::path(parent) / "RESULTS" /
+                diagnostics_filename;
+            std::filesystem::create_directories(diagnostics_path.parent_path());
+            surface_ibm_diagnostics_output.open(
+                diagnostics_path.string(), std::ios::out | std::ios::trunc);
+            if (!surface_ibm_diagnostics_output.is_open()) {
+                println("| ERROR: cannot create SurfaceIBM diagnostics file: " +
+                    diagnostics_path.string() + " |");
+                wait();
+                exit(-1);
+            }
+            print_kv_row("IBM diagnostics", diagnostics_path.string());
+            surface_ibm_diagnostics_output
+                << "step,time_s,markers,fragments,active_cells,device_resident,cleared_solid_cells,iterations,converged,"
+                   "nonconverged_steps,max_slip_lu,peak_max_slip_lu,rms_slip_lu,"
+                   "reaction_fx_lu,reaction_fy_lu,"
+                   "reaction_fz_lu,reaction_tx_lu,reaction_ty_lu,reaction_tz_lu\n";
         }
         auto sample_sgs_diagnostics = [&]() {
             const ulong step = lbm.get_t();
@@ -6651,6 +6940,59 @@ void main_setup() {
                 print_section_title(title);
             }
             info.print_update();
+        };
+        auto sample_surface_ibm_diagnostics = [&]() {
+            const ulong step = lbm.get_t();
+            if (!surface_ibm_settings.enabled ||
+                surface_ibm_settings.diagnostics_interval == 0u ||
+                step == 0ull ||
+                step % (ulong)surface_ibm_settings.diagnostics_interval != 0ull) {
+                return;
+            }
+            const culbm::surface_ibm::Statistics statistics =
+                lbm.surface_ibm_statistics();
+            if (!statistics.valid) {
+                if (!surface_ibm_diagnostics_warned && culbm::mpi_is_root()) {
+                    print_runtime_kv(
+                        "IBM diagnostics",
+                        "runtime did not provide valid marker-slip statistics");
+                    surface_ibm_diagnostics_warned = true;
+                }
+                return;
+            }
+            if (!culbm::mpi_is_root()) return;
+            surface_ibm_diagnostics_output << std::setprecision(12)
+                << step << ',' << (double)units.si_t(step) << ','
+                << statistics.markers << ',' << statistics.fragments << ','
+                << statistics.active_cells << ','
+                << (statistics.device_resident ? 1 : 0) << ','
+                << statistics.cleared_solid_cells << ','
+                << statistics.iterations << ',' << (statistics.converged ? 1 : 0) << ','
+                << statistics.nonconverged_steps << ','
+                << statistics.max_slip_lu << ',' << statistics.peak_max_slip_lu << ','
+                << statistics.rms_slip_lu << ','
+                << statistics.reaction_force_lu.x << ','
+                << statistics.reaction_force_lu.y << ','
+                << statistics.reaction_force_lu.z << ','
+                << statistics.reaction_torque_lu.x << ','
+                << statistics.reaction_torque_lu.y << ','
+                << statistics.reaction_torque_lu.z << '\n';
+            surface_ibm_diagnostics_output.flush();
+            print_runtime_kv(
+                "IBM slip",
+                "max/rms=" + to_string(statistics.max_slip_lu, 8u) + "/" +
+                    to_string(statistics.rms_slip_lu, 8u) +
+                    " lu, iterations=" +
+                    to_string((ulong)statistics.iterations) +
+                    ", converged=" + (statistics.converged ? string("yes") : string("no")) +
+                    ", failed steps=" +
+                    to_string((ulong)statistics.nonconverged_steps));
+            print_runtime_kv(
+                "IBM reaction",
+                "F=(" + to_string(statistics.reaction_force_lu.x, 8u) + "," +
+                    to_string(statistics.reaction_force_lu.y, 8u) + "," +
+                    to_string(statistics.reaction_force_lu.z, 8u) +
+                    ") lu");
         };
 
         auto enqueue_read_u_rho = [&]() {
@@ -7266,6 +7608,7 @@ void main_setup() {
                 }
                 lbm.run(1u, total_steps);
                 advance_particle_advection();
+                sample_surface_ibm_diagnostics();
                 maybe_write_unsteady_u();
                 process_post_step_samples();
                 probe_seconds += probe_clock.stop();
@@ -7348,6 +7691,7 @@ void main_setup() {
             }
             lbm.run(1u, total_steps);
             advance_particle_advection();
+            sample_surface_ibm_diagnostics();
             sample_sgs_diagnostics();
             maybe_write_unsteady_u();
             const bool avg_sampled = process_post_step_samples();
@@ -7407,6 +7751,8 @@ void main_setup() {
         culbm::NestedSeedState nested_seed;
         double nested_uniform_preprocess_seconds = 0.0;
         {
+        const culbm::surface_ibm::ScopedConfig seed_scope(
+            use_cuda_vertical_nesting ? culbm::surface_ibm::Config{} : surface_ibm_settings);
         LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
         lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 #ifdef TEMPERATURE
@@ -8218,6 +8564,8 @@ void main_setup() {
                 double case_total_seconds = 0.0;
                 const std::string vtk_prefix = "DG_" + format_tag(inflow_si) + "_" + format_tag(angle_deg) + "_";
                 {
+                const culbm::surface_ibm::ScopedConfig seed_scope(
+                    use_cuda_vertical_nesting ? culbm::surface_ibm::Config{} : surface_ibm_settings);
                 LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
                 lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 #ifdef TEMPERATURE
@@ -8550,6 +8898,8 @@ void main_setup() {
                 ? std::string("")
                 : ("ANG_" + format_tag(angle_deg) + "_");
             {
+            const culbm::surface_ibm::ScopedConfig seed_scope(
+                use_cuda_vertical_nesting ? culbm::surface_ibm::Config{} : surface_ibm_settings);
             LBM lbm(lbm_N, Dx, Dy, Dz, lbm_nu, 0.0f, 0.0f, 0.0f, 0.0f, lbm_alpha, lbm_beta);
             lbm.set_coriolis(coriolis_Omegax_lbmu, coriolis_Omegay_lbmu, coriolis_Omegaz_lbmu);
 #ifdef TEMPERATURE

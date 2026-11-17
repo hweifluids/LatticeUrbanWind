@@ -108,6 +108,7 @@ struct NestedOwnedLbmLevel {
     // `levels` below is stored sky -> ground for scheduler recursion.
     VerticalNestingLevelPlan plan{};
     std::uint32_t plan_level_index = 0u;
+    double surface_ibm_area_si = 0.0;
     std::unique_ptr<LBM> lbm;
 };
 

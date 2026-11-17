@@ -9,7 +9,7 @@ CULBM 是自包含的源码包，但仍是派生/改编实现；它不是独立�
 clean-room 重写。归属、来源和适用限制随包保留在 `NOTICE.md` 与
 `THIRD_PARTY_LICENSES/` 中。
 
-当前标识为 `CULBM-v3.5-260731-thermal-lattices`；其中 `v3.5` 表示随包保存的
+当前标识为 `CULBM-v3.5-261117-surface-ibm-nesting`。`v3.5` 表示随包保存的
 宿主求解器源码代际，不表示 CULBM 拥有原始宿主代码的作者身份。
 
 这里的“脱离原代码”严格指工程边界：CULBM 的配置、编译、测试和运行不读取相邻
@@ -105,14 +105,124 @@ precise 语义，以消除初始化表的编译器差异。
 - Von Karman 合成湍流入口；
 - 任意正整数 `Dx × Dy × Dz` 多卡域分解、halo 交换和网格体素化；
 - 任意正整数 `Dx × Dy × Dz` 的 MPI 一域/rank 多节点时间推进；
+- 均匀 CUDA 网格上运行时可选的固定表面直接强制 SurfaceIBM，包括确定性
+  拉格朗日 marker、Roma 三点正则化 delta、多重直接强制和反力诊断；
 - 单级均匀 CUDA 网格上的被动粒子平流，包括给定粒子、规则自动散布、
   Euler/Heun-RK2/RK4/RK6，以及单进程本地多 GPU 域间迁移；
 - 最终/非稳态 VTK、均值场和 probe CSV 输出。
 
 LUW 的 `defines.hpp` 中未启用、当前流程也不调用的宿主扩展没有纳入本次
 实现，包括自由液面、移动边界和宿主原有的颗粒-流体耦合 `PARTICLES` 扩展。
-本节所列的被动粒子平流是 CULBM 独立的单向示踪功能，不向流场施加反作用。
+本节所列的被动粒子平流是 CULBM 独立的单向示踪功能，不向流场施加反作用；
+SurfaceIBM 则是另一套专门面向连续 STL 固壁的实现，不能与这两种粒子功能混称。
 CUDA 后端只支持 NVIDIA GPU；其他厂商设备应使用其各自已部署且受支持的求解器。
+
+## 可选 SurfaceIBM 固壁
+
+`ibm_enabler` 是 SurfaceIBM 的唯一总开关，默认 `false`。关闭时不构建 marker、
+不分配 IBM 力场、不发射 IBM kernel，原有 STL 体素化、`TYPE_S` link-wise
+bounce-back 和其他边界处理保持原路径。开启时，CULBM 在 STL 已完成统一比例缩放、
+平移和可选地基层压缩偏移之后，只对这份最终连续三角网格构建一次确定性
+Lagrangian marker。当前方法是固定壁面的多重直接强制 IBM，使用 Roma 三点
+regularized-delta 在 marker 与 Eulerian 网格之间插值和展宽；attach 时先以一次单位
+marker 展宽/回插计算局部 `J·S` 耦合归一化，以减少 marker 重叠和面积权重造成的
+直接强制欠修正。三点支撑会触及全局
+最外层网格的 marker 会被明确计数并剔除；这些 STL 外壳/基底面仍由既有入口、出口、
+侧边界或地面边界负责，避免边界核缺项和双重施力。若没有剩余 marker，求解器失败退出。
+因此，开启 ground compaction 时贴近全局 `z=0` 外壳的最低地表带仍走既有 voxel wall；
+当前实现不宣称该外壳带具备 IBM 曲面精度。要让最低地表也使用对称 Roma3 支撑，后续
+需要增加外侧 ghost/support 层或单独验证的一侧 delta stencil。
+
+SurfaceIBM 是可选增强而不是对现有边界代码的删除或全局替换。GPU ray/triangle
+voxelization 仍先生成内部 solid-core mask；attach 阶段只清除 marker delta 支撑带中
+会阻断强制力的 `TYPE_S` 位，深层固体继续保持封闭。这样既保留现有射线体素化的
+内外分类能力，也避免同一表面同时受到 voxel bounce-back 与 IBM 双重壁力。
+`exterior_union` 几何策略会报告并过滤退化、重复和被判定为内部的三角形；它要求
+参与 union 的连通分量为闭合流形，并以 BVH 与三方向奇偶射线执行 union 内外判定及
+外法向校正。开放边或非流形边会明确拒绝，而不会保留可能位于建筑—地形接触缝内的
+marker 后再清除其固体支撑带。确有意模拟开放浸没薄片时必须显式选择
+`all_triangles`，并自行保证输入绕序与物理语义。
+`strict_geometry=true` 会拒绝非有限、退化、同向精确重复三角形、开放边、非流形边及
+歧义外表面判定；`exterior_union` 中代表接触实体内部共面的反向重合三角形对会先相消。
+非严格模式会折叠并报告其余精确重复面。当前 union 是按 marker 子片质心判定，交线
+附近误差应随 `marker_spacing_lu` 收敛，但不是连续三角形布尔裁切。启动日志会给出三角形过滤、
+拓扑、marker 数量及输入/保留/marker 面积统计。开启后若没有生成任何 marker，
+求解器会明确终止，不会静默回落到体素壁面。
+
+均匀网格的单 GPU、本地多 GPU 与一域/rank MPI 路径均使用同一 marker 集和同一
+力守恒语义。多域实现按 marker 支撑片段分派工作，并对跨分区的 Eulerian IBM 力做
+加和，不把它当成普通覆盖式 halo。全局反力/力矩诊断只计算每个 marker 一次。
+MPI attach 会先逐字段核对所有 rank 的完整 IBM 配置与确定性 marker 签名，再集体
+预检并确认各 rank 的 fragment 缓冲分配；配置分歧或局部资源不足会由所有 rank 在
+进入迭代归约前一致失败，避免 collective 次序分叉。
+SurfaceIBM 可与 `cuda_vertical_nesting_agl` 一起运行。例如，`cell_size=2.5`
+和 `cuda_vertical_nesting_agl=[5,10]` 对应 0–5 m 的 0.625 m、5–10 m 的 1.25 m、
+10 m 以上的 2.5 m。每个高度层按本层格距对原 STL 外表面做积分。
+内部交界面采用下闭上开的面积归属，水平面只计一次。靠近层界的 Roma3 权重在
+本层物理格点上归一化，插值与力分配共用同一组权重。这能保持常速度插值和合力，
+交界处的一阶空间矩仍可能偏移。接口虚拟行由四槽平均和常量复制规则更新。
+平坦地面保留一层固体和半格反弹。没有浸没表面的高度层使用普通 LBM 内核。
+单卡在 GPU 内直接进行双向交换，多卡使用分区面传输。
+本节实现仅对动量无滑移条件施加 IBM；若 marker
+支撑带与 `TYPE_S|TYPE_T` 固体温度壁重叠，attach 会在修改 flag 前明确拒绝，避免把原
+link-wise 热壁静默变成流体定温带。需要热壁时应暂用原 voxel wall，直至实现独立 thermal IBM。
+
+推荐起始配置如下；表中默认值与运行时 `Config` 一致：
+
+```text
+ibm_enabler = false
+culbm_surface_ibm_delta_kernel = roma3_point
+culbm_surface_ibm_geometry_policy = exterior_union
+culbm_surface_ibm_marker_spacing_lu = 0.75
+culbm_surface_ibm_forcing_iterations = 8
+culbm_surface_ibm_relaxation = 1.0
+culbm_surface_ibm_residual_tolerance = 0.001
+culbm_surface_ibm_retraction_lu = 0.5
+culbm_surface_ibm_support_thickness_lu = 0.75
+culbm_surface_ibm_max_markers = 5000000
+culbm_surface_ibm_strict_geometry = false
+culbm_surface_ibm_diagnostics_interval = 0
+```
+
+| 键 | 缺省值 | 含义 |
+|---|---:|---|
+| `ibm_enabler` | `false` | 唯一总开关；关闭时保持既有 voxel 固壁路径。 |
+| `culbm_surface_ibm_delta_kernel` | `roma3_point` | 三点正则化 delta；当前唯一受支持 stencil。 |
+| `culbm_surface_ibm_geometry_policy` | `exterior_union` | 对闭合流形以子片质心采样执行外表面 union 过滤；开放/非流形输入会拒绝。`all_triangles` 保留全部不重复有效三角形，只用于有意的开放薄片或诊断。 |
+| `culbm_surface_ibm_marker_spacing_lu` | `0.75` | marker 目标间距，单位为 lattice unit，必须为正有限值。 |
+| `culbm_surface_ibm_forcing_iterations` | `8` | 每个 LBM 步的最大耦合归一化直接强制修正次数，范围为 1–32；达到残差阈值会提前结束。 |
+| `culbm_surface_ibm_relaxation` | `1.0` | 每次强制修正的有限松弛系数，范围为 (0, 2)；端点 2 会形成不衰减的二周期残差，因而明确拒绝。 |
+| `culbm_surface_ibm_residual_tolerance` | `0.001` | marker 绝对 slip 收敛阈值，单位为 lattice velocity，范围为 (0, 1]；达到后提前结束，否则在迭代上限给出一次明确警告，并把 `converged=false`、累计失败步数与历史峰值写入诊断。 |
+| `culbm_surface_ibm_retraction_lu` | `0.5` | 沿固体侧法向的非负 marker 退缩距离。Roma3 曲/斜壁验证档使用 `0.5 lu`，用于将正则化核的水动力壁面配准到输入表面；`0` 仅用于专门对照。 |
+| `culbm_surface_ibm_support_thickness_lu` | `0.75` | 表面求积的有效厚度，用于 `marker area × thickness` 的体积/力权重；未显式写入时跟随 marker spacing。 |
+| `culbm_surface_ibm_max_markers` | `5000000` | marker 数硬上限；运行时还会按每卡 fragment 缓冲做可用显存/保留量检查。 |
+| `culbm_surface_ibm_strict_geometry` | `false` | 开启后拒绝非有限/退化/同向精确重复三角形、开放/非流形边及歧义外表面判定；外部 union 的反向共面内部面成对相消。 |
+| `culbm_surface_ibm_diagnostics_interval` | `0` | 每 N 步在控制台报告 slip/反力，并写入 `RESULTS/*_surface_ibm_diagnostics.csv`；零关闭周期诊断。 |
+
+IBM 提高的是连续曲面/斜面的几何与无滑移表达能力，不是免费性能优化。开启后每卡
+增加一个 FP32 三分量 Eulerian IBM 力场和 1 byte/cell 活动掩码。portable 多域路径使用
+12 个 FP32/fragment；单 GPU 设备驻留路径另有 wall velocity(3)、volume(1) 和
+coupling(1)，合计 17 个 FP32/marker。每个唯一活动单元还需要 1 个 64-bit 索引和
+3 个 FP32 累计力（20 byte）。attach 会按精确 fragment/active-cell 数检查实时可用显存。
+
+单 GPU 时间推进不扫描全域来重置、预测或回写 IBM 力：attach 一次构建唯一活动单元表，
+每步仅对该表重建基础宏观速度并应用力增量。多重直接强制循环、收敛控制和累计反力都
+留在同一 CUDA stream；每个 64-thread block 先归约 marker 指标，再对少量标量做原子
+更新，每个 LBM 步只回读固定大小的 metrics/reaction/control 并同步一次。Roma 三点核的
+同一轴三个权重复用一个根式。stream/collide 对所有格点只多读 1 byte 活动掩码，非活动
+格点不读取三分量 IBM 力。多 GPU/MPI 为保持跨分区加和正确性，仍使用 fragment 主机/MPI
+归约；它同样采用稀疏活动单元 reset/apply，但会有每轮设备—主机和 collective 开销。
+单 GPU attach 完成后还会释放仅用于初始化/portable 回退的 marker 与 active-cell 主机镜像，
+只保留每步需要回读的固定大小诊断/控制缓冲。
+
+可用专项可执行文件复现开/关对照（该模式不注册为默认长时 CTest）：
+
+```powershell
+CULBM-surface-ibm-gpu-test.exe --benchmark-off 100 8
+CULBM-surface-ibm-gpu-test.exe --benchmark-on 100 8
+```
+
+`--benchmark-on` 将残差容差设为 `1e-8`，便于复现指定强制迭代数下的耗时。
 
 ## 构建
 
@@ -694,6 +804,10 @@ CTest 的 `CULBM.DomainTopology` 会穷举 `Dx/Dy/Dz = 1..6`，检查最多
 发现 MPI 时还会运行 `CULBM.MPIRuntime`，用两个真实 MPI rank 检查
 节点内 rank、分块 gather、双向 send/recv、全局归约、simulation/graphics
 同 tag 不同长度的并发传输，以及运行/绘图/session 控制 collective。
+SurfaceIBM 专项回归包括配置、旋转平面/闭合与重叠几何、单 GPU 斜面无滑移与
+闭合球面/深层 voxel solid-core 保留、
+本地双 GPU 跨分区一致性；发现 MPI 时还注册 `CULBM.SurfaceIBMMPIGPU`，以两个
+真实 rank 检查配置一致性门禁、marker 归约、跨 rank fragment 和最终滑移/反力。
 
 `CULBM.TemperatureAnalyticGPU` 直接调用生产 LBM 和生产 NVRTC kernel，对
 D3Q7/D3Q19 分别检查周期 Fourier 扩散与平流、定温/绝热固壁、独立重力浮力、

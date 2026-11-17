@@ -5,6 +5,9 @@
 #include "graphics.hpp"
 #include "units.hpp"
 #include "info.hpp"
+#include "../surface_ibm.hpp"
+
+#include <memory>
 
 extern float coriolis_f_lbmu;
 extern float3 vtk_origin_shift; // VTK origin shift in SI units for field outputs
@@ -110,6 +113,7 @@ enum enum_transfer_field {
 class LBM_Domain {
 private:
 	friend class LBM;
+	friend class culbm::surface_ibm::Runtime;
 	uint Nx=1u, Ny=1u, Nz=1u; // (local) lattice dimensions
 	uint Dx=1u, Dy=1u, Dz=1u; // lattice domains
 	int Ox=0, Oy=0, Oz=0; // lattice domain offset
@@ -133,9 +137,18 @@ private:
 	Kernel kernel_update_fields; // reads DDFs and updates (rho, u, T) in device memory
 	uint update_fields_control_parameter = 0u;
 	uint update_fields_subgrid_parameter = 0u;
+	uint update_fields_surface_ibm_parameter = 0u;
 	Memory<double> subgrid_sum;
 	Memory<float> subgrid_max;
 	Memory<ulong> subgrid_count;
+	// Allocated only when the runtime SurfaceIBM option was enabled before
+	// domain construction.  It is deliberately independent from FORCE_FIELD:
+	// the latter stores hydrodynamic reaction diagnostics and must not be
+	// overwritten by Eulerian IBM forcing.
+	bool surface_ibm_enabled = false;
+	culbm::surface_ibm::Config surface_ibm_config_ = culbm::surface_ibm::get_config();
+	Memory<float> surface_ibm_force;
+	Memory<uchar> surface_ibm_active_mask;
 #ifdef TEMPERATURE
 	Kernel kernel_update_temperature_outlet; // first-order zero-normal-gradient scalar outlet
 	Kernel kernel_update_free_slip_boundaries; // mirror macro fields on validation-only free-slip outer walls
@@ -265,6 +278,12 @@ public:
 	void enqueue_update_free_slip_boundaries(const uint face_mask); // mirror outer-wall macro fields from adjacent interior cells
 	void enqueue_stream_collide(); // call kernel_stream_collide to perform one LBM time step
 	void enqueue_update_fields(); // update fields (rho, u, T) manually
+	void enqueue_surface_ibm_base_predictor(
+		Memory<ulong>& active_cells, const ulong active_count); // reconstruct only IBM support cells before forcing iterations
+	Memory<float>& get_surface_ibm_force() { return surface_ibm_force; }
+	Memory<uchar>& get_surface_ibm_active_mask() {
+		return surface_ibm_active_mask;
+	}
 	void enqueue_subgrid_statistics();
 	Subgrid_Statistics read_subgrid_statistics();
 	bool enable_device_statistics(
@@ -435,12 +454,15 @@ public:
 
 class LBM {
 private:
+	friend class culbm::surface_ibm::Runtime;
 	uint Nx=1u, Ny=1u, Nz=1u; // (global) lattice dimensions
 	uint Dx=1u, Dy=1u, Dz=1u; // lattice domains
 	uint local_D=1u, global_domain_id=0u; // process-local domains and MPI-owned global domain
 	bool distributed_mode = false; // immutable after construction; avoids MPI checks in per-cell host access
 	bool initialized = false; // becomes true after LBM::initialize() has been called
 	bool ever_initialized = false; // reset() may request a reinitialize, but immutable runtime topology must stay locked
+	std::unique_ptr<culbm::surface_ibm::Runtime> surface_ibm_;
+	culbm::surface_ibm::Config surface_ibm_config_ = culbm::surface_ibm::get_config();
 #ifdef GRAPHICS
 	std::uint64_t graphics_session_id = 0ull;
 #endif // GRAPHICS
@@ -742,6 +764,13 @@ public:
 	}
 #endif // GRAPHICS
 	void update_fields(); // update fields (rho, u, T) manually
+	// Optional static surface immersed-boundary runtime.  Attachment is a
+	// one-shot topology operation and must happen after host flags are prepared
+	// but before the first initialization/run.
+	void attach_surface_ibm(
+		const vector<culbm::surface_ibm::Marker>& markers);
+	bool has_surface_ibm() const { return surface_ibm_ != nullptr; }
+	culbm::surface_ibm::Statistics surface_ibm_statistics() const;
 	// Samples the current pre-collision DDF state on the GPU without advancing
 	// time or modifying rho/u/T.  The extra full-field work occurs only here.
 	Subgrid_Statistics subgrid_statistics();

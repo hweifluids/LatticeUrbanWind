@@ -1,5 +1,6 @@
 #include "kernel.hpp"
 #include "particle_advection_kernels.hpp"
+#include "../surface_ibm_kernels.hpp"
 
 string get_cuda_kernel_source() {
     string source;
@@ -147,7 +148,68 @@ extern "C" __global__ void culbm_gather_probe_velocity(
     values[2ull * count + i] = u[2ull * (ulong)def_N + n];
 }
 
+// Both slab allocations live in the same CUDA primary context. Each thread
+// owns one coarse face and its four children. Donors and targets are disjoint
+// so both directions see exactly the same state as the host bridge.
+extern "C" __global__ void culbm_nested_face_exchange(
+    float* cr, float* cu, uchar* cf, float* ct,
+    float* fr, float* fu, uchar* ff, float* ft,
+    const uint nx, const ulong cp, const ulong fp, const ulong cn, const ulong fn,
+    const ulong cd, const ulong cg, const ulong fd, const ulong fg, uint* invalid) {
+    const ulong p = cuda_global_thread_id(0);
+    if (p >= cp) return;
+    const ulong coarse = cd * cp + p, ghost = cg * cp + p;
+    const ulong first = (p / nx) * (4ull * nx) + 2ull * (p % nx);
+    const ulong child[4] = {first, first+1ull, first+2ull*nx, first+2ull*nx+1ull};
+    unsigned mask = 0;
+    for (unsigned j=0; j<4; ++j)
+        if ((ff[fd*fp+child[j]] & TYPE_S) == 0) mask |= 1u << j;
+    if ((cf[coarse] & TYPE_S) || __popc(mask) < 3) mask = 0;
+    const uchar flags_mask = TYPE_S | TYPE_E
+#ifdef TEMPERATURE
+        | TYPE_T
+#endif
+        ;
+    const uchar open = TYPE_E
+#ifdef TEMPERATURE
+        | TYPE_T
+#endif
+        ;
+    cf[ghost] = (cf[ghost] & ~flags_mask) | (mask ? open : TYPE_S);
+    for (unsigned j=0; j<4; ++j) {
+        const ulong dest = fg*fp+child[j];
+        ff[dest] = (ff[dest] & ~flags_mask) | ((mask >> j) & 1u ? open : TYPE_S);
+    }
+    // For a closed slot the reference writes that level's adjacent donor.
+    // An open parent averages four slots, using the canonical solid for a
+    // blocked child. Double accumulation reproduces the host macro arithmetic.
+    for (int field=0; field<
+#ifdef TEMPERATURE
+        5
+#else
+        4
+#endif
+        ; ++field) {
+        float* cv = field==0 ? cr : field==4 ? ct : cu+(ulong)(field-1)*cn;
+        float* fv = field==0 ? fr : field==4 ? ft : fu+(ulong)(field-1)*fn;
+        const float parent = cv[coarse];
+        if (mask && (!isfinite(parent) || (field==0 && parent<=0.0f)))
+            atomicOr(invalid,1u);
+        double sum = 0.0;
+        for (unsigned j=0; j<4; ++j) {
+            const bool flows = ((mask >> j) & 1u)!=0u;
+            const float donor = fv[fd*fp+child[j]];
+            if (flows && (!isfinite(donor) || (field==0 && donor<=0.0f)))
+                atomicOr(invalid,1u);
+            sum += flows ? (double)donor : (field==0 || field==4 ? 1.0 : 0.0);
+            fv[fg*fp+child[j]] = flows ? parent : donor;
+        }
+        cv[ghost] = mask ? (float)(0.25 * sum) : parent;
+    }
+}
+
 )CUDA";
     source += culbm::particle_advection_cuda_source();
+    source += culbm::surface_ibm::surface_ibm_cuda_source();
     return source;
 }

@@ -112,8 +112,18 @@ set(CULBM_SOLVER_SOURCES
     "${CULBM_SOLVER_SRC}/setup.cpp"
     "${CULBM_SOLVER_SRC}/shapes.cpp")
 
+# SurfaceIBM is a runtime-selectable wall treatment.  Keep its host/runtime
+# pieces grouped so every focused target that embeds lbm.cpp/kernel.cpp links
+# the same optional implementation as the production executable.
+set(CULBM_SURFACE_IBM_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_config.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_kernels.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_geometry.cpp")
+
 set(CULBM_SOURCES
     ${CULBM_SOLVER_SOURCES}
+    ${CULBM_SURFACE_IBM_SOURCES}
     "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_config.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection.cpp"
@@ -196,6 +206,128 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(
+        CULBM-surface-ibm-config-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_surface_ibm_config.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_config.cpp")
+    target_compile_features(
+        CULBM-surface-ibm-config-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-surface-ibm-config-test PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    add_test(
+        NAME CULBM.SurfaceIBMConfig
+        COMMAND CULBM-surface-ibm-config-test)
+    set_tests_properties(
+        CULBM.SurfaceIBMConfig PROPERTIES LABELS "surface-ibm;config")
+
+    add_executable(
+        CULBM-surface-ibm-geometry-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_surface_ibm_geometry.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_config.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_geometry.cpp")
+    target_compile_features(
+        CULBM-surface-ibm-geometry-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-surface-ibm-geometry-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    add_test(
+        NAME CULBM.SurfaceIBMGeometry
+        COMMAND CULBM-surface-ibm-geometry-test)
+    set_tests_properties(
+        CULBM.SurfaceIBMGeometry PROPERTIES LABELS "surface-ibm;geometry")
+
+    set(CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
+        "${CULBM_SOLVER_SRC}/info.cpp"
+        "${CULBM_SOLVER_SRC}/kernel.cpp"
+        "${CULBM_SOLVER_SRC}/lbm.cpp"
+        "${CULBM_SOLVER_SRC}/shapes.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_mpi.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_nested_runtime.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_nested_solver.cpp")
+    set(CULBM_SURFACE_IBM_GPU_TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_surface_ibm_gpu.cpp"
+        ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+    add_executable(
+        CULBM-surface-ibm-gpu-test
+        ${CULBM_SURFACE_IBM_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-surface-ibm-gpu-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-surface-ibm-gpu-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-surface-ibm-gpu-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-surface-ibm-gpu-test PRIVATE
+        CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+    if(MPI_CXX_FOUND)
+        target_compile_definitions(
+            CULBM-surface-ibm-gpu-test PRIVATE CULBM_ENABLE_MPI=1)
+        target_link_libraries(
+            CULBM-surface-ibm-gpu-test PRIVATE MPI::MPI_CXX)
+    endif()
+    add_test(
+        NAME CULBM.SurfaceIBMGPU
+        COMMAND CULBM-surface-ibm-gpu-test)
+    add_executable(CULBM-nested-surface-ibm-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_nested_surface_ibm.cpp"
+        ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+    target_compile_features(CULBM-nested-surface-ibm-test PRIVATE cxx_std_17)
+    target_include_directories(CULBM-nested-surface-ibm-test PRIVATE
+        "${CULBM_SOLVER_SRC}" "${CMAKE_CURRENT_LIST_DIR}/src" "${CUDAToolkit_INCLUDE_DIRS}")
+    target_compile_definitions(CULBM-nested-surface-ibm-test PRIVATE CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+    target_link_libraries(CULBM-nested-surface-ibm-test PRIVATE
+        CUDA::cuda_driver CUDA::nvrtc Threads::Threads)
+    add_test(NAME CULBM.NestedSurfaceIBMGPU COMMAND CULBM-nested-surface-ibm-test)
+    set_tests_properties(CULBM.NestedSurfaceIBMGPU PROPERTIES RUN_SERIAL TRUE TIMEOUT 240)
+    add_test(
+        NAME CULBM.SurfaceIBMMultiGPU
+        COMMAND CULBM-surface-ibm-gpu-test --multi-gpu)
+    set_tests_properties(
+        CULBM.SurfaceIBMGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;surface-ibm;integration")
+    set_tests_properties(
+        CULBM.SurfaceIBMMultiGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;multi-gpu;surface-ibm;integration")
+    if(MPI_CXX_FOUND AND MPIEXEC_EXECUTABLE)
+        add_test(
+            NAME CULBM.SurfaceIBMMPIGPU
+            COMMAND
+                "${CMAKE_COMMAND}" -E env
+                "CULBM_MPI=1"
+                "${MPIEXEC_EXECUTABLE}"
+                "${MPIEXEC_NUMPROC_FLAG}" "2"
+                ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:CULBM-surface-ibm-gpu-test>
+                ${MPIEXEC_POSTFLAGS}
+                --mpi)
+        set_tests_properties(
+            CULBM.SurfaceIBMMPIGPU PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 600
+            RUN_SERIAL TRUE
+            PROCESSORS 2
+            LABELS "gpu;mpi;surface-ibm;integration")
+    endif()
+
+    add_executable(
         CULBM-particle-advection-config-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_particle_advection_config.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_config.cpp")
@@ -254,6 +386,7 @@ if(BUILD_TESTING)
     set(CULBM_SUBGRID_GPU_TEST_SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_subgrid_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -328,6 +461,7 @@ if(BUILD_TESTING)
         CULBM-temperature-analytic-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -371,6 +505,7 @@ if(BUILD_TESTING)
         CULBM-temperature-analytic-gpu-trt-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -413,6 +548,7 @@ if(BUILD_TESTING)
         CULBM-manual-fields-forcing-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -464,6 +600,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -499,6 +636,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation-sgs
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -534,6 +672,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation-trt
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
+        ${CULBM_SURFACE_IBM_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"

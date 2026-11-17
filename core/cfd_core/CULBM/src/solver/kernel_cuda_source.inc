@@ -9256,6 +9256,12 @@ float*
 T
 #endif
 
+#ifdef SURFACE_IBM
+,
+const float* F_ibm,
+const uchar* surface_ibm_active
+#endif
+
 )
 {
 const
@@ -9752,6 +9758,14 @@ F[2ull
 def_N
 +
 (ulong)n];
+}
+#endif
+
+#ifdef SURFACE_IBM
+if(surface_ibm_active[n] != (uchar)0u) {
+    fxn += F_ibm[n];
+    fyn += F_ibm[def_N+(ulong)n];
+    fzn += F_ibm[2ull*def_N+(ulong)n];
 }
 #endif
 
@@ -11075,13 +11089,26 @@ float* subgrid_max,
 ulong* subgrid_count
 #endif
 
+#ifdef SURFACE_IBM
+,
+const float* F_ibm,
+const ulong* surface_ibm_active_cells,
+const ulong surface_ibm_active_count,
+const uint surface_ibm_indexed_mode
+#endif
+
 )
 {
-const
-uxx
-n
-=
-cuda_global_thread_id(0);
+const uxx surface_ibm_work_item=cuda_global_thread_id(0);
+#ifdef SURFACE_IBM
+const uxx n=surface_ibm_indexed_mode!=0u
+    ? (surface_ibm_work_item<(uxx)surface_ibm_active_count
+        ? (uxx)surface_ibm_active_cells[surface_ibm_work_item]
+        : (uxx)def_N)
+    : surface_ibm_work_item;
+#else
+const uxx n=surface_ibm_work_item;
+#endif
 #ifdef SUBGRID
 float sampled_nu_t=0.0f,
 sampled_rho_nu_t=0.0f;
@@ -11358,6 +11385,12 @@ fzn
 +=
 F[2ull*def_N+(ulong)n];
 }
+#endif
+
+#ifdef SURFACE_IBM
+fxn += F_ibm[n];
+fyn += F_ibm[def_N+(ulong)n];
+fzn += F_ibm[2ull*def_N+(ulong)n];
 #endif
 
 #ifdef TEMPERATURE

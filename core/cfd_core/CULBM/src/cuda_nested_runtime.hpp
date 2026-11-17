@@ -8,12 +8,15 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 class LBM;
 
 namespace culbm {
+
+struct NestedDeviceFace;
 
 enum class NestedPlaneSide : std::uint8_t {
     Bottom,
@@ -61,6 +64,7 @@ struct NestedLbmLevel {
     std::uint32_t upper_ghost_z = 0u;
     std::uint32_t physical_first_z = 0u;
     std::uint32_t physical_end_z = 0u;
+    std::shared_ptr<NestedDeviceFace> lower_face_cache;
 };
 
 struct NestedPlaneWriteOptions {
@@ -97,6 +101,9 @@ public:
     static void exchange(NestedLbmLevel& upper,
                          NestedLbmLevel& lower,
                          NestedPlaneWriteOptions options = {});
+    static void exchange_host(NestedLbmLevel& upper,
+                              NestedLbmLevel& lower,
+                              NestedPlaneWriteOptions options = {});
 };
 
 enum class NestedExchangePhase : std::uint8_t {
