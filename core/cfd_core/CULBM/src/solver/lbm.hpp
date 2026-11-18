@@ -77,9 +77,9 @@ struct Wall_Model_Configuration {
 	// Lattice rows above upward-facing walls in which the Smagorinsky length
 	// is raised to kappa*z_w (near-wall SGS layer); 0 disables the layer.
 	uint sgs_layers = 3u;
-	// With SurfaceIBM: also wall-model the immersed surfaces (normal-only
-	// direct forcing plus an exterior log-law shear force); false keeps them
-	// no-slip and wall-models only the compacted ground row.
+	// With SurfaceIBM: also wall-model the immersed surfaces (one-sided
+	// log-law stress, voxel core kept with free-slip faces); false keeps them
+	// no-slip and wall-models only the voxel walls (ground slab, terrain).
 	bool surface_ibm = true;
 };
 
@@ -87,7 +87,7 @@ struct Wall_Model_Configuration {
 // global Units scale and the active nesting level scope.
 struct Wall_Model_Lattice {
 	bool enabled = false;
-	bool ground_only = false; // SurfaceIBM domains: compacted ground row only
+	bool ground_only = false; // SurfaceIBM domain (immersed surfaces handled by the runtime)
 	bool smooth_h = false, smooth_v = false;
 	float cd_h = 0.0f, cd_v = 0.0f; // (kappa/ln(1+d/z0))^2, d = dx/2
 	float nu_lbm = 0.0f; // molecular viscosity in lattice units
@@ -526,7 +526,6 @@ private:
 	bool initialized = false; // becomes true after LBM::initialize() has been called
 	bool ever_initialized = false; // reset() may request a reinitialize, but immutable runtime topology must stay locked
 	std::unique_ptr<culbm::surface_ibm::Runtime> surface_ibm_;
-	bool wall_model_surface_frozen_ = false; // column map built before SurfaceIBM cleared its support band
 	culbm::surface_ibm::Config surface_ibm_config_ = culbm::surface_ibm::get_config();
 #ifdef GRAPHICS
 	std::uint64_t graphics_session_id = 0ull;

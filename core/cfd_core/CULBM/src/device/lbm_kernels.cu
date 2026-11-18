@@ -2340,17 +2340,12 @@ uint wall_model_reverse(const uint i) { return i + 1u - 2u * (1u - (i & 1u)); }
 
 void apply_wall_model(const uxx n, float *fhn, const uxx *j, const uchar *flags, const float rhon, float *uxn,
                       float *uyn, float *uzn) {
-#ifdef WALL_MODEL_GROUND_ONLY
-  // Surface-IBM domains keep immersed surfaces on their own forcing; only the
-  // compacted global ground row below z_global=1 is wall-modelled.
-  if ((int)coordinates(n).z + def_Oz != 1)
-    return;
-  const uint faces = wall_model_solid(flags[j[6]]) ? 32u : 0u;
-#else
+  // With SurfaceIBM and culbm_wall_model_ibm=false the immersed surfaces keep
+  // their no-slip forcing and their cleared support band holds no voxel faces;
+  // every voxel wall (compacted ground slab, terrain) is wall-modelled here.
   const uint faces = (uint)wall_model_solid(flags[j[1]]) | (uint)wall_model_solid(flags[j[2]]) << 1 |
                      (uint)wall_model_solid(flags[j[3]]) << 2 | (uint)wall_model_solid(flags[j[4]]) << 3 |
                      (uint)wall_model_solid(flags[j[5]]) << 4 | (uint)wall_model_solid(flags[j[6]]) << 5;
-#endif
   if (faces == 0u)
     return;
   const uint pair_face[12] = {0u, 0u, 1u, 1u, 2u, 2u, 3u, 3u, 4u, 4u, 5u, 5u};

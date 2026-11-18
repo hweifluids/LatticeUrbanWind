@@ -586,7 +586,7 @@
       "key": "culbm_wall_model_ibm",
       "label": "Wall model on IBM surfaces",
       "section": "physics",
-      "help": "With ibm_enabler and culbm_wall_model: also wall-model the SurfaceIBM surfaces (default true). Bodies keep their voxel solid core with free-slip faces and the log-law stress is applied one-sided on the exterior cells from the surface normal, area and wall distance; false keeps the no-slip immersed-boundary forcing and wall-models only the compacted ground row.",
+      "help": "With ibm_enabler and culbm_wall_model: also wall-model the SurfaceIBM surfaces (default true). Bodies keep their voxel solid core with free-slip faces and the log-law stress is applied one-sided on the exterior cells from the surface normal, area and wall distance; false keeps the no-slip immersed-boundary forcing and wall-models only the voxel walls (ground slab, terrain).",
       "kind": "boolean"
     },
     {

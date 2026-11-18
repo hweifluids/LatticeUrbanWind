@@ -4353,8 +4353,8 @@ void main_setup() {
     println("| Wall model      | " + alignr(57u, wall_model_settings.enabled
             ? string(surface_ibm_settings.enabled
                 ? (wall_model_settings.surface_ibm
-                    ? "log-law wall stress (ground row and IBM surfaces)"
-                    : "log-law wall stress (ground row; IBM surfaces no-slip)")
+                    ? "log-law wall stress (voxel walls and IBM surfaces)"
+                    : "log-law wall stress (voxel walls; IBM surfaces no-slip)")
                 : "log-law wall stress on bounce-back walls")
             : string("disabled (plain no-slip bounce-back)")) + " |");
     if (wall_model_settings.enabled) {

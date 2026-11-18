@@ -635,8 +635,8 @@ LBM_Domain::LBM_Domain(const Device_Info& device_info, const uint Nx, const uint
 				(wall_model.smooth_v ? string("smooth") : to_string(wall_model.cd_v, 6u))+", SGS layer="+
 				(wall_model.sgs ? to_string((uint)wall_model.sgs_layers)+" row(s)" : string("off"))+
 				(wall_model.ground_only ? (wall_model.ibm
-					? ", SurfaceIBM surfaces and compacted ground row"
-					: ", ground row only (SurfaceIBM surfaces no-slip)") : ""));
+					? ", SurfaceIBM surfaces and voxel walls"
+					: ", voxel walls only (SurfaceIBM surfaces no-slip)") : ""));
 		}
 	}
 	string cuda_kernel_source;
@@ -1534,7 +1534,6 @@ string LBM_Domain::device_defines() const {
 		  "\n\t#define def_wm_kappa " + to_string(wall_model.kappa) + "f"
 		  "\n\t#define def_wm_log_E " + to_string(wall_model.log_E) + "f"
 		  "\n\t#define def_wm_re_laminar " + to_string(wall_model.re_laminar) + "f" +
-		  (wall_model.ground_only ? string("\n\t#define WALL_MODEL_GROUND_ONLY") : string("")) +
 		  (wall_model.sgs ? string("\n\t#define WALL_MODEL_SGS\n\t#define def_wm_sgs_layers ") + to_string(wall_model.sgs_layers) + "f" : string("")) +
 		  (wall_model.ibm
 			? string("\n\t#define WALL_MODEL_IBM") +
@@ -2062,10 +2061,6 @@ void LBM::attach_surface_ibm(
 	culbm::surface_ibm::verify_attach_preflight(
 		config, markers, initialized || ever_initialized,
 		surface_ibm_ != nullptr, storage_enabled);
-	// The near-wall SGS column map must see the voxel solid core of immersed
-	// bodies (roofs) before the runtime clears TYPE_S in its support band.
-	initialize_wall_model_surface();
-	wall_model_surface_frozen_ = true;
 	try {
 		surface_ibm_ =
 			std::make_unique<culbm::surface_ibm::Runtime>(
@@ -2214,17 +2209,18 @@ void LBM::initialize_wall_model_surface() {
 	for(uint d=0u; d<get_D(); d++) {
 		LBM_Domain& domain = *lbm_domain[d];
 		if(!domain.wall_model.sgs) continue;
-		// Wall-modelled SurfaceIBM domains scan the full solid stack (computed
-		// at attach, before the support band of immersed bodies is cleared).
-		const bool ground_only = domain.wall_model.ground_only && !domain.wall_model.ibm;
 		for(uint y=0u; y<domain.Ny; y++) {
 			for(uint x=0u; x<domain.Nx; x++) {
 				const ulong xg = (ulong)(((long long)x+domain.Ox+(long long)nxg)%(long long)nxg);
 				const ulong yg = (ulong)(((long long)y+domain.Oy+(long long)nyg)%(long long)nyg);
 				ushort surface = (ushort)0xFFFFu;
 				if(wall(xg, yg, 0ull)) {
+					// Solid stack from the bottom: compacted ground slab of any
+					// thickness, terrain or voxel roofs.  With no-slip SurfaceIBM
+					// the scan runs after the support band was cleared and stops
+					// below the skin of immersed bodies (no layer above roofs).
 					ulong z = 1ull;
-					if(!ground_only) while(z<nzg && wall(xg, yg, z)) z++;
+					while(z<nzg && wall(xg, yg, z)) z++;
 					if(z<nzg && z<0xFFFFull) surface = (ushort)z;
 				}
 				domain.wall_model_surface[(ulong)x+(ulong)y*(ulong)domain.Nx] = surface;
@@ -2245,7 +2241,7 @@ void LBM::initialize() { // write all data fields to device and call kernel_init
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->rho.enqueue_write_to_device();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->u.enqueue_write_to_device();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->flags.enqueue_write_to_device();
-	if(!wall_model_surface_frozen_) initialize_wall_model_surface();
+	initialize_wall_model_surface();
 #ifdef FORCE_FIELD
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->F.enqueue_write_to_device();
 #endif // FORCE_FIELD
