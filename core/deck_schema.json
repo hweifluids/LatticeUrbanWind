@@ -576,6 +576,41 @@
       "kind": "integer"
     },
     {
+      "key": "culbm_wall_model",
+      "label": "Wall model",
+      "section": "physics",
+      "help": "CULBM log-law wall-stress model on link-wise bounce-back walls (default true). It replaces the under-resolved no-slip shear of wall-adjacent cells by the equilibrium wall stress; false restores plain no-slip bounce-back. With SurfaceIBM only the compacted ground row is wall-modelled.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_wall_model_z0_ground_m",
+      "label": "Wall model z0 ground (m)",
+      "section": "physics",
+      "help": "Aerodynamic roughness length in SI metres for upward-facing horizontal solid faces (ground, roofs); default 0.03. 0 selects the smooth-wall log law.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_wall_model_z0_building_m",
+      "label": "Wall model z0 building (m)",
+      "section": "physics",
+      "help": "Aerodynamic roughness length in SI metres for vertical and downward-facing solid faces; default 0.01. 0 selects the smooth-wall log law.",
+      "kind": "float"
+    },
+    {
+      "key": "culbm_wall_model_sgs_layers",
+      "label": "Wall model SGS layers",
+      "section": "physics",
+      "help": "Number of lattice rows above upward-facing walls (ground, roofs) in which the Smagorinsky length is raised to kappa*z_w to remove the log-layer mismatch of the wall-modelled first rows; default 3, 0 disables. Requires culbm_sgs_enable=true.",
+      "kind": "integer"
+    },
+    {
+      "key": "culbm_wall_model_kappa",
+      "label": "Wall model von Karman constant",
+      "section": "physics",
+      "help": "von Karman constant of the wall-model log law, in (0, 1]; default 0.41.",
+      "kind": "float"
+    },
+    {
       "key": "ibm_enabler",
       "label": "SurfaceIBM",
       "section": "physics",

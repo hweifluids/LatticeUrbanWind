@@ -3206,7 +3206,7 @@ void main_setup() {
     println(hr_plain());
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "LatticeUrbanWind LUW: Towards Micrometeorology Fastest Simulation")+"|");
     println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Developed by Huanxia Wei's Team")+"|");
-    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-261117-surface-ibm-nesting")+"|");
+    println("|"+alignc((uint)CONSOLE_WIDTH-2u, "Version - CULBM-v3.5-261118-wall-model")+"|");
     println(hr_plain());
     info.print_logo();
  
@@ -3246,6 +3246,8 @@ void main_setup() {
     double culbm_base_kinematic_viscosity_m2_s = 1.48E-5;
     double culbm_base_thermal_diffusivity_m2_s = 2.10E-5;
     uint culbm_sgs_diagnostics_interval = 0u;
+    Wall_Model_Configuration wall_model_settings = get_wall_model_configuration();
+    wall_model_settings.enabled = true; // production deck default: culbm_wall_model = true
     culbm::particle_advection::Config particle_advection_settings;
     culbm::surface_ibm::Config surface_ibm_settings;
 
@@ -3547,6 +3549,47 @@ void main_setup() {
                             "culbm_sgs_scalar_coupling must be a bool-like value.");
                     }
                     culbm_sgs_scalar_coupling = parsed;
+                }
+                else if (key == "culbm_wall_model") {
+                    bool parsed = false;
+                    if (!deck_try_parse_bool(val, parsed)) {
+                        fail_culbm_setting(
+                            "culbm_wall_model must be a bool-like value.");
+                    }
+                    wall_model_settings.enabled = parsed;
+                }
+                else if (key == "culbm_wall_model_z0_ground_m" ||
+                         key == "culbm_wall_model_z0_building_m") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed < 0.0 ||
+                        !std::isfinite((float)parsed)) {
+                        fail_culbm_setting(
+                            key + " must be a finite roughness length >= 0 m (0 = smooth wall).");
+                    }
+                    if (key == "culbm_wall_model_z0_ground_m")
+                        wall_model_settings.z0_ground_m = (float)parsed;
+                    else
+                        wall_model_settings.z0_building_m = (float)parsed;
+                }
+                else if (key == "culbm_wall_model_sgs_layers") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        parsed < 0.0 || parsed > 64.0 ||
+                        std::floor(parsed) != parsed) {
+                        fail_culbm_setting(
+                            "culbm_wall_model_sgs_layers must be an integer in [0, 64].");
+                    }
+                    wall_model_settings.sgs_layers = (uint)parsed;
+                }
+                else if (key == "culbm_wall_model_kappa") {
+                    double parsed = 0.0;
+                    if (!deck_try_parse_finite_double(val, parsed) ||
+                        !(parsed > 0.0) || parsed > 1.0) {
+                        fail_culbm_setting(
+                            "culbm_wall_model_kappa must lie in (0, 1].");
+                    }
+                    wall_model_settings.kappa = (float)parsed;
                 }
                 else if (key == "culbm_sgs_turbulent_prandtl") {
                     double parsed = 0.0;
@@ -4138,6 +4181,14 @@ void main_setup() {
         wait();
         exit(-1);
     }
+    // The smooth-wall law uses the requested molecular viscosity, never the
+    // FP32 tau floor amplification applied to the collision viscosity.
+    wall_model_settings.molecular_nu_m2_s = (float)culbm_base_kinematic_viscosity_m2_s;
+    if (!set_wall_model_configuration(wall_model_settings)) {
+        println("| ERROR: wall model configuration is invalid or was changed after constructing an LBM instance. |");
+        wait();
+        exit(-1);
+    }
 
     std::vector<ProbeRequest> probe_requests;
     ProbeGeoMapping probe_geo_mapping;
@@ -4291,6 +4342,24 @@ void main_setup() {
                 ? "every " + to_string((ulong)culbm_sgs_diagnostics_interval) +
                     " step(s)"
                 : string("off")) + " |");
+    println("| Wall model      | " + alignr(57u, wall_model_settings.enabled
+            ? string(surface_ibm_settings.enabled
+                ? "log-law wall stress (ground row; IBM surfaces excluded)"
+                : "log-law wall stress on bounce-back walls")
+            : string("disabled (plain no-slip bounce-back)")) + " |");
+    if (wall_model_settings.enabled) {
+        auto z0_text = [&](const float z0) {
+            return z0 > 0.0f ? to_string(fmtf(z0, 6)) + " m" : string("smooth (z0=0)");
+        };
+        println("| WM z0 ground    | " + alignr(57u, z0_text(wall_model_settings.z0_ground_m) +
+                " (upward-facing faces)") + " |");
+        println("| WM z0 building  | " + alignr(57u, z0_text(wall_model_settings.z0_building_m) +
+                " (vertical/downward faces)") + " |");
+        println("| WM kappa        | " + alignr(57u, to_string(fmtf(wall_model_settings.kappa, 4))) + " |");
+        println("| WM SGS layer    | " + alignr(57u, wall_model_settings.sgs_layers > 0u && culbm_sgs_enabled
+                ? to_string((ulong)wall_model_settings.sgs_layers) + " row(s): Smagorinsky l=max(Cs*dx,kappa*z_w)"
+                : string("off")) + " |");
+    }
     println("| SurfaceIBM      | " + alignr(57u,
             surface_ibm_settings.enabled
                 ? string("enabled (direct forcing)")
@@ -5013,6 +5082,26 @@ void main_setup() {
         lbm_alpha = resolved.effective_alpha_lbm;
         if (show_info) {
             print_base_transport(scope, resolved);
+            if (wall_model_settings.enabled) {
+                const Wall_Model_Lattice wm = resolve_wall_model_lattice(
+                    get_wall_model_configuration(), units.si_x(1.0f), units.si_t(1ull),
+                    surface_ibm_settings.enabled);
+                const float d_m = 0.5f * wm.cell_size_m;
+                auto cd_text = [&](const bool smooth, const float cd) {
+                    return smooth ? string("smooth log law")
+                                  : "Cd=" + to_string(fmtf(cd, 6)) +
+                                    ", u*/U1=" + to_string(fmtf(std::sqrt(cd), 5));
+                };
+                print_kv_row("WM first node", "d=" + to_string(fmtf(d_m, 4)) +
+                    " m (halfway bounce-back)");
+                print_kv_row("WM ground", cd_text(wm.smooth_h, wm.cd_h));
+                print_kv_row("WM building", cd_text(wm.smooth_v, wm.cd_v));
+                const float z0_max = std::max(wall_model_settings.z0_ground_m,
+                                              wall_model_settings.z0_building_m);
+                if (z0_max > 0.2f * d_m) {
+                    print_kv_row("WARNING", "z0 > 0.2*d: first node lies in the roughness sublayer");
+                }
+            }
         }
     };
 

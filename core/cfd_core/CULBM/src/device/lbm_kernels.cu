@@ -2292,9 +2292,171 @@ extern "C" __global__ void update_moving_boundaries(const
 }
 #endif
 
+#ifdef WALL_MODEL
+#if !defined(D3Q19)
+#error "CULBM wall model requires the D3Q19 momentum lattice"
+#endif
+// Equilibrium wall-stress model for link-wise halfway bounce-back walls.
+//
+// Esoteric-Pull leaves populations sent into a TYPE_S neighbour in that
+// neighbour's slots, so the populations loaded from a solid neighbour are this
+// cell's own earlier outgoing populations (implicit bounce-back).  For every
+// axis-aligned solid face, the two diagonal links of one tangential direction
+// form a pair (P moves along +b, M along -b, both leave the wall).  Swapping the
+// pair turns the no-slip reflection into a specular one (zero shear); removing
+// T/2 from P and adding T/2 to M then makes the wall extract exactly the
+// modelled shear momentum T = rho*u_tau^2*u_b/|u_t| per step and unit face
+// (wall-stress / inverse momentum-exchange formulation).
+// The correction is mass- and wall-normal-momentum neutral, uses only this
+// cell's loaded populations and static flags, and is therefore race-free and
+// identical for every domain decomposition.  Links whose partner does not hit
+// a solid (staircase edges) keep the plain no-slip reflection.
+bool wall_model_solid(const uchar flag) { return (flag & (TYPE_BO | TYPE_X)) == TYPE_S; }
+
+// u_tau^2/|u_t| for the wall-adjacent node at the halfway-bounce-back distance
+// d=1/2 lattice units.  Rough faces use the explicit log law with the drag
+// coefficient cd=(kappa/ln(1+d/z0))^2 precomputed on the host; smooth faces
+// solve u/u_tau=ln(E*y+)/kappa by Newton iteration with a viscous sublayer.
+float wall_model_stress_factor(const float ut, const bool smooth, const float cd) {
+  if (!smooth)
+    return cd * ut;
+  const float nu = def_wm_nu;
+  if (0.5f * ut <= def_wm_re_laminar * nu)
+    return 2.0f * nu; // laminar sublayer: tau/rho = nu*u/d
+  float utau = sqrt(2.0f * nu * ut); // laminar estimate, below the log-law root
+  for (uint k = 0u; k < 6u; k++) {
+    const float L = log(0.5f * utau / nu) + def_wm_log_E;
+    utau = fmax(utau - (utau * L - def_wm_kappa * ut) / (L + 1.0f), 0.5f * utau);
+  }
+  return utau * utau / ut;
+}
+
+// Twelve tangential pairs, two per axis face (faces: +x,-x,+y,-y,+z,-z).  P
+// moves along +b and M along -b; both leave the wall, so before the correction
+// they hold the (implicitly bounced) populations this cell sent along M^ and
+// P^ respectively.  rev(i) is the opposite link, and j[rev(i)] the neighbour a
+// population moving along i arrives from.
+uint wall_model_reverse(const uint i) { return i + 1u - 2u * (1u - (i & 1u)); }
+
+void apply_wall_model(const uxx n, float *fhn, const uxx *j, const uchar *flags, const float rhon, float *uxn,
+                      float *uyn, float *uzn) {
+#ifdef WALL_MODEL_GROUND_ONLY
+  // Surface-IBM domains keep immersed surfaces on their own forcing; only the
+  // compacted global ground row below z_global=1 is wall-modelled.
+  if ((int)coordinates(n).z + def_Oz != 1)
+    return;
+  const uint faces = wall_model_solid(flags[j[6]]) ? 32u : 0u;
+#else
+  const uint faces = (uint)wall_model_solid(flags[j[1]]) | (uint)wall_model_solid(flags[j[2]]) << 1 |
+                     (uint)wall_model_solid(flags[j[3]]) << 2 | (uint)wall_model_solid(flags[j[4]]) << 3 |
+                     (uint)wall_model_solid(flags[j[5]]) << 4 | (uint)wall_model_solid(flags[j[6]]) << 5;
+#endif
+  if (faces == 0u)
+    return;
+  const uint pair_face[12] = {0u, 0u, 1u, 1u, 2u, 2u, 3u, 3u, 4u, 4u, 5u, 5u};
+  const uint pair_P[12] = {14u, 16u, 7u, 9u, 13u, 18u, 7u, 11u, 15u, 17u, 9u, 11u};
+  const uint pair_M[12] = {8u, 10u, 13u, 15u, 8u, 12u, 14u, 17u, 10u, 12u, 16u, 18u};
+  const uint pair_b[12] = {1u, 2u, 1u, 2u, 0u, 2u, 0u, 2u, 0u, 1u, 0u, 1u};
+  // Every diagonal link belongs to the pairs of the two faces forming its edge.
+  // At a concave edge both pairs would swap the same population, and the
+  // superposed exchange (e.g. f16 <- f9+f10-f16) is no reflection at all; it
+  // pumps spurious jets through one-cell pockets of voxelized building blocks.
+  // Two specular reflections at a 90-degree concave edge equal bounce-back, so
+  // conflicting pairs keep the plain no-slip reflection.
+  const uint pair_conflict[12] = {0x050u, 0x500u, 0x050u, 0x500u, 0x005u, 0xA00u,
+                                  0x005u, 0xA00u, 0x00Au, 0x0A0u, 0x00Au, 0x0A0u};
+  uint candidate = 0u;
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((faces >> pair_face[q]) & 1u) == 0u)
+      continue;
+    if (wall_model_solid(flags[j[wall_model_reverse(pair_P[q])]]) &&
+        wall_model_solid(flags[j[wall_model_reverse(pair_M[q])]]))
+      candidate |= 1u << q;
+  }
+  uint active = 0u;
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((candidate >> q) & 1u) != 0u && (candidate & pair_conflict[q]) == 0u)
+      active |= 1u << q;
+  }
+  if (active == 0u)
+    return;
+  // Active pairs never share a link, so both passes update fhn in place
+  // (no per-link accumulator: keeps register pressure and occupancy of the
+  // whole stream_collide kernel close to the wall-model-free build).
+  // Pass 1: specular (free-slip) exchange of every active pair.
+  float dp[3] = {0.0f, 0.0f, 0.0f};
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((active >> q) & 1u) == 0u)
+      continue;
+    const uint P = pair_P[q], M = pair_M[q];
+    const float a = fhn[M], b = fhn[P];
+    fhn[P] = a;
+    fhn[M] = b;
+    dp[pair_b[q]] += 2.0f * (a - b);
+  }
+  // Pass 2: the wall function sees the free-slip velocity of this node (the
+  // no-slip reflection would bias it low by ~1/3) and removes the modelled
+  // shear T=rho*u_tau^2*u_b/|u_t| from each pair: P loses T/2, M gains T/2.
+  const float rho_inv = 1.0f / rhon;
+  const float usx = cuda_fma(dp[0], rho_inv, *uxn), usy = cuda_fma(dp[1], rho_inv, *uyn),
+              usz = cuda_fma(dp[2], rho_inv, *uzn);
+#pragma unroll
+  for (uint f = 0u; f < 6u; f++) {
+    if ((active & (3u << (2u * f))) == 0u)
+      continue;
+    const uint a = f >> 1; // wall-normal axis
+    const float ut = a == 0u ? sqrt(usy * usy + usz * usz)
+                   : a == 1u ? sqrt(usx * usx + usz * usz)
+                             : sqrt(usx * usx + usy * usy);
+    // Only upward-facing faces (solid below, f=5) use the ground roughness.
+    const float k = rhon * (f == 5u ? wall_model_stress_factor(ut, def_wm_smooth_h, def_wm_cd_h)
+                                    : wall_model_stress_factor(ut, def_wm_smooth_v, def_wm_cd_v));
+#pragma unroll
+    for (uint q = 2u * f; q < 2u * f + 2u; q++) {
+      if (((active >> q) & 1u) == 0u)
+        continue;
+      const uint b = pair_b[q];
+      const float T = k * (b == 0u ? usx : b == 1u ? usy : usz);
+      fhn[pair_P[q]] -= 0.5f * T;
+      fhn[pair_M[q]] += 0.5f * T;
+      dp[b] -= T;
+    }
+  }
+  *uxn = cuda_fma(dp[0], rho_inv, *uxn);
+  *uyn = cuda_fma(dp[1], rho_inv, *uyn);
+  *uzn = cuda_fma(dp[2], rho_inv, *uzn);
+}
+#endif
+
 #ifdef SUBGRID
+#ifdef WALL_MODEL_SGS
+// Equilibrium near-wall SGS layer of the wall model.  Within the first
+// def_wm_sgs_layers lattice rows above an upward-facing wall (ground, roofs)
+// the energy-containing eddies (size ~kappa*z) are not resolved, and the
+// constant Smagorinsky length would let the wall-modelled stress steepen the
+// first-row shear (log-layer mismatch).  There the mixing length is raised to
+// kappa*z_w.  wall_model_surface[x+y*Nx] holds the global z of the first fluid
+// row of the column above its solid base (0xFFFF: no wall below the column).
+float subgrid_prefactor(const uxx n, const ushort *wall_model_surface) {
+  const uint3 xyz = coordinates(n);
+  const uint zs = (uint)wall_model_surface[xyz.x + xyz.y * def_Nx];
+  const float zw = (float)((int)xyz.z + def_Oz - (int)zs) + 0.5f;
+  if (zs == 0xFFFFu || zw <= 0.0f || zw >= def_wm_sgs_layers)
+    return def_subgrid_prefactor;
+  return fmax(def_subgrid_prefactor, 25.4558441f * sq(def_wm_kappa * zw)); // 18*sqrt(2)*l^2
+}
+#endif
+#ifdef WALL_MODEL_SGS
+#define CULBM_SUBGRID_PREFACTOR(n) subgrid_prefactor(n, wall_model_surface)
+#else
+#define CULBM_SUBGRID_PREFACTOR(n) def_subgrid_prefactor
+#endif
+
 float calculate_subgrid_tau_eff(const float *f, const float rho, const float ux, const float uy, const float uz,
-                                const float fx, const float fy, const float fz) {
+                                const float fx, const float fy, const float fz, const float prefactor) {
 #ifdef SUBGRID_FIXED_EDDY_VISCOSITY
   return def_tau + 3.0f * def_subgrid_fixed_nu_t;
 #else
@@ -2328,7 +2490,7 @@ float calculate_subgrid_tau_eff(const float *f, const float rho, const float ux,
   Hyz = cuda_fma(0.5f, cuda_fma(uy, fz, uz * fy), Hyz);
 #endif
   const float Q = sq(Hxx) + sq(Hyy) + sq(Hzz) + 2.0f * (sq(Hxy) + sq(Hxz) + sq(Hyz));
-  return 0.5f * (def_tau + sqrt(sq(def_tau) + def_subgrid_prefactor * sqrt(Q) / rho));
+  return 0.5f * (def_tau + sqrt(sq(def_tau) + prefactor * sqrt(Q) / rho));
 #endif
 }
 #endif
@@ -2373,6 +2535,10 @@ extern "C" __global__ void stream_collide(
     ,
     const float *F_ibm, const uchar *surface_ibm_active
 #endif
+#ifdef WALL_MODEL_SGS
+    ,
+    const ushort *wall_model_surface
+#endif
 
 ) {
   const uxx n = cuda_global_thread_id(0);
@@ -2399,6 +2565,9 @@ extern "C" __global__ void stream_collide(
   float rhon, uxn, uyn, uzn;
 #ifndef EQUILIBRIUM_BOUNDARIES
   calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
+#ifdef WALL_MODEL
+  apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #else
   if (flagsn_bo == TYPE_E) {
     rhon = rho[n];
@@ -2407,6 +2576,9 @@ extern "C" __global__ void stream_collide(
     uzn = u[2ull * def_N + (ulong)n];
   } else {
     calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
+#ifdef WALL_MODEL
+    apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
   }
 #endif
   float fxn = fx, fyn = fy, fzn = fz;
@@ -2600,7 +2772,7 @@ extern "C" __global__ void stream_collide(
 #endif
   }
 #ifdef SUBGRID
-  const float subgrid_tau_eff = calculate_subgrid_tau_eff(fhn, rhon, uxn, uyn, uzn, fxn, fyn, fzn);
+  const float subgrid_tau_eff = calculate_subgrid_tau_eff(fhn, rhon, uxn, uyn, uzn, fxn, fyn, fzn, CULBM_SUBGRID_PREFACTOR(n));
 #endif
 #ifdef TEMPERATURE
   {
@@ -2977,6 +3149,10 @@ extern "C" __global__ void update_fields(const
                                          const float *F_ibm, const ulong *surface_ibm_active_cells,
                                          const ulong surface_ibm_active_count, const uint surface_ibm_indexed_mode
 #endif
+#ifdef WALL_MODEL_SGS
+                                         ,
+                                         const ushort *wall_model_surface
+#endif
 
 ) {
   const uxx surface_ibm_work_item = cuda_global_thread_id(0);
@@ -3021,6 +3197,9 @@ extern "C" __global__ void update_fields(const
       float rhon, uxn, uyn, uzn;
 #ifndef EQUILIBRIUM_BOUNDARIES
       calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
+#ifdef WALL_MODEL
+      apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #else
   if (flagsn_bo == TYPE_E) {
     rhon = rho[n];
@@ -3029,6 +3208,11 @@ extern "C" __global__ void update_fields(const
     uzn = u[2ull * def_N + (ulong)n];
   } else {
     calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
+#ifdef WALL_MODEL
+    // Same wall-modelled reflection as stream_collide, so manual/indexed
+    // macro reconstruction (SGS diagnostics, SurfaceIBM) stays consistent.
+    apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
   }
 #endif
       float fxn = fx, fyn = fy, fzn = fz;
@@ -3218,7 +3402,7 @@ extern "C" __global__ void update_fields(const
       }
 #ifdef SUBGRID
       if (collect_subgrid_statistics != 0u && flagsn_bo != TYPE_E) {
-        const float tau_eff = calculate_subgrid_tau_eff(fhn, rhon, uxn, uyn, uzn, fxn, fyn, fzn);
+        const float tau_eff = calculate_subgrid_tau_eff(fhn, rhon, uxn, uyn, uzn, fxn, fyn, fzn, CULBM_SUBGRID_PREFACTOR(n));
         sampled_nu_t = (tau_eff - def_tau) * 0.3333333333333333f;
         sampled_rho_nu_t = rhon * sampled_nu_t;
         sampled_count = 1ull;

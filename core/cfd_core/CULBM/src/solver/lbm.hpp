@@ -61,6 +61,60 @@ struct Subgrid_Statistics {
 bool set_subgrid_configuration(const Subgrid_Configuration& configuration);
 Subgrid_Configuration get_subgrid_configuration();
 
+// Equilibrium wall-stress model for link-wise TYPE_S bounce-back walls.  It is
+// frozen into the NVRTC source of every LBM domain at construction, so it must
+// be set before constructing LBM objects.  Roughness lengths are SI metres; a
+// zero roughness selects the smooth-wall log law with the molecular viscosity.
+// The library default is off so drivers that construct LBM directly (tests,
+// validation) keep plain no-slip walls; the production deck defaults it on.
+struct Wall_Model_Configuration {
+	bool enabled = false;
+	float kappa = 0.41f;
+	float smooth_wall_B = 5.2f; // smooth log-law intercept, E = exp(kappa*B)
+	float z0_ground_m = 0.03f; // upward-facing horizontal faces (ground, roofs)
+	float z0_building_m = 0.01f; // vertical and downward-facing faces
+	float molecular_nu_m2_s = 1.48E-5f; // smooth-wall law only
+	// Lattice rows above upward-facing walls in which the Smagorinsky length
+	// is raised to kappa*z_w (near-wall SGS layer); 0 disables the layer.
+	uint sgs_layers = 3u;
+};
+
+// Lattice constants of one LBM domain; derived from the configuration, the
+// global Units scale and the active nesting level scope.
+struct Wall_Model_Lattice {
+	bool enabled = false;
+	bool ground_only = false; // SurfaceIBM domains: compacted ground row only
+	bool smooth_h = false, smooth_v = false;
+	float cd_h = 0.0f, cd_v = 0.0f; // (kappa/ln(1+d/z0))^2, d = dx/2
+	float nu_lbm = 0.0f; // molecular viscosity in lattice units
+	float kappa = 0.41f;
+	float log_E = 0.0f;
+	float re_laminar = 0.0f; // (y+ at the laminar/log intersection)^2
+	float cell_size_m = 1.0f;
+	float time_step_s = 1.0f;
+	bool sgs = false; // near-wall SGS layer active (requires the SGS model)
+	float sgs_layers = 0.0f;
+};
+
+bool set_wall_model_configuration(const Wall_Model_Configuration& configuration);
+Wall_Model_Configuration get_wall_model_configuration();
+// Resolve lattice constants for a domain with cell size dx_m and step dt_s.
+Wall_Model_Lattice resolve_wall_model_lattice(const Wall_Model_Configuration& configuration,
+	const float dx_m, const float dt_s, const bool ground_only);
+
+// Nested CUDA levels refine dx and dt by ratio_to_coarse relative to the global
+// Units scale; LBM domains constructed inside this scope use the level scale.
+class Wall_Model_Level_Scope {
+public:
+	explicit Wall_Model_Level_Scope(const float ratio_to_coarse);
+	~Wall_Model_Level_Scope();
+	Wall_Model_Level_Scope(const Wall_Model_Level_Scope&) = delete;
+	Wall_Model_Level_Scope& operator=(const Wall_Model_Level_Scope&) = delete;
+private:
+	float previous_ratio = 1.0f;
+};
+float get_wall_model_level_ratio();
+
 // For one locally relaxed non-equilibrium collision mode, 1-omega is the
 // per-collision eigenvalue. The warning threshold is deliberately diagnostic:
 // it marks less than 2% damping per collision, but is not a stability proof.
@@ -147,6 +201,8 @@ private:
 	// overwritten by Eulerian IBM forcing.
 	bool surface_ibm_enabled = false;
 	culbm::surface_ibm::Config surface_ibm_config_ = culbm::surface_ibm::get_config();
+	Wall_Model_Lattice wall_model; // frozen before NVRTC compilation
+	Memory<ushort> wall_model_surface; // per column: global z of the first fluid row above the solid base
 	Memory<float> surface_ibm_force;
 	Memory<uchar> surface_ibm_active_mask;
 #ifdef TEMPERATURE
@@ -348,6 +404,7 @@ public:
 	int get_Oy() const { return Oy; } // global offset of the local y=0 cell (including halo)
 	int get_Oz() const { return Oz; } // global offset of the local z=0 cell (including halo)
 	float get_nu() const { return nu; } // get kinematic shear viscosity
+	const Wall_Model_Lattice& get_wall_model() const { return wall_model; }
 	float get_tau() const { return 3.0f*get_nu()+0.5f; } // get LBM relaxation time
 	float get_fx() const { return fx; } // get global froce per volume
 	float get_fy() const { return fy; } // get global froce per volume
@@ -470,6 +527,7 @@ private:
 	void sanity_checks_constructor(const vector<Device_Info>& device_infos, const uint Nx, const uint Ny, const uint Nz, const uint Dx, const uint Dy, const uint Dz, const float nu, const float fx, const float fy, const float fz, const float sigma, const float alpha, const float beta, const uint particles_N, const float particles_rho); // sanity checks on grid resolution and extension support
 	void sanity_checks_initialization(); // sanity checks during initialization on used extensions based on used flags
 	void initialize(); // write all data fields to device and call kernel_initialize
+	void initialize_wall_model_surface(); // upload the near-wall SGS layer column map
 	void do_time_step(); // call kernel_stream_collide to perform one LBM time step
 
 	void communicate_field(

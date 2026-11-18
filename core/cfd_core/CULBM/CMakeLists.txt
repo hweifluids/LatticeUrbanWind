@@ -704,6 +704,98 @@ if(BUILD_TESTING)
         CULBM_DISABLE_FP16C=1
         "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 
+    # Bounce-back wall model: deterministic laminar/no-slip/mass checks in
+    # default CTest, plus manual --channel (WMLES research) and --benchmark
+    # throughput modes that are not registered as tests.
+    set(CULBM_WALL_MODEL_GPU_TEST_SOURCES ${CULBM_SUBGRID_GPU_TEST_SOURCES})
+    list(REMOVE_ITEM CULBM_WALL_MODEL_GPU_TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_subgrid_gpu.cpp")
+    list(APPEND CULBM_WALL_MODEL_GPU_TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_wall_model_gpu.cpp")
+    add_executable(
+        CULBM-wall-model-gpu-test
+        ${CULBM_WALL_MODEL_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-wall-model-gpu-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-wall-model-gpu-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-wall-model-gpu-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-wall-model-gpu-test PRIVATE
+        CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+    # FP32 DDF storage: the analytic laminar checks use body forces of order
+    # 1e-6, below the FP16C quantization of the shifted populations.
+    add_executable(
+        CULBM-wall-model-gpu-fp32-test
+        ${CULBM_WALL_MODEL_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-wall-model-gpu-fp32-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-wall-model-gpu-fp32-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-wall-model-gpu-fp32-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-wall-model-gpu-fp32-test PRIVATE
+        CULBM_BACKEND=1
+        CULBM_DISABLE_FP16C=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+    # Research-only open-channel (neutral ABL) driver: free-slip lid through
+    # the validation-only FREE_SLIP_BOUNDARIES path.  Not a CTest target.
+    add_executable(
+        CULBM-wall-model-gpu-fp32-freeslip-test
+        EXCLUDE_FROM_ALL
+        ${CULBM_WALL_MODEL_GPU_TEST_SOURCES})
+    target_compile_features(
+        CULBM-wall-model-gpu-fp32-freeslip-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-wall-model-gpu-fp32-freeslip-test PRIVATE
+        "${CULBM_SOLVER_SRC}"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(
+        CULBM-wall-model-gpu-fp32-freeslip-test PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+        Threads::Threads)
+    target_compile_definitions(
+        CULBM-wall-model-gpu-fp32-freeslip-test PRIVATE
+        CULBM_BACKEND=1
+        CULBM_DISABLE_FP16C=1
+        FREE_SLIP_BOUNDARIES=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+    add_test(
+        NAME CULBM.WallModelGPU
+        COMMAND CULBM-wall-model-gpu-fp32-test)
+    add_test(
+        NAME CULBM.WallModelMultiGPU
+        COMMAND CULBM-wall-model-gpu-test --multi-gpu)
+    set_tests_properties(
+        CULBM.WallModelGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;wall-model;analytic")
+    set_tests_properties(
+        CULBM.WallModelMultiGPU PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600
+        RUN_SERIAL TRUE
+        LABELS "gpu;multi-gpu;wall-model;halo")
+
     add_executable(
         CULBM-temperature-analytic-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"

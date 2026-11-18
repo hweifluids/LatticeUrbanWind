@@ -1064,6 +1064,8 @@ bool build_nested_vertical_lbm(const VerticalNestingPlan& plan,
             total_markers += markers.size();
         }
         const surface_ibm::ScopedConfig level_scope(level_ibm);
+        // Wall-model drag coefficients depend on this level's SI cell size.
+        const Wall_Model_Level_Scope wall_model_scope(ratio);
         std::unique_ptr<LBM> level_lbm = std::make_unique<LBM>(
             uint3(level_plan.nx, level_plan.ny, level_plan.allocated_nz),
             domains_x, domains_y, domains_z,
