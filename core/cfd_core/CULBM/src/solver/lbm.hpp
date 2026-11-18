@@ -77,6 +77,10 @@ struct Wall_Model_Configuration {
 	// Lattice rows above upward-facing walls in which the Smagorinsky length
 	// is raised to kappa*z_w (near-wall SGS layer); 0 disables the layer.
 	uint sgs_layers = 3u;
+	// With SurfaceIBM: also wall-model the immersed surfaces (normal-only
+	// direct forcing plus an exterior log-law shear force); false keeps them
+	// no-slip and wall-models only the compacted ground row.
+	bool surface_ibm = true;
 };
 
 // Lattice constants of one LBM domain; derived from the configuration, the
@@ -94,6 +98,9 @@ struct Wall_Model_Lattice {
 	float time_step_s = 1.0f;
 	bool sgs = false; // near-wall SGS layer active (requires the SGS model)
 	float sgs_layers = 0.0f;
+	bool ibm = false; // SurfaceIBM surfaces wall-modelled (ground_only domains)
+	float z0_h_lu = 0.0f, z0_v_lu = 0.0f; // roughness lengths in lattice units
+	float ibm_retraction_lu = 0.5f; // marker retraction behind the input surface
 };
 
 bool set_wall_model_configuration(const Wall_Model_Configuration& configuration);
@@ -519,6 +526,7 @@ private:
 	bool initialized = false; // becomes true after LBM::initialize() has been called
 	bool ever_initialized = false; // reset() may request a reinitialize, but immutable runtime topology must stay locked
 	std::unique_ptr<culbm::surface_ibm::Runtime> surface_ibm_;
+	bool wall_model_surface_frozen_ = false; // column map built before SurfaceIBM cleared its support band
 	culbm::surface_ibm::Config surface_ibm_config_ = culbm::surface_ibm::get_config();
 #ifdef GRAPHICS
 	std::uint64_t graphics_session_id = 0ull;

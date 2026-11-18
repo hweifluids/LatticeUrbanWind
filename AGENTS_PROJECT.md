@@ -966,8 +966,9 @@ deck 解析默认打开。配置与 SGS 一样必须在构造第一个 `LBM` 前
   边缘保留无滑移。只读本格点已载入分布与静态 flags，单卡与 `Dx=2` 双卡逐位一致。
 - 近壁 SGS 层 `culbm_wall_model_sgs_layers`（缺省 3）：`LBM::initialize()` 用全局 host
   flags 为每列求"底部实体之上首个流体行"（ushort/列，含 halo），前 L 行 Smagorinsky
-  长度取 `max(Cs·dx, κ z_w)`；只覆盖朝上表面。SurfaceIBM 工况编译
-  `WALL_MODEL_GROUND_ONLY`，壁面模型与 SGS 层都只作用于压实地基之上。
+  长度取 `max(Cs·dx, κ z_w)`；只覆盖朝上表面。SurfaceIBM 工况下该图在
+  `attach_surface_ibm` 时、清除支撑带之前生成（`wall_model_surface_frozen_`），因此也
+  覆盖浸没建筑屋顶。SurfaceIBM 表面见下节"SurfaceIBM 表面壁面模型"。
 - 凹角（两固壁面相交）处两面的切向对共享同一条斜向链（如 16 号链同属"地面 x 对"与
   "+x 墙 z 对"）；两次交换线性叠加得到 `f16←f9+f10−f16` 这类非反射组合，曾在 AIJ
   5 m 体素建筑的单格凹坑/窄缝首层泵出 12–29 m/s 虚假射流，CTest 凹井用例中直接发散。

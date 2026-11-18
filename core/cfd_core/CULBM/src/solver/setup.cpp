@@ -3558,6 +3558,14 @@ void main_setup() {
                     }
                     wall_model_settings.enabled = parsed;
                 }
+                else if (key == "culbm_wall_model_ibm") {
+                    bool parsed = false;
+                    if (!deck_try_parse_bool(val, parsed)) {
+                        fail_culbm_setting(
+                            "culbm_wall_model_ibm must be a bool-like value.");
+                    }
+                    wall_model_settings.surface_ibm = parsed;
+                }
                 else if (key == "culbm_wall_model_z0_ground_m" ||
                          key == "culbm_wall_model_z0_building_m") {
                     double parsed = 0.0;
@@ -4344,7 +4352,9 @@ void main_setup() {
                 : string("off")) + " |");
     println("| Wall model      | " + alignr(57u, wall_model_settings.enabled
             ? string(surface_ibm_settings.enabled
-                ? "log-law wall stress (ground row; IBM surfaces excluded)"
+                ? (wall_model_settings.surface_ibm
+                    ? "log-law wall stress (ground row and IBM surfaces)"
+                    : "log-law wall stress (ground row; IBM surfaces no-slip)")
                 : "log-law wall stress on bounce-back walls")
             : string("disabled (plain no-slip bounce-back)")) + " |");
     if (wall_model_settings.enabled) {
@@ -6627,7 +6637,10 @@ void main_setup() {
                         to_string((ulong)statistics.cleared_solid_cells) +
                         " support-band solid cells, mode=" +
                         std::string(statistics.device_resident
-                            ? "device-resident" : "portable-domain"));
+                            ? "device-resident" : "portable-domain") +
+                        (statistics.wall_model
+                            ? std::string(", log-law wall stress (one-sided, voxel core kept)")
+                            : std::string("")));
             }
             catch (const std::exception& exception) {
                 println("| ERROR: SurfaceIBM attachment failed: " +

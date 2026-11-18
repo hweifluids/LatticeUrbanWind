@@ -411,10 +411,12 @@ culbm_sgs_diagnostics_interval = 0
 粗网格上首层空气节点（半格反弹下距壁 `d=dx/2`）通常落在对数层内。普通 link-wise
 无滑移反弹与常系数 Smagorinsky 组合时，首层剪切按 `u1/(dx/2)` 解析，壁面应力被
 高估数倍，近地风速沿程衰减。CULBM 为此提供一个默认开启、可由 deck 关闭的平衡
-壁面应力模型，只作用于 `TYPE_S` 体素壁（不含 `TYPE_S|TYPE_X` 验证用自由滑移外壁）：
+壁面应力模型，作用于 `TYPE_S` 体素壁（不含 `TYPE_S|TYPE_X` 验证用自由滑移外壁），
+开启 SurfaceIBM 时也作用于浸没表面（见下文"SurfaceIBM 表面"）：
 
 ```text
 culbm_wall_model = true
+culbm_wall_model_ibm = true
 culbm_wall_model_z0_ground_m = 0.03
 culbm_wall_model_z0_building_m = 0.01
 culbm_wall_model_kappa = 0.41
@@ -424,6 +426,7 @@ culbm_wall_model_sgs_layers = 3
 | 键 | 缺省值 | 含义 |
 |---|---:|---|
 | `culbm_wall_model` | `true` | 总开关；`false` 时不注入任何壁面模型代码，回到原无滑移反弹。 |
+| `culbm_wall_model_ibm` | `true` | `ibm_enabler=true` 时是否对 SurfaceIBM 浸没表面也使用壁面模型；`false` 时浸没表面保持无滑移 IBM 直接强制，只对压实地基首层使用壁面模型。 |
 | `culbm_wall_model_z0_ground_m` | `0.03` | 朝上水平面（地面、屋顶）的空气动力学粗糙长度，SI 米；`0` 选择光滑壁对数律。 |
 | `culbm_wall_model_z0_building_m` | `0.01` | 竖直面与朝下面的粗糙长度；`0` 选择光滑壁对数律。 |
 | `culbm_wall_model_kappa` | `0.41` | 对数律 von Kármán 常数，范围 (0, 1]。 |
@@ -457,11 +460,38 @@ Esoteric-Pull 中流体格点射向 `TYPE_S` 邻点的分布留在固体槽位�
 流体行"（每 GPU 每列 2 Byte，含 halo，按全局视图生成以保证分解无关），在其上
 `z_w=0.5…L-0.5` 的 L 行中把 Smagorinsky 长度取为 `max(Cs·dx, κ·z_w)`：首几层对数层
 涡尺度 `κz` 未被网格解析，仅提高壁面应力会让剪切挤进前几层（对数层失配）。该近壁
-SGS 层只覆盖朝上表面（地面、屋顶）；SurfaceIBM 工况只覆盖压实地基行。
+SGS 层只覆盖朝上表面（地面、屋顶）。SurfaceIBM 工况下该列高度图在 attach 时、
+清除支撑带固体之前生成，因此同样覆盖浸没建筑的屋顶。
 
-启用 SurfaceIBM 时，浸没表面继续由 IBM 直接强制处理，壁面模型只作用于压实全局地基
-行之上的 `z_global=1` 首层（编译期 `WALL_MODEL_GROUND_ONLY`）；IBM 表面的切向
-应力模型尚未实现。
+### SurfaceIBM 表面
+
+`ibm_enabler=true` 且 `culbm_wall_model_ibm=true`（默认）时，浸没表面采用单侧
+（只作用于流体侧）的壁面应力处理，思路与扩散界面 IBM 的壁面模型文献一致（Shi 等
+2019 把切向强制力与壁面律应力挂钩；完全单侧的扩散界面 IBM 用于 WMLES）：
+
+1. 建筑保留体素化得到的 `TYPE_S` 实心核，不清除 marker 支撑带，也不运行无滑移
+   多重直接强制；支撑带内的实体格点在 IBM 掩码中记为 bit 1，指向它们的体素面在
+   `stream_collide`/`update_fields` 中只做镜面交换（自由滑移）。其他实体面（压实地基、
+   无 marker 的地形或体素）仍用上节的反弹壁面应力。
+2. 每步在重建基础宏观速度后，每个 marker 只在其 Roma3 支撑中位于输入表面外侧
+   （`h = (x-x_m)·n - r > 0`，`r` 为 marker 退缩距离）且非实体的格点上，用归一化权重
+   得到探针速度和平均壁距 `h`；按 `n_z ≥ cos45°` 选地面或建筑 `z0`，由对数律得
+   `τ_w = ρ k(|u_t|, h) |u_t|`。
+3. 力 `-τ_w·A·u_t/|u_t|`（`A` 为 marker 面积）以同一组单侧权重分配到这些格点，
+   作为 IBM 力场的一部分进入 Guo 强制。每步流体经该 marker 恰好失去 `τ_w·A`，
+   并计入 IBM 反力诊断。
+4. 若信任法向一侧没有流体（`all_triangles` 下 STL 绕序错误导致法向朝内），自动改用
+   另一侧并按 `h = r-(x-x_m)·n` 计壁距；两侧都没有流体的 marker（凹角内部）不加载。
+
+为什么不沿用无滑移 IBM 再改切向目标：扩散界面在表面内侧需要一层被清空的流体
+（skin）。只约束法向时，skin 的切向运动会通过粘性/SGS 与外侧近壁流体耦合，在闭合
+壳体里还受质量守恒限制，无法与外侧共同运动，于是额外拖拽一份未建模的应力（实测
+层流平板中近壁流速只有目标的 3%）；保留无滑移 IBM 再回补切向力则形成正反馈并发散。
+单侧处理去掉了 skin，动量收支由构造保证。代价是浸没表面的不可穿透性改由体素台阶
+提供，斜面/曲面的切向应力方向、面积与壁距仍取自真实表面。
+
+单 GPU 设备驻留路径为每 marker 一个 kernel 线程；多 GPU/MPI 路径按 fragment 计算
+两侧部分和（12 个 FP32），经主机/MPI 归约后选侧并求壁面律，再按 fragment 单侧分配。
 
 ### 开销
 
@@ -479,7 +509,14 @@ SGS 层只覆盖朝上表面（地面、屋顶）；SurfaceIBM 工况只覆盖�
 槽道首层速度与 `sqrt(gh/Cd)`（0.1% 内）、光滑壁粘性底层分支（`u_s=gh/(2ν)`，1e-4 内）、
 关闭时泊肃叶解、质量与壁法向不可穿透，以及单格凹井在壁面模型下保持静止；`CULBM.WallModelMultiGPU` 比较单卡与 `Dx=2` 双卡
 湍流槽道速度场逐位一致。`culbm_wall_model=false` 时与加入本功能前的二进制在 AIJ 5 m
-算例上 raw_u/raw_rho/avg 逐字节一致。`--channel`、`--open 1`（需
+算例上 raw_u/raw_rho/avg 逐字节一致（SurfaceIBM 工况本身因力分配使用原子加而不可逐位
+复现，同一二进制两次运行的差异与新旧二进制之间相同）。SurfaceIBM 表面：
+`CULBM.WallModelGPU` 中两块 IBM 平面（z=4.3 与 18.7，非格点对齐）夹住的层流体积力
+平板，全部 marker 的壁面力与外侧探针速度的对数律之和相差 0.05%，IBM 力承担体积力的
+91.5%（其余由无 marker 的周期缝隙体素面按反弹壁面模型承担）；中心首层速度与局地
+平衡差 2.7%（缝隙影响）。同一体积力下无滑移 IBM 的首层速度只有其 1.3%。
+`CULBM.WallModelMultiGPU` 另比较 IBM 壁面模型的单卡设备驻留路径与双卡 fragment
+路径（FP16C、2000 步，max|Δu| < 1e-5，反力相差 4e-5）。`--channel`、`--open 1`（需
 `CULBM-wall-model-gpu-fp32-freeslip-test`）与 `--benchmark` 为不注册 CTest 的研究
 模式。开放槽道（中性 ABL，h=16Δ，z0/h=1.25e-3）首点 `U/u*` 偏差：无模型 −5.3、
 仅壁面律 −0.3、默认壁面律+SGS 层 −0.1；外区分别约 +0.2、+5.7、+2.5（截距偏移在

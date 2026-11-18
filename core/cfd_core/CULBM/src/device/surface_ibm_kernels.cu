@@ -522,4 +522,227 @@ extern "C" __global__ void surface_ibm_apply_active_force_delta(const ulong *act
   u[2ull * (ulong)def_N + n] = fmaf(factor, fz - old_z, u[2ull * (ulong)def_N + n]);
 }
 
+#ifdef WALL_MODEL_IBM
+// ---------------------------------------------------------------------------
+// Log-law wall-stress model on immersed surfaces (deck culbm_wall_model_ibm).
+// One-sided treatment: wall-modelled bodies keep their voxel solid core, whose
+// faces reflect specularly (apply_wall_model_ibm), and no no-slip direct
+// forcing runs.  Each marker applies the modelled shear as an explicit force
+// on its exterior support cells: cells in front of the input surface (markers
+// are retracted by def_wm_ibm_retraction along -n) that are not solid.  Their
+// renormalized Roma3 weights give the probe velocity and mean wall distance h
+// and distribute the force, so the fluid loses exactly tau_w*area per step.
+
+// Mask bit 1 marks the solid support cells of wall-modelled bodies, whose
+// faces reflect specularly in stream_collide/update_fields.
+extern "C" __global__ void surface_ibm_mark_core_cells(const ulong *cells, uchar *mask, const ulong count) {
+  const ulong i = (ulong)cuda_global_thread_id(0);
+  if (i >= count)
+    return;
+  const ulong n = cells[i];
+  mask[n] = (uchar)(mask[n] | (uchar)2u);
+}
+
+// tau_w = rho*k*|u_t| with the probe at mean wall distance h (lattice units).
+__device__ __forceinline__ float surface_ibm_wm_factor(const float ut, const float h, const bool smooth,
+                                                       const float z0) {
+  if (!smooth) {
+    const float r = def_wm_kappa / log1pf(h / z0);
+    return r * r * ut;
+  }
+  const float nu = def_wm_nu;
+  if (h * ut <= def_wm_re_laminar * nu)
+    return nu / h; // viscous sublayer: tau/rho = nu*u/h
+  float utau = sqrtf(nu * ut / h);
+  for (uint k = 0u; k < 6u; k++) {
+    const float L = logf(h * utau / nu) + def_wm_log_E;
+    utau = fmaxf(utau - (utau * L - def_wm_kappa * ut) / (L + 1.0f), 0.5f * utau);
+  }
+  return utau * utau / ut;
+}
+
+// One-sided Roma3 stencil of a marker: w[i] is the weight of support cell i if
+// it is owned, not solid and on the fluid side of the input surface, else 0.
+// side=+1 trusts the marker normal; side=-1 treats it as inward (STL winding
+// errors with geometry_policy=all_triangles): the surface then lies at +r along
+// n and the exterior is behind it.  h receives the distance to the surface.
+__device__ __forceinline__ void surface_ibm_wm_stencil(const float px, const float py, const float pz,
+                                                       const float nx, const float ny, const float nz,
+                                                       const float side, const uchar *flags, float w[27],
+                                                       uxx cell[27], float *sum_w, float *sum_wh) {
+  const int cx = (int)floorf(px + 0.5f);
+  const int cy = (int)floorf(py + 0.5f);
+  const int cz = (int)floorf(pz + 0.5f);
+  float weights_x[3], weights_y[3], weights_z[3];
+  surface_ibm_axis_weights(px, cx, weights_x);
+  surface_ibm_axis_weights(py, cy, weights_y);
+  surface_ibm_z_weights(pz, cz, weights_z);
+  *sum_w = 0.0f;
+  *sum_wh = 0.0f;
+  uint i = 0u;
+  for (int dz = -1; dz <= 1; ++dz) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx, ++i) {
+        const int gx = cx + dx, gy = cy + dy, gz = cz + dz;
+        w[i] = 0.0f;
+        cell[i] = 0u;
+        const float wi = weights_x[dx + 1] * weights_y[dy + 1] * weights_z[dz + 1];
+        if (wi == 0.0f)
+          continue;
+        const int lx = gx - def_Ox, ly = gy - def_Oy, lz = gz - def_Oz;
+        if (!surface_ibm_owned_local(lx, ly, lz))
+          continue;
+        const uxx n = index(cuda_uint3((uint)lx, (uint)ly, (uint)lz));
+        const float h =
+            side * (((float)gx - px) * nx + ((float)gy - py) * ny + ((float)gz - pz) * nz - def_wm_ibm_retraction);
+        if (!(h > 0.0f) || (flags[n] & TYPE_S) != (uchar)0u)
+          continue;
+        w[i] = wi;
+        cell[i] = n;
+        *sum_w += wi;
+        *sum_wh += wi * h;
+      }
+    }
+  }
+}
+
+// Multi-domain path, one thread per marker fragment.  SoA output, lanes 0-5
+// for side=+1 and 6-11 for side=-1: sum(w*ux), sum(w*uy), sum(w*uz),
+// sum(w*rho), sum(w), sum(w*h) over the fragment's fluid-side cells; the host
+// reduces fragments and ranks and picks the side.
+extern "C" __global__ void surface_ibm_wm_partial(const float *marker_position, const float *marker_normal,
+                                                  const float *u, const float *rho, const uchar *flags,
+                                                  float *partial, const ulong fragment_count) {
+  const ulong f = (ulong)cuda_global_thread_id(0);
+  if (f >= fragment_count)
+    return;
+  for (uint s = 0u; s < 2u; s++) {
+    float w[27];
+    uxx cell[27];
+    float sum_w, sum_wh;
+    surface_ibm_wm_stencil(marker_position[f], marker_position[fragment_count + f],
+                           marker_position[2ull * fragment_count + f], marker_normal[f],
+                           marker_normal[fragment_count + f], marker_normal[2ull * fragment_count + f],
+                           s == 0u ? 1.0f : -1.0f, flags, w, cell, &sum_w, &sum_wh);
+    float ux = 0.0f, uy = 0.0f, uz = 0.0f, rh = 0.0f;
+    for (uint i = 0u; i < 27u; i++) {
+      if (w[i] == 0.0f)
+        continue;
+      const uxx n = cell[i];
+      ux += w[i] * u[n];
+      uy += w[i] * u[(ulong)def_N + (ulong)n];
+      uz += w[i] * u[2ull * (ulong)def_N + (ulong)n];
+      rh += w[i] * rho[n];
+    }
+    const ulong o = 6ull * (ulong)s * fragment_count;
+    partial[o + f] = ux;
+    partial[o + fragment_count + f] = uy;
+    partial[o + 2ull * fragment_count + f] = uz;
+    partial[o + 3ull * fragment_count + f] = rh;
+    partial[o + 4ull * fragment_count + f] = sum_w;
+    partial[o + 5ull * fragment_count + f] = sum_wh;
+  }
+}
+
+// Multi-domain path: spread wm_force (lanes 0-2: marker wall force divided by
+// the global exterior weight of the marker, lane 3: side) over this
+// fragment's exterior cells.
+extern "C" __global__ void surface_ibm_wm_spread(const float *marker_position, const float *marker_normal,
+                                                 const uchar *flags, const float *wm_force, float *force,
+                                                 const ulong fragment_count) {
+  const ulong f = (ulong)cuda_global_thread_id(0);
+  if (f >= fragment_count)
+    return;
+  const float fx = wm_force[f];
+  const float fy = wm_force[fragment_count + f];
+  const float fz = wm_force[2ull * fragment_count + f];
+  const float side = wm_force[3ull * fragment_count + f];
+  if (!isfinite(fx) || !isfinite(fy) || !isfinite(fz) || (fx == 0.0f && fy == 0.0f && fz == 0.0f))
+    return;
+  float w[27];
+  uxx cell[27];
+  float sum_w, sum_wh;
+  surface_ibm_wm_stencil(marker_position[f], marker_position[fragment_count + f],
+                         marker_position[2ull * fragment_count + f], marker_normal[f],
+                         marker_normal[fragment_count + f], marker_normal[2ull * fragment_count + f], side, flags, w,
+                         cell, &sum_w, &sum_wh);
+  for (uint i = 0u; i < 27u; i++) {
+    if (w[i] == 0.0f)
+      continue;
+    const uxx n = cell[i];
+    atomicAdd(&force[n], w[i] * fx);
+    atomicAdd(&force[(ulong)def_N + (ulong)n], w[i] * fy);
+    atomicAdd(&force[2ull * (ulong)def_N + (ulong)n], w[i] * fz);
+  }
+}
+
+// Single-device path: probe, wall function and exterior spreading in one pass
+// per marker.  marker_force accumulates the force on the fluid (reaction).
+extern "C" __global__ void surface_ibm_wm_device(const float *marker_position, const float *marker_normal,
+                                                 const float *wall_velocity, const float *marker_volume,
+                                                 const float *u, const float *rho, const uchar *flags, float *force,
+                                                 float *marker_force, const ulong marker_count,
+                                                 const float inverse_thickness) {
+  const ulong m = (ulong)cuda_global_thread_id(0);
+  if (m >= marker_count)
+    return;
+  const float nx = marker_normal[m];
+  const float ny = marker_normal[marker_count + m];
+  const float nz = marker_normal[2ull * marker_count + m];
+  float w[27];
+  uxx cell[27];
+  float sum_w, sum_wh;
+  float side = 1.0f;
+  surface_ibm_wm_stencil(marker_position[m], marker_position[marker_count + m], marker_position[2ull * marker_count + m],
+                         nx, ny, nz, side, flags, w, cell, &sum_w, &sum_wh);
+  if (!(sum_w > def_wm_ibm_min_weight)) {
+    side = -1.0f; // inward STL normal
+    surface_ibm_wm_stencil(marker_position[m], marker_position[marker_count + m],
+                           marker_position[2ull * marker_count + m], nx, ny, nz, side, flags, w, cell, &sum_w,
+                           &sum_wh);
+  }
+  if (!(sum_w > def_wm_ibm_min_weight))
+    return; // enclosed marker (concave corner): no exterior fluid to load
+  float ux = 0.0f, uy = 0.0f, uz = 0.0f, rh = 0.0f;
+  for (uint i = 0u; i < 27u; i++) {
+    if (w[i] == 0.0f)
+      continue;
+    const uxx n = cell[i];
+    ux += w[i] * u[n];
+    uy += w[i] * u[(ulong)def_N + (ulong)n];
+    uz += w[i] * u[2ull * (ulong)def_N + (ulong)n];
+    rh += w[i] * rho[n];
+  }
+  const float inv = 1.0f / sum_w;
+  const float rho_o = rh * inv, h = sum_wh * inv;
+  const float rx = ux * inv - wall_velocity[m];
+  const float ry = uy * inv - wall_velocity[marker_count + m];
+  const float rz = uz * inv - wall_velocity[2ull * marker_count + m];
+  const float rn = rx * nx + ry * ny + rz * nz;
+  const float tx = rx - rn * nx, ty = ry - rn * ny, tz = rz - rn * nz;
+  const float ut = sqrtf(tx * tx + ty * ty + tz * tz);
+  if (!(ut > 0.0f) || !isfinite(ut) || !(rho_o > 1.0e-12f))
+    return;
+  const bool upward = side * nz >= def_wm_ibm_cos_h;
+  const float k = surface_ibm_wm_factor(ut, h, upward ? def_wm_smooth_h : def_wm_smooth_v,
+                                        upward ? def_wm_z0_h : def_wm_z0_v);
+  const float scale = -marker_volume[m] * inverse_thickness * rho_o * k;
+  const float fx = scale * tx, fy = scale * ty, fz = scale * tz;
+  if (!isfinite(fx) || !isfinite(fy) || !isfinite(fz))
+    return;
+  marker_force[m] += fx;
+  marker_force[marker_count + m] += fy;
+  marker_force[2ull * marker_count + m] += fz;
+  const float sx = fx * inv, sy = fy * inv, sz = fz * inv;
+  for (uint i = 0u; i < 27u; i++) {
+    if (w[i] == 0.0f)
+      continue;
+    const uxx n = cell[i];
+    atomicAdd(&force[n], w[i] * sx);
+    atomicAdd(&force[(ulong)def_N + (ulong)n], w[i] * sy);
+    atomicAdd(&force[2ull * (ulong)def_N + (ulong)n], w[i] * sz);
+  }
+}
+#endif // WALL_MODEL_IBM
+
 #endif // SURFACE_IBM

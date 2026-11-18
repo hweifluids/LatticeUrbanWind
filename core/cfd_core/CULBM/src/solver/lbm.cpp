@@ -157,7 +157,8 @@ bool set_wall_model_configuration(
 		configuration.z0_building_m!=wall_model_configuration.z0_building_m ||
 		configuration.molecular_nu_m2_s!=
 			wall_model_configuration.molecular_nu_m2_s ||
-		configuration.sgs_layers!=wall_model_configuration.sgs_layers;
+		configuration.sgs_layers!=wall_model_configuration.sgs_layers ||
+		configuration.surface_ibm!=wall_model_configuration.surface_ibm;
 	if(!changes) return true;
 	if(active_lbm_instances.load(std::memory_order_acquire)>0u) return false;
 	wall_model_configuration = configuration;
@@ -193,6 +194,9 @@ Wall_Model_Lattice resolve_wall_model_lattice(
 	lattice.smooth_v = !(configuration.z0_building_m>0.0f);
 	lattice.cd_h = lattice.smooth_h ? 0.0f : drag((double)configuration.z0_ground_m);
 	lattice.cd_v = lattice.smooth_v ? 0.0f : drag((double)configuration.z0_building_m);
+	lattice.ibm = ground_only && configuration.surface_ibm;
+	lattice.z0_h_lu = lattice.smooth_h ? 0.0f : (float)((double)configuration.z0_ground_m/(double)dx_m);
+	lattice.z0_v_lu = lattice.smooth_v ? 0.0f : (float)((double)configuration.z0_building_m/(double)dx_m);
 	lattice.nu_lbm = (float)((double)configuration.molecular_nu_m2_s*
 		(double)dt_s/((double)dx_m*(double)dx_m));
 	lattice.log_E = (float)(kappa*(double)configuration.smooth_wall_B);
@@ -624,12 +628,15 @@ LBM_Domain::LBM_Domain(const Device_Info& device_info, const uint Nx, const uint
 		const float level_ratio = get_wall_model_level_ratio();
 		wall_model = resolve_wall_model_lattice(get_wall_model_configuration(),
 			units.si_x(1.0f)/level_ratio, units.si_t(1ull)/level_ratio, surface_ibm_enabled);
+		wall_model.ibm_retraction_lu = surface_ibm_config_.retraction_lu;
 		if(wall_model.enabled) {
 			print_info("Wall model: dx="+to_string(wall_model.cell_size_m, 4u)+" m, Cd ground="+
 				(wall_model.smooth_h ? string("smooth") : to_string(wall_model.cd_h, 6u))+", Cd building="+
 				(wall_model.smooth_v ? string("smooth") : to_string(wall_model.cd_v, 6u))+", SGS layer="+
 				(wall_model.sgs ? to_string((uint)wall_model.sgs_layers)+" row(s)" : string("off"))+
-				(wall_model.ground_only ? ", ground row only (SurfaceIBM)" : ""));
+				(wall_model.ground_only ? (wall_model.ibm
+					? ", SurfaceIBM surfaces and compacted ground row"
+					: ", ground row only (SurfaceIBM surfaces no-slip)") : ""));
 		}
 	}
 	string cuda_kernel_source;
@@ -770,6 +777,11 @@ void LBM_Domain::allocate(Device& device) {
 			device, (ulong)Nx*(ulong)Ny, 1u, true, true, (ushort)0xFFFFu);
 		kernel_stream_collide.add_parameters(wall_model_surface);
 		kernel_update_fields.add_parameters(wall_model_surface);
+	}
+	if(wall_model.ibm && surface_ibm_enabled) {
+		// stream_collide already receives the SurfaceIBM mask; update_fields
+		// needs it for the free-slip faces of wall-modelled bodies.
+		kernel_update_fields.add_parameters(surface_ibm_active_mask);
 	}
 
 #ifdef PARTICLES
@@ -1523,7 +1535,15 @@ string LBM_Domain::device_defines() const {
 		  "\n\t#define def_wm_log_E " + to_string(wall_model.log_E) + "f"
 		  "\n\t#define def_wm_re_laminar " + to_string(wall_model.re_laminar) + "f" +
 		  (wall_model.ground_only ? string("\n\t#define WALL_MODEL_GROUND_ONLY") : string("")) +
-		  (wall_model.sgs ? string("\n\t#define WALL_MODEL_SGS\n\t#define def_wm_sgs_layers ") + to_string(wall_model.sgs_layers) + "f" : string(""))
+		  (wall_model.sgs ? string("\n\t#define WALL_MODEL_SGS\n\t#define def_wm_sgs_layers ") + to_string(wall_model.sgs_layers) + "f" : string("")) +
+		  (wall_model.ibm
+			? string("\n\t#define WALL_MODEL_IBM") +
+			  "\n\t#define def_wm_z0_h " + to_string(wall_model.z0_h_lu) + "f"
+			  "\n\t#define def_wm_z0_v " + to_string(wall_model.z0_v_lu) + "f"
+			  "\n\t#define def_wm_ibm_retraction " + to_string(wall_model.ibm_retraction_lu) + "f"
+			  "\n\t#define def_wm_ibm_min_weight 0.01f"
+			  "\n\t#define def_wm_ibm_cos_h 0.70710678f"
+			: string(""))
 		: string("")) +
 
 	(surface_ibm_enabled
@@ -2042,6 +2062,10 @@ void LBM::attach_surface_ibm(
 	culbm::surface_ibm::verify_attach_preflight(
 		config, markers, initialized || ever_initialized,
 		surface_ibm_ != nullptr, storage_enabled);
+	// The near-wall SGS column map must see the voxel solid core of immersed
+	// bodies (roofs) before the runtime clears TYPE_S in its support band.
+	initialize_wall_model_surface();
+	wall_model_surface_frozen_ = true;
 	try {
 		surface_ibm_ =
 			std::make_unique<culbm::surface_ibm::Runtime>(
@@ -2190,7 +2214,9 @@ void LBM::initialize_wall_model_surface() {
 	for(uint d=0u; d<get_D(); d++) {
 		LBM_Domain& domain = *lbm_domain[d];
 		if(!domain.wall_model.sgs) continue;
-		const bool ground_only = domain.wall_model.ground_only;
+		// Wall-modelled SurfaceIBM domains scan the full solid stack (computed
+		// at attach, before the support band of immersed bodies is cleared).
+		const bool ground_only = domain.wall_model.ground_only && !domain.wall_model.ibm;
 		for(uint y=0u; y<domain.Ny; y++) {
 			for(uint x=0u; x<domain.Nx; x++) {
 				const ulong xg = (ulong)(((long long)x+domain.Ox+(long long)nxg)%(long long)nxg);
@@ -2219,7 +2245,7 @@ void LBM::initialize() { // write all data fields to device and call kernel_init
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->rho.enqueue_write_to_device();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->u.enqueue_write_to_device();
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->flags.enqueue_write_to_device();
-	initialize_wall_model_surface();
+	if(!wall_model_surface_frozen_) initialize_wall_model_surface();
 #ifdef FORCE_FIELD
 	for(uint d=0u; d<get_D(); d++) lbm_domain[d]->F.enqueue_write_to_device();
 #endif // FORCE_FIELD

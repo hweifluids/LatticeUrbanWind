@@ -579,7 +579,14 @@
       "key": "culbm_wall_model",
       "label": "Wall model",
       "section": "physics",
-      "help": "CULBM log-law wall-stress model on link-wise bounce-back walls (default true). It replaces the under-resolved no-slip shear of wall-adjacent cells by the equilibrium wall stress; false restores plain no-slip bounce-back. With SurfaceIBM only the compacted ground row is wall-modelled.",
+      "help": "CULBM log-law wall-stress model on link-wise bounce-back walls (default true). It replaces the under-resolved no-slip shear of wall-adjacent cells by the equilibrium wall stress; false restores plain no-slip bounce-back. With SurfaceIBM see culbm_wall_model_ibm.",
+      "kind": "boolean"
+    },
+    {
+      "key": "culbm_wall_model_ibm",
+      "label": "Wall model on IBM surfaces",
+      "section": "physics",
+      "help": "With ibm_enabler and culbm_wall_model: also wall-model the SurfaceIBM surfaces (default true). Bodies keep their voxel solid core with free-slip faces and the log-law stress is applied one-sided on the exterior cells from the surface normal, area and wall distance; false keeps the no-slip immersed-boundary forcing and wall-models only the compacted ground row.",
       "kind": "boolean"
     },
     {

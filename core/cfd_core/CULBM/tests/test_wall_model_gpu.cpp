@@ -659,6 +659,220 @@ void test_multi_gpu(TestState& test) {
     test.expect(max_error<=2.0E-4, "wall-modelled channel agrees between one and two GPUs");
 }
 
+// ----------------------------------------------------------------------------
+// Wall-modelled SurfaceIBM surfaces.
+//
+// Laminar body-force slab between two horizontal IBM planes, z_b=4.3 (normal
+// +z) and z_t=nz-1-4.3 (normal -z), each backed by a voxel solid core.  The
+// IBM cannot place markers whose Roma3 support touches the periodic seams, so
+// the planes cover x,y in [2, n-3]; the laterally uniform centre is sampled.
+// The wall-modelled core faces reflect specularly, so the 14 fluid rows of a
+// centre column (z=5..18) must be carried by the two modelled wall stresses in
+// steady state: tau_w = 7*rho*g = rho*Cd(h)*u_p^2 with the exterior probe at
+// h=5-z_b=0.7.
+
+void configure_surface_ibm(const bool enabled) {
+    culbm::surface_ibm::Config configuration;
+    configuration.enabled = enabled;
+    configuration.marker_spacing_lu = 0.75f;
+    configuration.forcing_iterations = 8u;
+    configuration.relaxation = 1.0f;
+    configuration.residual_tolerance = 1.0E-5f;
+    configuration.retraction_lu = 0.5f;
+    configuration.support_thickness_lu = 0.75f;
+    configuration.max_markers = 1000000u;
+    std::string error;
+    if(!culbm::surface_ibm::validate_config(configuration, error))
+        throw std::runtime_error("invalid SurfaceIBM test configuration: "+error);
+    culbm::surface_ibm::set_config(configuration);
+}
+
+void append_plane_markers(std::vector<culbm::surface_ibm::Marker>& markers,
+                          const uint n, const float z_surface, const float normal_z) {
+    const float lo = 2.0f, length = (float)n-5.0f;
+    const uint count = (uint)std::lround(length/0.75f);
+    const float spacing = length/(float)count;
+    for(uint j=0u; j<count; ++j) {
+        for(uint i=0u; i<count; ++i) {
+            culbm::surface_ibm::Marker marker;
+            marker.position_lu = float3(lo+((float)i+0.5f)*spacing, lo+((float)j+0.5f)*spacing,
+                                        z_surface-0.5f*normal_z); // retracted into the solid
+            marker.wall_velocity_lu = float3(0.0f);
+            marker.normal = float3(0.0f, 0.0f, normal_z);
+            marker.area_lu2 = spacing*spacing;
+            marker.global_id = (std::uint64_t)markers.size();
+            markers.push_back(marker);
+        }
+    }
+}
+
+struct IbmSlabResult {
+    bool finite = true;
+    double u_probe = 0.0, u_mid = 0.0, max_uz_probe = 0.0;
+    double mass_ratio = 0.0;
+    double fluid_cells = 0.0;
+    double probe_u2_sum = 0.0; // sum of ux^2 over both exterior probe rows of the marker patches
+    culbm::surface_ibm::Statistics statistics;
+    std::vector<float> velocity;
+};
+
+IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ulong steps,
+                       const double g, const float nu, const float z0) {
+    constexpr uint n = 64u, nz = 24u;
+    constexpr float zb = 4.3f;
+    const float zt = (float)(nz-1u)-zb;
+    configure(true, z0, 0.41f, false, 0.0f, nu);
+    {
+        Wall_Model_Configuration configuration = get_wall_model_configuration();
+        configuration.surface_ibm = wall_model_ibm;
+        if(!set_wall_model_configuration(configuration))
+            throw std::runtime_error("cannot select the IBM wall-model mode");
+    }
+    configure_surface_ibm(true);
+    IbmSlabResult result;
+    {
+        LBM lbm(n, n, nz, domains_x, 1u, 1u, nu, (float)g, 0.0f, 0.0f, 0.0f, nu, 0.0f);
+        for(uint z=0u; z<nz; ++z) for(uint y=0u; y<n; ++y) for(uint x=0u; x<n; ++x) {
+            const ulong c = lbm.index(x, y, z);
+            const bool solid = (float)z<zb || (float)z>zt;
+            lbm.rho[c] = 1.0f;
+            lbm.u.x[c] = solid ? 0.0f : 0.02f;
+            lbm.u.y[c] = 0.0f;
+            lbm.u.z[c] = 0.0f;
+            lbm.flags[c] = solid ? TYPE_S : (uchar)0u;
+            lbm.T[c] = 1.0f;
+        }
+        std::vector<culbm::surface_ibm::Marker> markers;
+        append_plane_markers(markers, n, zb, 1.0f);
+        append_plane_markers(markers, n, zt, -1.0f);
+        lbm.attach_surface_ibm(markers);
+        double mass0 = 0.0;
+        for(ulong c=0ull; c<lbm.get_N(); ++c) if((lbm.flags[c]&TYPE_S)==0u) mass0 += 1.0;
+        lbm.external_initialize();
+        for(ulong s=0ull; s<steps; ++s) lbm.external_step();
+        lbm.external_finish();
+        result.statistics = lbm.surface_ibm_statistics();
+        lbm.rho.read_from_device();
+        lbm.u.read_from_device();
+        double mass = 0.0;
+        std::vector<double> mean(nz, 0.0);
+        uint samples = 0u;
+        for(uint z=0u; z<nz; ++z) {
+            uint count = 0u;
+            for(uint y=24u; y<40u; ++y) for(uint x=24u; x<40u; ++x) {
+                const ulong c = lbm.index(x, y, z);
+                mean[z] += lbm.u.x[c];
+                ++count;
+                if(z==5u) result.max_uz_probe = std::max(result.max_uz_probe, (double)std::fabs(lbm.u.z[c]));
+            }
+            mean[z] /= (double)count;
+            samples = count;
+        }
+        (void)samples;
+        for(ulong c=0ull; c<lbm.get_N(); ++c) {
+            result.finite = result.finite && std::isfinite(lbm.u.x[c]) && std::isfinite(lbm.u.z[c]) &&
+                            std::isfinite(lbm.rho[c]);
+            if((lbm.flags[c]&TYPE_S)==0u) mass += lbm.rho[c];
+        }
+        result.mass_ratio = mass/mass0;
+        result.fluid_cells = mass0;
+        // Marker patches cover x,y in [2, n-3]; each marker area is spacing^2,
+        // so the patch integral of ux^2 over the probe rows z=5 and z=nz-6
+        // approximates sum(area*u_probe^2) of all markers.
+        for(const uint z : {5u, nz-6u}) {
+            for(uint y=2u; y<=n-3u; ++y) for(uint x=2u; x<=n-3u; ++x) {
+                const double ux = lbm.u.x[lbm.index(x, y, z)];
+                const double wx = (x==2u || x==n-3u) ? 0.5 : 1.0;
+                const double wy = (y==2u || y==n-3u) ? 0.5 : 1.0;
+                result.probe_u2_sum += wx*wy*ux*ux;
+            }
+        }
+        if(std::getenv("CULBM_WM_IBM_DEBUG")) {
+            std::cout << "IBM slab profile (wm_ibm=" << wall_model_ibm << ", resident="
+                      << result.statistics.device_resident << ", iterations=" << result.statistics.iterations
+                      << ", max slip=" << result.statistics.max_slip_lu << ", reaction="
+                      << result.statistics.reaction_force_lu.x << ',' << result.statistics.reaction_force_lu.y
+                      << ',' << result.statistics.reaction_force_lu.z << "):";
+            for(uint z=0u; z<nz; ++z) std::cout << ' ' << mean[z];
+            std::cout << '\n';
+        }
+        result.u_probe = 0.5*(mean[5]+mean[nz-6u]);
+        result.u_mid = 0.5*(mean[nz/2u-1u]+mean[nz/2u]);
+        result.velocity.resize(3u*(std::size_t)lbm.get_N());
+        for(ulong c=0ull; c<lbm.get_N(); ++c) {
+            result.velocity[(std::size_t)c] = lbm.u.x[c];
+            result.velocity[(std::size_t)(lbm.get_N()+c)] = lbm.u.y[c];
+            result.velocity[(std::size_t)(2ull*lbm.get_N()+c)] = lbm.u.z[c];
+        }
+    }
+    configure_surface_ibm(false);
+    return result;
+}
+
+void test_ibm_laminar_balance(TestState& test) {
+    constexpr float nu = 0.02f, z0 = 0.05f;
+    // Exterior probe at h=0.7; 14 fluid rows per centre column, two walls.
+    const double cd = std::pow(0.41/std::log1p(0.7/(double)z0), 2.0);
+    const double u_target = 0.02;
+    const double g = cd*u_target*u_target/7.0;
+    const IbmSlabResult on = ibm_slab(true, 1u, 60000ull, g, nu, z0);
+    // Global steady momentum balance: the free-slip IBM cores take no stress;
+    // the seam strips without markers keep the bounce-back wall model (6% of
+    // the plane area), so the IBM wall force carries slightly less than the
+    // whole body force.
+    const double reaction = on.statistics.reaction_force_lu.x;
+    const double body = g*on.fluid_cells;
+    // Wall law: total marker force = Cd(h=0.7)*sum(area*u_probe^2).
+    const double law = cd*on.probe_u2_sum;
+    std::cout << "IBM wall model laminar slab: centre u_probe=" << std::setprecision(7) << on.u_probe
+              << " (local target " << u_target << ") reaction/body-force=" << reaction/body
+              << " reaction/wall-law=" << reaction/law << " u_mid=" << on.u_mid
+              << " mass ratio-1=" << on.mass_ratio-1.0
+              << " max|uz(probe)|=" << on.max_uz_probe << '\n';
+    test.expect(on.finite, "IBM wall-model slab stays finite");
+    test.expect(on.statistics.wall_model && on.statistics.cleared_solid_cells==0u,
+                "IBM runtime reports the wall model and keeps the voxel core");
+    test.expect(reaction/body>0.88 && reaction/body<1.0,
+                "IBM wall force carries the body force apart from the wall-modelled seams");
+    test.expect(std::fabs(reaction/law-1.0)<2.0E-2,
+                "IBM wall force follows the log law of the exterior probe velocity");
+    // Seam strips without markers are frictionless, so the sampled centre
+    // carries a little more than its own column (patch covers 85% of the area).
+    test.expect(on.u_probe>0.99*u_target && on.u_probe<1.10*u_target,
+                "centre probe velocity is close to the local log-law balance");
+    test.expect(std::fabs(on.mass_ratio-1.0)<1.0E-5, "IBM wall model conserves mass");
+    test.expect(on.max_uz_probe<1.0E-3*on.u_probe, "IBM wall model keeps the surface impermeable");
+    // No-slip IBM at the same forcing: the first exterior row is much slower.
+    const IbmSlabResult off = ibm_slab(false, 1u, 20000ull, g, nu, z0);
+    std::cout << "IBM no-slip slab (same g): u_probe=" << off.u_probe << '\n';
+    test.expect(off.finite && off.u_probe<0.5*on.u_probe,
+                "culbm_wall_model_ibm=false keeps the no-slip immersed surface");
+}
+
+void test_ibm_multi_gpu(TestState& test) {
+    constexpr float nu = 0.02f, z0 = 0.05f;
+    const double cd = std::pow(0.41/std::log1p(0.7/(double)z0), 2.0);
+    const double g = cd*0.02*0.02/7.0;
+    const IbmSlabResult one = ibm_slab(true, 1u, 2000ull, g, nu, z0);
+    const IbmSlabResult two = ibm_slab(true, 2u, 2000ull, g, nu, z0);
+    test.expect(one.velocity.size()==two.velocity.size() && !one.velocity.empty(),
+                "IBM snapshots have equal extent");
+    if(one.velocity.size()!=two.velocity.size()) return;
+    double max_error = 0.0;
+    for(std::size_t i=0u; i<one.velocity.size(); ++i)
+        max_error = std::max(max_error, (double)std::fabs(one.velocity[i]-two.velocity[i]));
+    std::cout << "IBM wall model device/portable (1/2 GPU) max |du|=" << max_error
+              << " reaction_x " << one.statistics.reaction_force_lu.x << '/' << two.statistics.reaction_force_lu.x
+              << " resident " << one.statistics.device_resident << '/' << two.statistics.device_resident << '\n';
+    test.expect(one.statistics.device_resident && !two.statistics.device_resident,
+                "single- and two-GPU runs use the device and portable IBM paths");
+    test.expect(std::fabs(one.statistics.reaction_force_lu.x/two.statistics.reaction_force_lu.x-1.0)<1.0E-4,
+                "IBM wall-model reaction is decomposition independent");
+    // The portable path evaluates the wall function on the host; FP16C storage
+    // amplifies the last-bit differences to a few 1e-6 after 2000 steps.
+    test.expect(max_error<=5.0E-5, "IBM wall model agrees between the device and portable paths");
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
@@ -681,6 +895,12 @@ int main(const int argc, const char* const argv[]) {
             }
             TestState test;
             test_multi_gpu(test);
+            test_ibm_multi_gpu(test);
+            return test.failures==0 ? 0 : 1;
+        }
+        if(argc==2 && std::string(argv[1])=="--ibm") {
+            TestState test;
+            test_ibm_laminar_balance(test);
             return test.failures==0 ? 0 : 1;
         }
         if(argc!=1) {
@@ -694,6 +914,7 @@ int main(const int argc, const char* const argv[]) {
             test_disabled_is_no_slip(test);
             test_smooth_viscous_sublayer(test);
             test_concave_pocket(test);
+            test_ibm_laminar_balance(test);
         }
         if(test.failures==0) std::cout << "GPU wall-model tests passed.\n";
         return test.failures==0 ? 0 : 1;

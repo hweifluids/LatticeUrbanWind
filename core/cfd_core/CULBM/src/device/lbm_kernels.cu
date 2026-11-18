@@ -2429,6 +2429,92 @@ void apply_wall_model(const uxx n, float *fhn, const uxx *j, const uchar *flags,
   *uyn = cuda_fma(dp[1], rho_inv, *uyn);
   *uzn = cuda_fma(dp[2], rho_inv, *uzn);
 }
+
+#ifdef WALL_MODEL_IBM
+// Wall-modelled SurfaceIBM.  Immersed bodies keep their voxel solid core; its
+// cells inside the marker supports carry SurfaceIBM mask bit 1.  Faces towards
+// them reflect specularly only (free slip): their tangential stress is applied
+// one-sided by the SurfaceIBM runtime as an explicit force on the exterior
+// cells, from the input surface's normal, area and wall distance.  Every other
+// solid face (compacted ground, terrain or seam voxels without markers) keeps
+// the bounce-back wall stress of apply_wall_model().
+void apply_wall_model_ibm(const uxx n, float *fhn, const uxx *j, const uchar *flags, const uchar *ibm_mask,
+                          const float rhon, float *uxn, float *uyn, float *uzn) {
+  uint faces = 0u, ibm_faces = 0u;
+#pragma unroll
+  for (uint f = 0u; f < 6u; f++) {
+    const uxx nb = j[f + 1u];
+    if (!wall_model_solid(flags[nb]))
+      continue;
+    faces |= 1u << f;
+    if ((ibm_mask[nb] & (uchar)2u) != (uchar)0u)
+      ibm_faces |= 1u << f;
+  }
+  if (faces == 0u)
+    return;
+  const uint pair_face[12] = {0u, 0u, 1u, 1u, 2u, 2u, 3u, 3u, 4u, 4u, 5u, 5u};
+  const uint pair_P[12] = {14u, 16u, 7u, 9u, 13u, 18u, 7u, 11u, 15u, 17u, 9u, 11u};
+  const uint pair_M[12] = {8u, 10u, 13u, 15u, 8u, 12u, 14u, 17u, 10u, 12u, 16u, 18u};
+  const uint pair_b[12] = {1u, 2u, 1u, 2u, 0u, 2u, 0u, 2u, 0u, 1u, 0u, 1u};
+  const uint pair_conflict[12] = {0x050u, 0x500u, 0x050u, 0x500u, 0x005u, 0xA00u,
+                                  0x005u, 0xA00u, 0x00Au, 0x0A0u, 0x00Au, 0x0A0u};
+  uint candidate = 0u;
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((faces >> pair_face[q]) & 1u) == 0u)
+      continue;
+    if (wall_model_solid(flags[j[wall_model_reverse(pair_P[q])]]) &&
+        wall_model_solid(flags[j[wall_model_reverse(pair_M[q])]]))
+      candidate |= 1u << q;
+  }
+  uint active = 0u;
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((candidate >> q) & 1u) != 0u && (candidate & pair_conflict[q]) == 0u)
+      active |= 1u << q;
+  }
+  if (active == 0u)
+    return;
+  float dp[3] = {0.0f, 0.0f, 0.0f};
+#pragma unroll
+  for (uint q = 0u; q < 12u; q++) {
+    if (((active >> q) & 1u) == 0u)
+      continue;
+    const uint P = pair_P[q], M = pair_M[q];
+    const float a = fhn[M], b = fhn[P];
+    fhn[P] = a;
+    fhn[M] = b;
+    dp[pair_b[q]] += 2.0f * (a - b);
+  }
+  const float rho_inv = 1.0f / rhon;
+  const float usx = cuda_fma(dp[0], rho_inv, *uxn), usy = cuda_fma(dp[1], rho_inv, *uyn),
+              usz = cuda_fma(dp[2], rho_inv, *uzn);
+#pragma unroll
+  for (uint f = 0u; f < 6u; f++) {
+    if ((active & (3u << (2u * f))) == 0u || ((ibm_faces >> f) & 1u) != 0u)
+      continue;
+    const uint a = f >> 1;
+    const float ut = a == 0u ? sqrt(usy * usy + usz * usz)
+                   : a == 1u ? sqrt(usx * usx + usz * usz)
+                             : sqrt(usx * usx + usy * usy);
+    const float k = rhon * (f == 5u ? wall_model_stress_factor(ut, def_wm_smooth_h, def_wm_cd_h)
+                                    : wall_model_stress_factor(ut, def_wm_smooth_v, def_wm_cd_v));
+#pragma unroll
+    for (uint q = 2u * f; q < 2u * f + 2u; q++) {
+      if (((active >> q) & 1u) == 0u)
+        continue;
+      const uint b = pair_b[q];
+      const float T = k * (b == 0u ? usx : b == 1u ? usy : usz);
+      fhn[pair_P[q]] -= 0.5f * T;
+      fhn[pair_M[q]] += 0.5f * T;
+      dp[b] -= T;
+    }
+  }
+  *uxn = cuda_fma(dp[0], rho_inv, *uxn);
+  *uyn = cuda_fma(dp[1], rho_inv, *uyn);
+  *uzn = cuda_fma(dp[2], rho_inv, *uzn);
+}
+#endif
 #endif
 
 #ifdef SUBGRID
@@ -2566,7 +2652,11 @@ extern "C" __global__ void stream_collide(
 #ifndef EQUILIBRIUM_BOUNDARIES
   calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
 #ifdef WALL_MODEL
+#ifdef WALL_MODEL_IBM
+  apply_wall_model_ibm(n, fhn, j, flags, surface_ibm_active, rhon, &uxn, &uyn, &uzn);
+#else
   apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #endif
 #else
   if (flagsn_bo == TYPE_E) {
@@ -2577,7 +2667,11 @@ extern "C" __global__ void stream_collide(
   } else {
     calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
 #ifdef WALL_MODEL
+#ifdef WALL_MODEL_IBM
+    apply_wall_model_ibm(n, fhn, j, flags, surface_ibm_active, rhon, &uxn, &uyn, &uzn);
+#else
     apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #endif
   }
 #endif
@@ -3153,6 +3247,10 @@ extern "C" __global__ void update_fields(const
                                          ,
                                          const ushort *wall_model_surface
 #endif
+#ifdef WALL_MODEL_IBM
+                                         ,
+                                         const uchar *wall_model_ibm_mask
+#endif
 
 ) {
   const uxx surface_ibm_work_item = cuda_global_thread_id(0);
@@ -3198,7 +3296,11 @@ extern "C" __global__ void update_fields(const
 #ifndef EQUILIBRIUM_BOUNDARIES
       calculate_rho_u(fhn, &rhon, &uxn, &uyn, &uzn);
 #ifdef WALL_MODEL
+#ifdef WALL_MODEL_IBM
+      apply_wall_model_ibm(n, fhn, j, flags, wall_model_ibm_mask, rhon, &uxn, &uyn, &uzn);
+#else
       apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #endif
 #else
   if (flagsn_bo == TYPE_E) {
@@ -3211,7 +3313,11 @@ extern "C" __global__ void update_fields(const
 #ifdef WALL_MODEL
     // Same wall-modelled reflection as stream_collide, so manual/indexed
     // macro reconstruction (SGS diagnostics, SurfaceIBM) stays consistent.
+#ifdef WALL_MODEL_IBM
+    apply_wall_model_ibm(n, fhn, j, flags, wall_model_ibm_mask, rhon, &uxn, &uyn, &uzn);
+#else
     apply_wall_model(n, fhn, j, flags, rhon, &uxn, &uyn, &uzn);
+#endif
 #endif
   }
 #endif

@@ -59,6 +59,7 @@ culbm_sgs_scalar_coupling = true
 culbm_sgs_turbulent_prandtl = 1.0
 culbm_sgs_diagnostics_interval = 0
 culbm_wall_model = true
+culbm_wall_model_ibm = true
 culbm_wall_model_z0_ground_m = 0.03
 culbm_wall_model_z0_building_m = 0.01
 culbm_wall_model_kappa = 0.41

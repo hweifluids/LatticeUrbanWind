@@ -101,6 +101,30 @@ int nearest_grid_coordinate(const float value) {
     return (int)std::floor((double)value + 0.5);
 }
 
+// Wall-modelled SurfaceIBM (culbm_wall_model_ibm).  Must match the device
+// defines def_wm_ibm_min_weight/def_wm_ibm_cos_h and surface_ibm_wm_factor().
+constexpr float wall_model_min_exterior_weight = 0.01f;
+constexpr float wall_model_upward_cosine = 0.70710678f;
+
+// tau_w = rho*k*|u_t| for a probe at mean wall distance h (lattice units).
+float wall_model_factor(const Wall_Model_Lattice& wm, const float ut,
+                        const float h, const bool upward) {
+    const bool smooth = upward ? wm.smooth_h : wm.smooth_v;
+    if(!smooth) {
+        const float z0 = upward ? wm.z0_h_lu : wm.z0_v_lu;
+        const float r = wm.kappa/std::log1p(h/z0);
+        return r*r*ut;
+    }
+    const float nu = wm.nu_lbm;
+    if(h*ut <= wm.re_laminar*nu) return nu/h;
+    float utau = std::sqrt(nu*ut/h);
+    for(int k = 0; k < 6; ++k) {
+        const float L = std::log(h*utau/nu)+wm.log_E;
+        utau = std::max(utau-(utau*L-wm.kappa*ut)/(L+1.0f), 0.5f*utau);
+    }
+    return utau*utau/ut;
+}
+
 float roma3_phi_host(const float r) {
     const float a = std::fabs(r);
     if(a >= 1.5f) return 0.0f;
@@ -354,6 +378,15 @@ private:
         std::unique_ptr<Memory<float>> metrics;
         std::unique_ptr<Memory<float>> reaction;
         std::unique_ptr<Memory<uint>> iteration_control;
+        // Wall model: fragment normals, exterior partial sums and spread
+        // values of the tangential compensation force.
+        bool wall_model = false;
+        std::unique_ptr<Memory<float>> normals;
+        std::unique_ptr<Memory<float>> wm_partial;
+        std::unique_ptr<Memory<float>> wm_force;
+        Kernel wm_partial_kernel;
+        Kernel wm_spread_kernel;
+        Kernel wm_device;
         Kernel reset_force;
         Kernel mark_active;
         Kernel interpolate_partial;
@@ -369,8 +402,10 @@ private:
         DomainState(LBM_Domain& linked_domain,
                     const std::vector<Marker>& markers,
                     std::vector<std::uint64_t> indices,
-                    const std::vector<ulong>& active_indices)
-            : domain(&linked_domain), marker_indices(std::move(indices)) {
+                    const std::vector<ulong>& active_indices,
+                    const bool wall_model_enabled)
+            : domain(&linked_domain), marker_indices(std::move(indices)),
+              wall_model(wall_model_enabled) {
             Device& device = domain->get_device();
             const ulong active_count = (ulong)active_indices.size();
             if(active_count != 0ull) {
@@ -426,6 +461,31 @@ private:
                 device, count, "surface_ibm_spread",
                 *positions, *fragment_force,
                 domain->get_surface_ibm_force(), count);
+            if(wall_model) {
+                normals = std::make_unique<Memory<float>>(
+                    device, count, 3u, true, true, 0.0f, false);
+                wm_partial = std::make_unique<Memory<float>>(
+                    device, count, 12u, true, true, 0.0f, false);
+                wm_force = std::make_unique<Memory<float>>(
+                    device, count, 4u, true, true, 0.0f, false);
+                for(ulong fragment = 0ull; fragment < count; ++fragment) {
+                    const Marker& marker = markers[
+                        (std::size_t)marker_indices[(std::size_t)fragment]];
+                    (*normals)[fragment] = marker.normal.x;
+                    (*normals)[count+fragment] = marker.normal.y;
+                    (*normals)[2ull*count+fragment] = marker.normal.z;
+                }
+                normals->enqueue_write_to_device();
+                wm_partial_kernel = Kernel(
+                    device, count, "surface_ibm_wm_partial",
+                    *positions, *normals, domain->u, domain->rho,
+                    domain->flags, *wm_partial, count);
+                wm_spread_kernel = Kernel(
+                    device, count, "surface_ibm_wm_spread",
+                    *positions, *normals,
+                    domain->flags, *wm_force,
+                    domain->get_surface_ibm_force(), count);
+            }
         }
 
         ulong fragment_count() const {
@@ -504,6 +564,14 @@ private:
                 domain->u, domain->rho, domain->get_surface_ibm_force(),
                 *partial, *fragment_force, *iteration_control, count,
                 config.relaxation, (uint)1u);
+            if(wall_model) {
+                wm_device = Kernel(
+                    device, count, "surface_ibm_wm_device",
+                    *positions, *normals, *wall_velocity, *marker_volume,
+                    domain->u, domain->rho, domain->flags,
+                    domain->get_surface_ibm_force(), *fragment_force,
+                    count, 1.0f/config.support_thickness_lu);
+            }
             apply_force_delta.set_parameters(7u, (uint)1u);
         }
 
@@ -525,11 +593,25 @@ private:
             if(wall_velocity) wall_velocity->delete_host_buffer();
             if(marker_volume) marker_volume->delete_host_buffer();
             if(marker_coupling) marker_coupling->delete_host_buffer();
+            if(normals) normals->delete_host_buffer();
+            if(wm_partial) wm_partial->delete_host_buffer();
+            if(wm_force) wm_force->delete_host_buffer();
             std::vector<std::uint64_t>().swap(marker_indices);
         }
 
         void enqueue_begin_device_direct_step() {
             begin_device_step.enqueue_run();
+        }
+
+        // Wall-modelled surfaces: one exterior wall-stress pass replaces the
+        // no-slip forcing iterations; then reduce the reaction.
+        void enqueue_device_wall_model_step() {
+            wm_device.enqueue_run();
+            reset_device_measure.set_parameters(2u, (uint)1u);
+            reset_device_measure.enqueue_run();
+            reduce_device_measure.set_parameters(7u, (uint)1u);
+            reduce_device_measure.enqueue_run();
+            reaction->enqueue_read_from_device();
         }
 
         void enqueue_device_iterations(const unsigned count) {
@@ -582,6 +664,11 @@ private:
     float3 device_reaction_force_{};
     float3 device_reaction_torque_{};
     bool nonconvergence_warned_ = false;
+    // Wall-modelled immersed surfaces (portable path keeps per-marker state).
+    bool wall_model_ = false;
+    Wall_Model_Lattice wm_lattice_{};
+    std::vector<float3> wm_spread_value_;
+    std::vector<float> wm_side_;
 
     void validate_markers() const {
         if(markers_.empty())
@@ -703,6 +790,152 @@ private:
         return cleared;
     }
 
+    // Wall-modelled bodies keep their voxel core.  Its cells inside the
+    // marker supports (TYPE_S active cells) get mask bit 1 so that faces
+    // towards them reflect specularly; returns the marked cell count.
+    std::uint64_t mark_core_cells() {
+        std::uint64_t marked = 0u;
+        for(const auto& state : domains_) {
+            const ulong active_count = state->active_cell_count();
+            if(active_count == 0ull) continue;
+            LBM_Domain& domain = *state->domain;
+            const ulong nx = (ulong)domain.get_Nx();
+            const ulong ny = (ulong)domain.get_Ny();
+            std::vector<ulong> cells;
+            for(ulong i = 0ull; i < active_count; ++i) {
+                const ulong n = (*(state->active_cells))[i];
+                const int gx = (int)(n%nx)+domain.get_Ox();
+                const int gy = (int)((n/nx)%ny)+domain.get_Oy();
+                const int gz = (int)(n/(nx*ny))+domain.get_Oz();
+                const std::uint64_t g = global_cell_index(
+                    gx, gy, gz, lbm_.get_Nx(), lbm_.get_Ny());
+                if((lbm_.flags[(ulong)g]&TYPE_S) != 0u) cells.push_back(n);
+            }
+            if(cells.empty()) continue;
+            Device& device = domain.get_device();
+            Memory<ulong> list(device, (ulong)cells.size(), 1u, true, true,
+                               0ull, false);
+            for(std::size_t i = 0u; i < cells.size(); ++i)
+                list[(ulong)i] = cells[i];
+            list.enqueue_write_to_device();
+            Kernel mark(device, (ulong)cells.size(),
+                        "surface_ibm_mark_core_cells", list,
+                        domain.get_surface_ibm_active_mask(),
+                        (ulong)cells.size());
+            mark.enqueue_run();
+            domain.finish_queue();
+            marked += (std::uint64_t)cells.size();
+        }
+        if(culbm::mpi_is_distributed())
+            culbm::mpi_allreduce_sum_uint64(&marked, 1u);
+        return marked;
+    }
+
+    // Portable (multi-domain/MPI) wall-model step: reduce the exterior probe
+    // partials per marker, evaluate the wall function on the host and spread
+    // the wall force over each fragment's exterior cells.
+    void apply_wall_model_portable() {
+        for(const auto& state : domains_) {
+            if(state->fragment_count() == 0ull) continue;
+            state->wm_partial_kernel.enqueue_run();
+            state->wm_partial->enqueue_read_from_device();
+        }
+        for(const auto& state : domains_) state->domain->finish_queue();
+        const std::uint64_t marker_count = (std::uint64_t)markers_.size();
+        const std::uint64_t chunk_capacity = std::min<std::uint64_t>(
+            reduction_marker_chunk/2u,
+            (std::uint64_t)std::numeric_limits<std::uint32_t>::max()/12u);
+        for(std::uint64_t begin = 0u; begin < marker_count;
+            begin += chunk_capacity) {
+            const std::uint64_t count =
+                std::min(chunk_capacity, marker_count-begin);
+            const std::size_t value_count = (std::size_t)(12u*count);
+            std::fill(reduction_values_.begin(),
+                      reduction_values_.begin()+value_count, 0.0f);
+            float* const values = reduction_values_.data();
+            for(const auto& state : domains_) {
+                const auto first = std::lower_bound(
+                    state->marker_indices.begin(), state->marker_indices.end(), begin);
+                const auto last = std::lower_bound(
+                    first, state->marker_indices.end(), begin+count);
+                const ulong fragments = state->fragment_count();
+                for(auto it = first; it != last; ++it) {
+                    const std::size_t fragment =
+                        (std::size_t)(it-state->marker_indices.begin());
+                    const std::size_t local = (std::size_t)(*it-begin);
+                    for(std::size_t component = 0u; component < 12u; ++component)
+                        values[component*(std::size_t)count+local] +=
+                            (*(state->wm_partial))[
+                                (ulong)fragment+(ulong)component*fragments];
+                }
+            }
+            if(culbm::mpi_is_distributed())
+                culbm::mpi_allreduce_sum_float(
+                    values, (std::uint32_t)(12u*count));
+            for(std::uint64_t local = 0u; local < count; ++local) {
+                const std::size_t m = (std::size_t)(begin+local);
+                const Marker& marker = markers_[m];
+                wm_spread_value_[m] = float3(0.0f);
+                wm_side_[m] = 1.0f;
+                // Trusted normal first, then the flipped side (inward STL normal).
+                std::size_t o = 0u;
+                float weight = values[(std::size_t)(4u*count+local)];
+                if(!(weight > wall_model_min_exterior_weight)) {
+                    o = (std::size_t)(6u*count);
+                    weight = values[o+(std::size_t)(4u*count+local)];
+                    wm_side_[m] = -1.0f;
+                }
+                if(!(weight > wall_model_min_exterior_weight)) continue;
+                const float inv = 1.0f/weight;
+                const float rho = values[o+(std::size_t)(3u*count+local)]*inv;
+                const float h = values[o+(std::size_t)(5u*count+local)]*inv;
+                const float rx = values[o+(std::size_t)local]*inv-
+                                 marker.wall_velocity_lu.x;
+                const float ry = values[o+(std::size_t)(count+local)]*inv-
+                                 marker.wall_velocity_lu.y;
+                const float rz = values[o+(std::size_t)(2u*count+local)]*inv-
+                                 marker.wall_velocity_lu.z;
+                const float3& n = marker.normal;
+                const float rn = rx*n.x+ry*n.y+rz*n.z;
+                const float tx = rx-rn*n.x, ty = ry-rn*n.y, tz = rz-rn*n.z;
+                const float ut = std::sqrt(tx*tx+ty*ty+tz*tz);
+                float3 wall(0.0f);
+                if(ut > 0.0f && std::isfinite(ut) && rho > minimum_density) {
+                    const float k = wall_model_factor(
+                        wm_lattice_, ut, h,
+                        wm_side_[m]*n.z >= wall_model_upward_cosine);
+                    const float scale = -marker.area_lu2*rho*k;
+                    wall = float3(scale*tx, scale*ty, scale*tz);
+                }
+                const float volume =
+                    marker.area_lu2*config_.support_thickness_lu;
+                float3& density = marker_force_density_[m];
+                const float3 force = wall;
+                if(!finite3(force)) continue;
+                density.x += force.x/volume;
+                density.y += force.y/volume;
+                density.z += force.z/volume;
+                wm_spread_value_[m] = float3(force.x*inv, force.y*inv,
+                                             force.z*inv);
+            }
+        }
+        for(const auto& state : domains_) {
+            const ulong fragments = state->fragment_count();
+            if(fragments == 0ull) continue;
+            for(ulong fragment = 0ull; fragment < fragments; ++fragment) {
+                const std::size_t marker =
+                    (std::size_t)state->marker_indices[(std::size_t)fragment];
+                const float3 value = wm_spread_value_[marker];
+                (*(state->wm_force))[fragment] = value.x;
+                (*(state->wm_force))[fragments+fragment] = value.y;
+                (*(state->wm_force))[2ull*fragments+fragment] = value.z;
+                (*(state->wm_force))[3ull*fragments+fragment] = wm_side_[marker];
+            }
+            state->wm_force->enqueue_write_to_device();
+            state->wm_spread_kernel.enqueue_run();
+        }
+    }
+
     void build_domain_fragments() {
         struct PendingDomain {
             LBM_Domain* domain = nullptr;
@@ -712,7 +945,8 @@ private:
         const bool device_direct_candidate =
             !culbm::mpi_is_distributed() && lbm_.get_D()==1u;
         const std::uint64_t bytes_per_fragment =
-            (12u+(device_direct_candidate ? 5u : 0u))*sizeof(float);
+            (12u+(device_direct_candidate ? 5u : 0u)+(wall_model_ ? 19u : 0u))*
+            sizeof(float);
         constexpr std::uint64_t bytes_per_active_cell =
             sizeof(ulong)+3u*sizeof(float);
         std::uint64_t local_fragments = 0u;
@@ -792,7 +1026,7 @@ private:
             for(PendingDomain& item : pending) {
                 domains_.push_back(std::make_unique<DomainState>(
                     *item.domain, markers_, std::move(item.indices),
-                    item.active_cells));
+                    item.active_cells, wall_model_));
             }
         } catch(const std::exception& exception) {
             local_allocation_ok = false;
@@ -1190,6 +1424,11 @@ public:
                 return a.global_id < b.global_id;
             });
         validate_markers();
+        if(lbm_.get_D() > 0u) {
+            wm_lattice_ = lbm_.get_local_domain(0u).get_wall_model();
+            wall_model_ = wm_lattice_.enabled && wm_lattice_.ibm;
+        }
+        statistics_.wall_model = wall_model_;
         marker_force_density_.assign(markers_.size(), float3(0.0f));
         marker_force_delta_.assign(markers_.size(), float3(0.0f));
         const std::size_t reduction_markers = std::min<std::size_t>(
@@ -1199,7 +1438,20 @@ public:
         build_domain_fragments();
         build_marker_coupling();
         enable_device_direct_path();
-        statistics_.cleared_solid_cells = clear_marker_support_solids();
+        if(wall_model_) {
+            // Wall-modelled bodies keep their voxel solid core: its faces
+            // reflect specularly and the stress is applied one-sided.
+            statistics_.wall_model_core_cells = mark_core_cells();
+            if(!device_direct_) {
+                wm_spread_value_.assign(markers_.size(), float3(0.0f));
+                wm_side_.assign(markers_.size(), 1.0f);
+                // 12 reduction lanes per marker for the two-sided probe.
+                reduction_values_.resize(12u*std::min<std::size_t>(
+                    markers_.size(), (std::size_t)reduction_marker_chunk/2u));
+            }
+        } else {
+            statistics_.cleared_solid_cells = clear_marker_support_solids();
+        }
         if(device_direct_) {
             domains_.front()->release_device_direct_host_storage();
             std::vector<Marker>().swap(markers_);
@@ -1224,6 +1476,27 @@ public:
                 *state->active_cells, state->active_cell_count());
         }
 
+        if(wall_model_) {
+            if(device_direct_) {
+                DomainState& state = *domains_.front();
+                state.enqueue_device_wall_model_step();
+                state.domain->finish_queue();
+                device_reaction_force_ = float3(
+                    (*(state.reaction))[0], (*(state.reaction))[1],
+                    (*(state.reaction))[2]);
+                device_reaction_torque_ = float3(
+                    (*(state.reaction))[3], (*(state.reaction))[4],
+                    (*(state.reaction))[5]);
+                if(!finite3(device_reaction_force_) ||
+                   !finite3(device_reaction_torque_))
+                    throw std::runtime_error(
+                        "SurfaceIBM wall-model reaction became non-finite.");
+            } else {
+                apply_wall_model_portable();
+            }
+            finalize_statistics(Measurement{}, 0u);
+            return;
+        }
         if(device_direct_) {
             unsigned applied_iterations = 0u;
             const Measurement final_measurement =

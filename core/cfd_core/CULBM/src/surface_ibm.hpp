@@ -28,6 +28,10 @@ struct Statistics {
     std::uint64_t fragments = 0u;
     std::uint64_t active_cells = 0u;
     std::uint64_t cleared_solid_cells = 0u;
+    // Wall-modelled surfaces (culbm_wall_model_ibm): one-sided log-law stress,
+    // voxel core kept with free-slip faces, no no-slip forcing iterations.
+    bool wall_model = false;
+    std::uint64_t wall_model_core_cells = 0u; // free-slip solid support cells
     bool device_resident = false;
     unsigned iterations = 0u;
     bool converged = false;
