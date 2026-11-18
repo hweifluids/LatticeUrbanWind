@@ -6,8 +6,9 @@
 ## 1 结论
 
 - **可行，且已实现。** 在 link-wise 反弹（TYPE_S 体素壁）上加入对数律壁面应力模型，deck 默认开启
-  （`culbm_wall_model=true`），可关闭恢复原无滑移。SurfaceIBM 工况下作用于压实地基首层；IBM 表面的
-  切向应力模型尚未实现（第 6 节给出设计）。
+  （`culbm_wall_model=true`），可关闭恢复原无滑移。SurfaceIBM 浸没表面也已覆盖（`culbm_wall_model_ibm`，
+  缺省 true，单侧壁面应力，第 6 节）；5 m 网格测点风速从无滑移 IBM 的 0.036–0.055 提高到 0.086，与体素
+  壁面模型一致；2.5 m 时与无滑移 IBM 基本相同。
 - **近壁解析显著改善。** 中性开放槽道（h=16Δ）首个空气节点 U/u* 偏差：无模型 −5.3（约 −67%），
   壁面模型 −0.1；AIJ Case E 2.5 m 网格上游 400 m 处 1.25 m 高平均风速 0.52→2.43 m/s（来流 2.85，
   z0=0.003 m）；建筑区首层平均风速 0.60→2.02 m/s。
@@ -125,13 +126,76 @@ h=16Δ、z0/h=1.25e-3、Cs=0.173，约 15 h/u* 平均：
 - 嵌套网格平均段每个样本在 CPU 上做 `stitch_nested_physical_fields`，大 `purge_avg` 时极慢（与本功能无关）。
 - 双卡 `[2,1,1]` 网格宽度会被调整为偶数（405→404），整套流程单/双卡输出不可逐位比较。
 
-## 6 后续：SurfaceIBM 表面的壁面模型（设计，未实现）
+## 6 SurfaceIBM 表面的壁面模型（已实现，`culbm_wall_model_ibm`）
 
-IBM 已有逐 marker 目标速度 `wall_velocity` 与法向。最省改动的方案是每步在强制迭代前，为每个 marker
-在 `x_m + (r + d_ref) n̂` 处三线性插值上一时间步速度（内核间无竞争），按对数律求 u*，把切向目标速度设为
-对数律外推到 marker 的滑移速度，法向仍为 0；现有多重直接强制循环不变。开销约为每 marker 每步一次 8 点
-插值（相对 8 次 27 点强制迭代很小）。难点在多卡 fragment / MPI 路径的探针跨域与逐 fragment 目标速度同步，
-以及需要单独的 IBM 槽道与建筑算例验证；不应在未验证前默认开启。
+`ibm_enabler=true` 且 `culbm_wall_model=true` 时，`culbm_wall_model_ibm`（缺省 true）让浸没表面也
+使用壁面模型；`false` 保留无滑移 IBM 直接强制，壁面模型只作用于体素壁。
+
+### 6.1 做法：单侧壁面应力
+
+1. 建筑保留体素实心核，不清除 marker 支撑带，不运行无滑移多重直接强制；支撑带内的实体格点在
+   IBM 掩码中记为 bit 1，指向它们的体素面只做镜面交换（自由滑移）。其他实体面（任意厚度的压实
+   地基、无 marker 的地形/体素）仍用反弹壁面应力。
+2. 每步重建基础宏观速度后，每个 marker 只在其 Roma3 支撑中位于输入表面外侧（`h=(x-x_m)·n-r>0`）
+   且非实体的格点上，用归一化权重求探针速度与平均壁距，按对数律得 `τ_w`；把 `-τ_w·A·t̂` 以同一组
+   单侧权重写入 IBM 力场（Guo 强制），计入反力。法向朝内（`all_triangles` 的 STL 绕序错误）时自动改用
+   另一侧。
+3. 单卡每个 marker 一个线程；多卡/MPI 按 fragment 计算两侧部分和，主机归约后选侧求壁面律再分配。
+
+这与扩散界面 IBM 壁面模型文献的单侧处理一致（Shi 等 2019 把切向强制力与壁面律应力挂钩；完全单侧的
+扩散界面 IBM 用于 WMLES）。先试过、已放弃的两种做法：
+
+| 做法 | 结果 |
+|---|---|
+| 法向直接强制 + 切向应力力，清空的 skin 在实心核处镜面反射 | skin 与外侧近壁流体经粘性/SGS 耦合、闭合壳体内又不能随外侧运动，额外拖拽一份未建模应力；层流平板近壁流速只有目标的 3% |
+| 保留无滑移 IBM，迭代后把切向 IBM 力换成壁面应力 | IBM 为维持无滑移不断加大切向力、补偿又还给外侧，正反馈，几百步内出现非有限值 |
+
+### 6.2 验证
+
+- **层流平板（`CULBM.WallModelGPU`）**：两块非格点对齐 IBM 平面（z=4.3/18.7）夹住体积力层流。全部 marker 的
+  壁面力与外侧探针速度对数律之和差 0.05%；IBM 力承担体积力 91.5%，其余由无 marker 的周期缝隙体素面按
+  反弹壁面模型承担；中心首层速度与局地平衡差 2.7%（缝隙影响）。同一体积力下无滑移 IBM 首层速度只有其约 1.5%。
+- **单卡/双卡（`CULBM.WallModelMultiGPU`）**：设备驻留路径与 fragment 路径 2000 步 max|Δu|<1e-5，反力差 4e-5。
+- **AIJ Case E（N 风向，300 s 平均）**：
+
+![building area 5 m](CULBM_wall_model_20261118/aij5m_ibm_streets.png)
+![points](CULBM_wall_model_20261118/aij_ibm_points_bar.png)
+
+| 网格 | 配置 | 建筑区首层平均风速 (m/s) | 测点风速比均值（实验 0.422） | R | FAC2 | 中位 MLUPS |
+|---|---|---|---|---|---|---|
+| 5 m | 体素，壁面模型 | 2.033 | 0.085 | 0.33 | 0.13 | 2636 |
+| 5 m | IBM，壁面模型全关 | 0.612 | 0.055 | 0.22 | 0.05 | 1765 |
+| 5 m | IBM 无滑移（体素壁壁面模型） | 1.991 | 0.036 | 0.19 | 0.03 | 1675 |
+| 5 m | IBM 壁面模型 | 2.033 | 0.086 | 0.33 | 0.13 | 2429 |
+| 2.5 m | 体素，壁面模型 | 1.540 | 0.147 | 0.28 | 0.25 | — |
+| 2.5 m | IBM 无滑移（地面壁面模型） | 1.552 | 0.146 | 0.26 | 0.28 | 1912 |
+| 2.5 m | IBM 壁面模型 | 1.541 | 0.147 | 0.28 | 0.25 | 2148 |
+
+  - AIJ 建筑基本轴向排列、表面落在体素面上，此时 IBM 壁面模型与体素反弹壁面模型施加相同的应力：5 m 首层
+    逐点平均差 0.001 m/s、相关 1.0000，测点几乎一致。差异只会出现在斜面/曲面上（应力方向、面积和壁距取自
+    真实表面），本例未覆盖，需要旋转建筑或曲面算例另行验证。
+  - 5 m 网格时无滑移 IBM 的 2–3 格强制带占据 2–4 格宽街道的大部分（测点 0.055/0.036），IBM 壁面模型
+    去掉这层后测点 0.086，与体素结果一致；主街和建筑群边缘首层风速最多高约 1.5 m/s。2.5 m 时两者测点几乎
+    相同（0.146/0.147）：对该例行人高度平均风速起主要作用的是地面壁面模型和街谷分辨率，建筑表面摩擦影响很小。
+  - `culbm_wall_model_ibm=false`（无滑移 IBM 表面 + 体素壁壁面模型）在 5 m 时比壁面模型全关还低（0.036 对
+    0.055）：近壁 SGS 层本应配合壁面模型，却在两侧是无滑移 IBM 墙的街道里提高了涡粘、增大侧壁拖拽。
+    因此 SurfaceIBM 工况应使用缺省的 `culbm_wall_model_ibm=true`；若保留无滑移表面，宜同时设
+    `culbm_wall_model_sgs_layers=0`。
+  - IBM 壁面模型不跑 8 次强制迭代，比无滑移 IBM 快 45%（5 m）/12%（2.5 m），比体素路径慢约 8%（5 m）。
+
+### 6.3 同时修复的问题
+
+早期 SurfaceIBM 工况的壁面模型硬编码地面在 `z_global=1`。AIJ 示例压实地基有两行实体，首个空气行是 z=2，
+结果地面没有壁面应力，而近壁 SGS 层却加在无滑移地面上，上游 400 m 处首层风速 0.22 m/s，比关闭壁面模型
+（0.71）还低。现改为按实体面判断，`culbm_wall_model_ibm=false` 时全部体素壁使用壁面模型（修复后同处 2.66，
+与体素算例一致），近壁 SGS 列高度图自底向上扫描实体栈，厚度不限。
+
+### 6.4 注意
+
+- SurfaceIBM 的力分配使用原子加，同一二进制两次运行不逐位一致（400 步后 max|Δu|≈0.02 m/s，新旧二进制间
+  差异相同），IBM 工况只能按统计与代码路径核对"关闭即不变"。
+- 2.5 m 网格时示例 STL 的地面板生成约 1e7 个候选 marker（随后因触及外壳被剔除），需把
+  `culbm_surface_ibm_max_markers` 从缺省 5e6 提到 2e7。
 
 ## 7 复现
 
@@ -141,4 +205,7 @@ CTest:   ctest --test-dir core/cfd_core/CULBM/build -R WallModel --output-on-fai
 channel: CULBM-wall-model-gpu-fp32-freeslip-test.exe --channel --open 1 --h 16 --wm 1 --sgs-layers 3 --steps 120000 --sample-start 60000 --sample-every 100
 bench:   CULBM-wall-model-gpu-test.exe --benchmark --nx 256 --ny 256 --nz 128 --period 12 --size 8 --height 24 --repeats 7
 AIJ:     test-output/wall-model-20261118/aij_caseE_*/conf.luwpf（run_aij.sh、analyze_aij.py、compare_aij_points.py、make_figures.py）
+IBM:     CULBM-wall-model-gpu-fp32-test.exe --ibm；CULBM-wall-model-gpu-test.exe --multi-gpu
+         aij_caseE_{5m,2p5m}_{ibmwm0,ibmwmg,ibmwm1}（ibm_enabler=true，all_triangles；wm0 关闭壁面模型，
+         wmg 仅体素壁，wm1 含 IBM 表面）
 ```

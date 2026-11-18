@@ -426,7 +426,7 @@ culbm_wall_model_sgs_layers = 3
 | 键 | 缺省值 | 含义 |
 |---|---:|---|
 | `culbm_wall_model` | `true` | 总开关；`false` 时不注入任何壁面模型代码，回到原无滑移反弹。 |
-| `culbm_wall_model_ibm` | `true` | `ibm_enabler=true` 时是否对 SurfaceIBM 浸没表面也使用壁面模型；`false` 时浸没表面保持无滑移 IBM 直接强制，只对压实地基首层使用壁面模型。 |
+| `culbm_wall_model_ibm` | `true` | `ibm_enabler=true` 时是否对 SurfaceIBM 浸没表面也使用壁面模型；`false` 时浸没表面保持无滑移 IBM 直接强制，只对体素壁（压实地基、地形）使用壁面模型。 |
 | `culbm_wall_model_z0_ground_m` | `0.03` | 朝上水平面（地面、屋顶）的空气动力学粗糙长度，SI 米；`0` 选择光滑壁对数律。 |
 | `culbm_wall_model_z0_building_m` | `0.01` | 竖直面与朝下面的粗糙长度；`0` 选择光滑壁对数律。 |
 | `culbm_wall_model_kappa` | `0.41` | 对数律 von Kármán 常数，范围 (0, 1]。 |
@@ -460,8 +460,10 @@ Esoteric-Pull 中流体格点射向 `TYPE_S` 邻点的分布留在固体槽位�
 流体行"（每 GPU 每列 2 Byte，含 halo，按全局视图生成以保证分解无关），在其上
 `z_w=0.5…L-0.5` 的 L 行中把 Smagorinsky 长度取为 `max(Cs·dx, κ·z_w)`：首几层对数层
 涡尺度 `κz` 未被网格解析，仅提高壁面应力会让剪切挤进前几层（对数层失配）。该近壁
-SGS 层只覆盖朝上表面（地面、屋顶）。SurfaceIBM 工况下该列高度图在 attach 时、
-清除支撑带固体之前生成，因此同样覆盖浸没建筑的屋顶。
+SGS 层只覆盖朝上表面（地面、屋顶）。高度图在 `LBM::initialize()` 中自底向上扫描实体
+栈，压实地基的厚度不限；IBM 壁面模型保留建筑实心核，因此也覆盖浸没建筑屋顶。无滑移
+SurfaceIBM（`culbm_wall_model_ibm=false`）的支撑带已被清空，扫描停在 skin 之下，屋顶
+上方不加 SGS 层（无滑移面不能叠加该层）。
 
 ### SurfaceIBM 表面
 
@@ -471,8 +473,8 @@ SGS 层只覆盖朝上表面（地面、屋顶）。SurfaceIBM 工况下该列�
 
 1. 建筑保留体素化得到的 `TYPE_S` 实心核，不清除 marker 支撑带，也不运行无滑移
    多重直接强制；支撑带内的实体格点在 IBM 掩码中记为 bit 1，指向它们的体素面在
-   `stream_collide`/`update_fields` 中只做镜面交换（自由滑移）。其他实体面（压实地基、
-   无 marker 的地形或体素）仍用上节的反弹壁面应力。
+   `stream_collide`/`update_fields` 中只做镜面交换（自由滑移）。其他实体面（任意厚度的
+   压实地基、无 marker 的地形或体素）仍用上节的反弹壁面应力。
 2. 每步在重建基础宏观速度后，每个 marker 只在其 Roma3 支撑中位于输入表面外侧
    （`h = (x-x_m)·n - r > 0`，`r` 为 marker 退缩距离）且非实体的格点上，用归一化权重
    得到探针速度和平均壁距 `h`；按 `n_z ≥ cos45°` 选地面或建筑 `z0`，由对数律得
@@ -492,6 +494,13 @@ SGS 层只覆盖朝上表面（地面、屋顶）。SurfaceIBM 工况下该列�
 
 单 GPU 设备驻留路径为每 marker 一个 kernel 线程；多 GPU/MPI 路径按 fragment 计算
 两侧部分和（12 个 FP32），经主机/MPI 归约后选侧并求壁面律，再按 fragment 单侧分配。
+
+`culbm_wall_model_ibm=false` 时浸没表面保持原无滑移多重直接强制，壁面模型作用于全部
+体素壁。早期版本只对 `z_global=1` 行施加地面应力；示例 AIJ 算例压实地基有两行实体，
+地面因此没有壁面应力，而近壁 SGS 层却加在无滑移地面上，近地风速反而低于关闭壁面
+模型（上游 400 m 处 0.22 对 0.71 m/s），现已改为按实体面判断。即使修复后，近壁 SGS 层
+在两侧为无滑移 IBM 墙的窄街里仍会增大侧壁拖拽（AIJ 5 m 测点均值 0.036，壁面模型全关为
+0.055，IBM 壁面模型为 0.086），保留无滑移表面时宜同时设 `culbm_wall_model_sgs_layers=0`。
 
 ### 开销
 
@@ -514,7 +523,7 @@ SGS 层只覆盖朝上表面（地面、屋顶）。SurfaceIBM 工况下该列�
 `CULBM.WallModelGPU` 中两块 IBM 平面（z=4.3 与 18.7，非格点对齐）夹住的层流体积力
 平板，全部 marker 的壁面力与外侧探针速度的对数律之和相差 0.05%，IBM 力承担体积力的
 91.5%（其余由无 marker 的周期缝隙体素面按反弹壁面模型承担）；中心首层速度与局地
-平衡差 2.7%（缝隙影响）。同一体积力下无滑移 IBM 的首层速度只有其 1.3%。
+平衡差 2.7%（缝隙影响）。同一体积力下无滑移 IBM 的首层速度只有其约 1.5%。
 `CULBM.WallModelMultiGPU` 另比较 IBM 壁面模型的单卡设备驻留路径与双卡 fragment
 路径（FP16C、2000 步，max|Δu| < 1e-5，反力相差 4e-5）。`--channel`、`--open 1`（需
 `CULBM-wall-model-gpu-fp32-freeslip-test`）与 `--benchmark` 为不注册 CTest 的研究

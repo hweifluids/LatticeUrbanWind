@@ -966,9 +966,9 @@ deck 解析默认打开。配置与 SGS 一样必须在构造第一个 `LBM` 前
   边缘保留无滑移。只读本格点已载入分布与静态 flags，单卡与 `Dx=2` 双卡逐位一致。
 - 近壁 SGS 层 `culbm_wall_model_sgs_layers`（缺省 3）：`LBM::initialize()` 用全局 host
   flags 为每列求"底部实体之上首个流体行"（ushort/列，含 halo），前 L 行 Smagorinsky
-  长度取 `max(Cs·dx, κ z_w)`；只覆盖朝上表面。SurfaceIBM 工况下该图在
-  `attach_surface_ibm` 时、清除支撑带之前生成（`wall_model_surface_frozen_`），因此也
-  覆盖浸没建筑屋顶。SurfaceIBM 表面见下节"SurfaceIBM 表面壁面模型"。
+  长度取 `max(Cs·dx, κ z_w)`；只覆盖朝上表面。扫描从 z=0 起穿过整个实体栈，压实地基
+  厚度不限（AIJ 示例为两行，首个空气行是 z=2，不要再假设 z_global=1）。SurfaceIBM
+  表面见下节"SurfaceIBM 表面壁面模型"。
 - 凹角（两固壁面相交）处两面的切向对共享同一条斜向链（如 16 号链同属"地面 x 对"与
   "+x 墙 z 对"）；两次交换线性叠加得到 `f16←f9+f10−f16` 这类非反射组合，曾在 AIJ
   5 m 体素建筑的单格凹坑/窄缝首层泵出 12–29 m/s 虚假射流，CTest 凹井用例中直接发散。
@@ -1018,3 +1018,55 @@ deck 解析默认打开。配置与 SGS 一样必须在构造第一个 `LBM` 前
 
 嵌套网格平均阶段每个样本在 CPU 上执行 `stitch_nested_physical_fields`，大 `purge_avg`
 会让嵌套算例在平均段极慢（与壁面模型无关）；冒烟测试应把 `purge_avg` 设小。
+
+## CULBM SurfaceIBM 表面壁面模型（261118）
+
+`culbm_wall_model_ibm`（deck 缺省 true，需 `ibm_enabler` 与 `culbm_wall_model`）把壁面
+模型扩展到 SurfaceIBM 浸没表面。编译期 `WALL_MODEL_IBM`，常数 `def_wm_z0_h/v`（格子单位
+粗糙长度）、`def_wm_ibm_retraction`（= `culbm_surface_ibm_retraction_lu`）、最小外侧权重
+0.01、朝上判据 `n_z≥cos45°`（与主机端 `surface_ibm.cpp` 中常量必须一致）。
+
+做法（单侧，参照 Shi 等 2019 与"完全单侧扩散界面 IBM 的 WMLES"思路）：
+- 不清除 marker 支撑带的 `TYPE_S`（建筑保留体素实心核），不运行无滑移多重直接强制；
+  `mark_core_cells()` 把支撑带内的实体格点在 IBM 掩码里置 bit 1。
+- `apply_wall_model_ibm()`：指向 bit 1 实体的面只做镜面交换（自由滑移）；其余实体面
+  （压实地基、无 marker 的地形/体素、周期缝）按反弹壁面模型加应力。凹角冲突规则不变。
+- 每步基础宏观速度重建后，每个 marker 只在支撑中 `h=(x-x_m)·n-r>0` 且非实体的格点上
+  用归一化 Roma3 权重取探针速度与平均壁距，按对数律求 `τ_w`，把 `-τ_w·A·t̂` 以同一组
+  权重写入 IBM 力场（Guo 强制）并计入反力。法向朝内（`all_triangles` 绕序错误）时自动
+  改用另一侧，`h=r-(x-x_m)·n`。单卡 `surface_ibm_wm_device` 一个线程一个 marker；多卡
+  `surface_ibm_wm_partial` 输出两侧 12 个部分和，主机归约选侧后 `surface_ibm_wm_spread`。
+
+试过且不要再用：
+- 法向直接强制 + 切向应力力 + 清空的 skin 在实心核处镜面反射：skin 与外侧近壁流体通过
+  粘性/SGS 耦合，闭合壳体内又无法随外侧共同运动，额外拖拽一份未建模应力；层流平板
+  近壁流速只有目标的 3%。
+- 保留无滑移 IBM、迭代后把每个 marker 的切向 IBM 力换成壁面应力：IBM 为维持无滑移
+  不断加大切向力、补偿又把它还给外侧，正反馈发散（几百步出现非有限值）。
+
+注意：
+- SurfaceIBM 力分配使用原子加，同一二进制两次运行不逐位一致（400 步后 max|Δu|
+  ≈0.02 m/s，与新旧二进制差异相同），IBM 工况的"关闭即不变"只能按统计/代码路径核对。
+- 2.5 m 网格时 AIJ 示例 STL 的地面板会生成约 1e7 个候选 marker（随后因触及外壳被剔除），
+  超过 `culbm_surface_ibm_max_markers` 缺省 5e6，需设 2e7。
+- 早期 `WALL_MODEL_GROUND_ONLY` 硬编码地面在 `z_global=1`；AIJ 示例压实地基两行实体，
+  首个空气行是 z=2，结果地面无壁面应力而 SGS 层却加在无滑移地面上，近地风速比关闭
+  壁面模型还低（上游 400 m：0.22 对 0.71 m/s）。已改为按实体面判断，`culbm_wall_model_ibm
+  =false` 时壁面模型作用于全部体素壁，列高度图在清除支撑带后自底向上扫描。
+
+验证（`tests/test_wall_model_gpu.cpp`）：
+- 两块非格点对齐 IBM 平面（z=4.3/18.7，各带实心核）夹住的层流体积力平板：全部 marker
+  壁面力与外侧探针速度对数律之和差 0.05%；IBM 力承担体积力 91.5%（其余由无 marker 的
+  周期缝隙体素面按反弹壁面模型承担）；中心首层速度与局地平衡差 2.7%。同一体积力下
+  无滑移 IBM 首层速度只有其约 1.5%。
+- 单卡设备驻留路径与双卡 fragment 路径（FP16C，2000 步）max|Δu|<1e-5，反力差 4e-5。
+- AIJ Case E 5 m（N 风向，300 s 平均）：IBM 壁面模型与体素反弹壁面模型首层平均风速
+  2.033/2.033 m/s，逐点平均差 0.001 m/s、相关 1.0000（轴向建筑、面落在体素面上时
+  两者施加相同应力）；风洞 80 测点均值：体素无模型 0.075、体素壁面模型 0.085、IBM 全关
+  0.055、无滑移 IBM+体素壁壁面模型 0.036、IBM 壁面模型 0.086（实验 0.422）；2.5 m 时无滑移
+  IBM 与 IBM 壁面模型 0.146/0.147。5 m 网格下无滑移 IBM 的 2–3 格强制带占据窄街大部分；
+  无滑移 IBM 墙之间的近壁 SGS 层又增大侧壁拖拽（所以 0.036 低于全关）。分析脚本的地面
+  判据须用实体率 >0.9：无滑移 IBM 清空的 skin 使地面行只有约 97% 实体，严格判据会把测点
+  采样高度错一格。
+- 吞吐（AIJ 5 m，单 2080 Ti 中位 MLUPS）：体素壁面模型 2636，IBM 壁面模型 2429，
+  无滑移 IBM 1765（IBM 壁面模型不跑 8 次强制迭代，比无滑移 IBM 快约 38%）。
