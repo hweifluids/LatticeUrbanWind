@@ -20,6 +20,35 @@ namespace {
 
 constexpr std::uint64_t mpi_chunk_bytes = 64ull*1024ull*1024ull;
 
+bool environment_value_is_false(const char* const value) {
+	return value!=nullptr && (
+		std::strcmp(value, "0")==0 ||
+		std::strcmp(value, "false")==0 ||
+		std::strcmp(value, "FALSE")==0 ||
+		std::strcmp(value, "off")==0 ||
+		std::strcmp(value, "OFF")==0 ||
+		std::strcmp(value, "no")==0 ||
+		std::strcmp(value, "NO")==0);
+}
+
+bool mpi_launcher_detected() {
+	const char* const launcher_markers[] = {
+		"PMI_RANK",
+		"PMIX_RANK",
+		"OMPI_COMM_WORLD_RANK",
+		"MV2_COMM_WORLD_RANK",
+		"MPI_LOCALRANKID",
+		"SLURM_PROCID",
+		"ALPS_APP_PE",
+		"PALS_RANKID"
+	};
+	for(const char* const marker : launcher_markers) {
+		const char* const value = std::getenv(marker);
+		if(value!=nullptr && *value!='\0') return true;
+	}
+	return false;
+}
+
 #ifdef CULBM_ENABLE_MPI
 struct Mpi_Runtime {
 	std::mutex mutex;
@@ -62,35 +91,6 @@ struct Mpi_Runtime {
 		if(initialized_here) MPI_Finalize();
 	}
 };
-
-bool environment_value_is_false(const char* const value) {
-	return value!=nullptr && (
-		std::strcmp(value, "0")==0 ||
-		std::strcmp(value, "false")==0 ||
-		std::strcmp(value, "FALSE")==0 ||
-		std::strcmp(value, "off")==0 ||
-		std::strcmp(value, "OFF")==0 ||
-		std::strcmp(value, "no")==0 ||
-		std::strcmp(value, "NO")==0);
-}
-
-bool mpi_launcher_detected() {
-	const char* const launcher_markers[] = {
-		"PMI_RANK",
-		"PMIX_RANK",
-		"OMPI_COMM_WORLD_RANK",
-		"MV2_COMM_WORLD_RANK",
-		"MPI_LOCALRANKID",
-		"SLURM_PROCID",
-		"ALPS_APP_PE",
-		"PALS_RANKID"
-	};
-	for(const char* const marker : launcher_markers) {
-		const char* const value = std::getenv(marker);
-		if(value!=nullptr && *value!='\0') return true;
-	}
-	return false;
-}
 
 bool mpi_initialization_requested() {
 	const char* const override_value = std::getenv("CULBM_MPI");
@@ -222,6 +222,18 @@ void mpi_initialize(int* argc, char*** argv) {
 #else
 	(void)argc;
 	(void)argv;
+	const char* const override_value = std::getenv("CULBM_MPI");
+	const bool forced = override_value!=nullptr && *override_value!='\0' &&
+		!environment_value_is_false(override_value);
+	if(forced || mpi_launcher_detected()) {
+		std::fprintf(
+			stderr,
+			"CULBM error: MPI execution was requested, but this binary was "
+			"built without MPI support. Rebuild with CULBM_ENABLE_MPI=ON "
+			"and an MPI C++ implementation.\n");
+		std::fflush(stderr);
+		std::exit(EXIT_FAILURE);
+	}
 #endif
 }
 

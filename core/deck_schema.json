@@ -13,6 +13,12 @@
       "aliases": ["domain", "projected si range after rotation", "wrf data range in lon/lat"]
     },
     {
+      "id": "preprocess",
+      "title": "Preprocessing",
+      "description": "Unified compute-backend controls for native preprocessing commands.",
+      "aliases": ["preprocess", "preprocessing", "preprocessing controls"]
+    },
+    {
       "id": "generated",
       "title": "Generated",
       "description": "Derived domain information written back by the pipeline.",
@@ -163,9 +169,9 @@
       "key": "terr_voxel_approach",
       "label": "Terrain approach",
       "section": "domain",
-      "help": "Terrain interpolation approach used during voxelization. kriging_gpu uses the Numba CUDA backend when available and falls back to CPU kriging otherwise.",
+      "help": "Terrain interpolation algorithm used during voxelization. The native compute backend is selected independently by preprocess_use_gpu and preprocess_gpu_device.",
       "kind": "enum",
-      "enum_values": ["idw", "kriging_gpu", "kriging"],
+      "enum_values": ["idw", "kriging"],
       "modes": ["luw", "luwpf"]
     },
     {
@@ -264,6 +270,20 @@
       "help": "Reference latitude of the domain center.",
       "kind": "float"
     },
+    {
+      "key": "preprocess_use_gpu",
+      "label": "Use GPU",
+      "section": "preprocess",
+      "help": "Use the selected OpenCL GPU for GPU-capable native preprocessing kernels. Explicit GPU selection fails instead of silently falling back to CPU.",
+      "kind": "boolean"
+    },
+    {
+      "key": "preprocess_gpu_device",
+      "label": "GPU device",
+      "section": "preprocess",
+      "help": "Zero-based OpenCL GPU device index used when preprocess_use_gpu is true.",
+      "kind": "integer"
+    },
 
     {
       "key": "origin_shift_applied",
@@ -302,6 +322,15 @@
       "kind": "float"
     },
 
+    {
+      "key": "cfd_solver",
+      "label": "CFD solver",
+      "section": "cfd",
+      "help": "Select CULBM (the default) or explicitly opt in to FluidX3D. SurfaceIBM requires CULBM.",
+      "kind": "enum",
+      "enum_values": ["culbm", "fluidx3d"],
+      "quoted": true
+    },
     {
       "key": "n_gpu",
       "label": "GPU split",
@@ -390,6 +419,14 @@
       "kind": "integer"
     },
     {
+      "key": "culbm_unsteady_start_step",
+      "label": "CULBM unsteady output start step",
+      "section": "output",
+      "help": "CULBM only: first eligible step for periodic unsteady velocity output (default 0). The stride remains aligned to step zero; final outputs are unchanged.",
+      "kind": "integer",
+      "default": 0
+    },
+    {
       "key": "culbm_output_global_vtk",
       "label": "CULBM global VTK",
       "section": "output",
@@ -471,7 +508,7 @@
       "key": "buoyancy",
       "label": "Buoyancy",
       "section": "physics",
-      "help": "Enable buoyancy-driven temperature coupling.",
+      "help": "Request buoyancy-driven temperature coupling. If no valid temperature boundary is supplied, the solver automatically disables buoyancy feedback.",
       "kind": "boolean"
     },
     {

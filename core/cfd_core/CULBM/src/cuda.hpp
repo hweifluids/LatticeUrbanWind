@@ -805,7 +805,6 @@ public:
 			cuda_check(cuStreamSynchronize(state->stream), "cuStreamSynchronize");
 		}
 	}
-	CUdeviceptr get_cl_buffer() const { return device_buffer; }
 	CUdeviceptr get_cuda_buffer() const { return device_buffer; }
 };
 

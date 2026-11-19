@@ -5,6 +5,7 @@ project(CULBM LANGUAGES C CXX)
 include(CTest)
 find_package(CUDAToolkit 12.0 REQUIRED)
 find_package(Threads REQUIRED)
+list(GET CUDAToolkit_INCLUDE_DIRS 0 CULBM_CUDA_PRIMARY_INCLUDE_DIR)
 option(
     CULBM_ENABLE_VTKHDF
     "Enable the optional HDF5-backed VTKHDF physical-output writer when HDF5 is available"
@@ -54,18 +55,81 @@ option(
     CULBM_ENABLE_MPI
     "Enable one-domain-per-rank multi-node execution when MPI is available"
     ON)
+option(
+    CULBM_REQUIRE_MPI
+    "Fail configuration unless MPI support is enabled and available"
+    OFF)
+if(CULBM_REQUIRE_MPI AND NOT CULBM_ENABLE_MPI)
+    message(FATAL_ERROR
+        "CULBM_REQUIRE_MPI=ON is incompatible with CULBM_ENABLE_MPI=OFF")
+endif()
 if(CULBM_ENABLE_MPI)
     find_package(MPI QUIET COMPONENTS CXX)
     if(NOT MPI_CXX_FOUND)
-        message(WARNING
-            "MPI C++ support was not found. CULBM will retain its "
-            "single-process arbitrary-GPU mode, but mpiexec multi-node "
-            "execution will be disabled.")
+        if(CULBM_REQUIRE_MPI)
+            message(FATAL_ERROR
+                "MPI C++ support is required but was not found. Load the "
+                "cluster MPI development environment before configuring CULBM.")
+        else()
+            message(WARNING
+                "MPI C++ support was not found. CULBM will retain its "
+                "single-process arbitrary-GPU mode, but mpiexec multi-node "
+                "execution will be disabled.")
+        endif()
     endif()
 endif()
 
-# CULBM owns its adapted host solver sources.  Keep this list explicit so a
-# fresh checkout never reads, copies, or patches an external solver tree.
+# CUDA device code has one human-readable source of truth under src/device.
+# The generated fragments only embed those bytes into the host executable;
+# NVRTC still performs per-domain specialization at runtime.
+set(CULBM_DEVICE_SRC "${CMAKE_CURRENT_LIST_DIR}/src/device")
+set(CULBM_GENERATED_CUDA_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/cuda")
+set(CULBM_CUDA_EMBED_SCRIPT
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedCudaSource.cmake")
+
+function(culbm_embed_cuda_source source_name output_name)
+    set(input_file "${CULBM_DEVICE_SRC}/${source_name}")
+    set(output_file "${CULBM_GENERATED_CUDA_DIR}/${output_name}.inc")
+    if(NOT EXISTS "${input_file}")
+        message(FATAL_ERROR
+            "CULBM native CUDA source is missing: ${input_file}")
+    endif()
+    # Generate during CMake configuration, inside the build tree. Registering
+    # the canonical source as a configure dependency makes ordinary builds
+    # regenerate it automatically after edits and avoids first-build races in
+    # Visual Studio/Xcode, which cannot honor per-object generated-file deps.
+    set_property(
+        DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${input_file}" "${CULBM_CUDA_EMBED_SCRIPT}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_FILE=${input_file}"
+            "-DOUTPUT_FILE=${output_file}"
+            -P "${CULBM_CUDA_EMBED_SCRIPT}"
+        RESULT_VARIABLE embed_result
+        ERROR_VARIABLE embed_error)
+    if(NOT embed_result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to embed native CUDA source ${source_name}: "
+            "${embed_error}")
+    endif()
+endfunction()
+
+culbm_embed_cuda_source(
+    cuda_prelude.cuh culbm_cuda_prelude)
+culbm_embed_cuda_source(
+    lbm_kernels.cu culbm_lbm_kernels)
+culbm_embed_cuda_source(
+    runtime_kernels.cu culbm_runtime_kernels)
+culbm_embed_cuda_source(
+    particle_advection_kernels.cu culbm_particle_advection_kernels)
+culbm_embed_cuda_source(
+    surface_ibm_kernels.cu culbm_surface_ibm_kernels)
+include_directories(BEFORE "${CULBM_GENERATED_CUDA_DIR}")
+
+# CULBM owns its host solver sources. Keep this list explicit so a fresh
+# checkout never reads, copies, or patches another solver tree.
 set(CULBM_SOLVER_SRC "${CMAKE_CURRENT_LIST_DIR}/src/solver")
 set(CULBM_SOLVER_FILES
     defines.hpp
@@ -81,7 +145,6 @@ set(CULBM_SOLVER_FILES
     interpolation_hd.hpp
     kernel.cpp
     kernel.hpp
-    kernel_cuda_source.inc
     lbm.cpp
     lbm.hpp
     main.cpp
@@ -115,11 +178,14 @@ set(CULBM_SOLVER_SOURCES
 # SurfaceIBM is a runtime-selectable wall treatment.  Keep its host/runtime
 # pieces grouped so every focused target that embeds lbm.cpp/kernel.cpp links
 # the same optional implementation as the production executable.
-set(CULBM_SURFACE_IBM_SOURCES
+set(CULBM_SURFACE_IBM_RUNTIME_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_config.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_kernels.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_geometry.cpp")
+
+set(CULBM_SURFACE_IBM_SOURCES
+    ${CULBM_SURFACE_IBM_RUNTIME_SOURCES})
 
 set(CULBM_SOURCES
     ${CULBM_SOLVER_SOURCES}
@@ -152,7 +218,7 @@ else()
 endif()
 target_compile_definitions(CULBM PRIVATE
     CULBM_BACKEND=1
-    "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+    "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 if(MPI_CXX_FOUND)
     target_compile_definitions(
         CULBM PRIVATE CULBM_ENABLE_MPI=1)
@@ -206,6 +272,37 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(
+        CULBM-cuda-source-embedding-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_cuda_source_embedding.cpp")
+    target_compile_features(
+        CULBM-cuda-source-embedding-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-cuda-source-embedding-test PRIVATE
+        "${CULBM_GENERATED_CUDA_DIR}")
+    add_test(
+        NAME CULBM.CudaSourceEmbedding
+        COMMAND
+            CULBM-cuda-source-embedding-test
+            "${CULBM_DEVICE_SRC}/cuda_prelude.cuh"
+            "${CULBM_DEVICE_SRC}/lbm_kernels.cu"
+            "${CULBM_DEVICE_SRC}/runtime_kernels.cu"
+            "${CULBM_DEVICE_SRC}/particle_advection_kernels.cu"
+            "${CULBM_DEVICE_SRC}/surface_ibm_kernels.cu")
+    set_tests_properties(
+        CULBM.CudaSourceEmbedding PROPERTIES LABELS "cuda;source;build")
+
+    add_executable(
+        CULBM-thermal-coupling-policy-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_thermal_coupling_policy.cpp")
+    target_compile_features(
+        CULBM-thermal-coupling-policy-test PRIVATE cxx_std_17)
+    add_test(
+        NAME CULBM.ThermalCouplingPolicy
+        COMMAND CULBM-thermal-coupling-policy-test)
+    set_tests_properties(
+        CULBM.ThermalCouplingPolicy PROPERTIES LABELS "temperature;config")
+
+    add_executable(
         CULBM-surface-ibm-config-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_surface_ibm_config.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_config.cpp")
@@ -239,7 +336,7 @@ if(BUILD_TESTING)
 
     set(CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -269,7 +366,7 @@ if(BUILD_TESTING)
     target_compile_definitions(
         CULBM-surface-ibm-gpu-test PRIVATE
         CULBM_BACKEND=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
     if(MPI_CXX_FOUND)
         target_compile_definitions(
             CULBM-surface-ibm-gpu-test PRIVATE CULBM_ENABLE_MPI=1)
@@ -327,6 +424,156 @@ if(BUILD_TESTING)
             LABELS "gpu;mpi;surface-ibm;integration")
     endif()
 
+    foreach(CULBM_SURFACE_IBM_VALIDATION_PRECISION IN ITEMS fp16c fp32)
+        set(CULBM_SURFACE_IBM_VALIDATION_TARGET
+            "CULBM-surface-ibm-physical-validation-${CULBM_SURFACE_IBM_VALIDATION_PRECISION}")
+        add_executable(
+            ${CULBM_SURFACE_IBM_VALIDATION_TARGET}
+            "${CMAKE_CURRENT_LIST_DIR}/validation/surface_ibm/surface_ibm_physical_validation.cpp"
+            ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+        target_compile_features(
+            ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(
+            ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE
+            "${CULBM_SOLVER_SRC}"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CUDAToolkit_INCLUDE_DIRS}")
+        target_link_libraries(
+            ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE
+            CUDA::cuda_driver
+            CUDA::nvrtc
+            Threads::Threads)
+        target_compile_definitions(
+            ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE
+            CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+        if(CULBM_SURFACE_IBM_VALIDATION_PRECISION STREQUAL "fp32")
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE
+                CULBM_DISABLE_FP16C=1)
+        endif()
+        if(MPI_CXX_FOUND)
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE
+                CULBM_ENABLE_MPI=1)
+            target_link_libraries(
+                ${CULBM_SURFACE_IBM_VALIDATION_TARGET} PRIVATE MPI::MPI_CXX)
+        endif()
+    endforeach()
+
+    foreach(CULBM_SURFACE_IBM_3D_CHANNEL_PRECISION IN ITEMS fp16c fp32)
+        set(CULBM_SURFACE_IBM_3D_CHANNEL_TARGET
+            "CULBM-surface-ibm-3d-channel-validation-${CULBM_SURFACE_IBM_3D_CHANNEL_PRECISION}")
+        add_executable(
+            ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET}
+            "${CMAKE_CURRENT_LIST_DIR}/validation/surface_ibm/surface_ibm_3d_channel_validation.cpp"
+            ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+        target_compile_features(
+            ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(
+            ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE
+            "${CULBM_SOLVER_SRC}"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CUDAToolkit_INCLUDE_DIRS}")
+        target_link_libraries(
+            ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE
+            CUDA::cuda_driver
+            CUDA::nvrtc
+            Threads::Threads)
+        target_compile_definitions(
+            ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE
+            CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+        if(CULBM_SURFACE_IBM_3D_CHANNEL_PRECISION STREQUAL "fp32")
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE
+                CULBM_DISABLE_FP16C=1)
+        endif()
+        if(MPI_CXX_FOUND)
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE
+                CULBM_ENABLE_MPI=1)
+            target_link_libraries(
+                ${CULBM_SURFACE_IBM_3D_CHANNEL_TARGET} PRIVATE MPI::MPI_CXX)
+        endif()
+    endforeach()
+
+    foreach(CULBM_SURFACE_IBM_STL_VALIDATION_PRECISION IN ITEMS fp16c fp32)
+        set(CULBM_SURFACE_IBM_STL_VALIDATION_TARGET
+            "CULBM-surface-ibm-stl-pipeline-validation-${CULBM_SURFACE_IBM_STL_VALIDATION_PRECISION}")
+        add_executable(
+            ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET}
+            "${CMAKE_CURRENT_LIST_DIR}/validation/surface_ibm/surface_ibm_stl_pipeline_validation.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_geometry.cpp"
+            ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+        target_compile_features(
+            ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(
+            ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE
+            "${CULBM_SOLVER_SRC}"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CUDAToolkit_INCLUDE_DIRS}")
+        target_link_libraries(
+            ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE
+            CUDA::cuda_driver
+            CUDA::nvrtc
+            Threads::Threads)
+        target_compile_definitions(
+            ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE
+            CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+        if(CULBM_SURFACE_IBM_STL_VALIDATION_PRECISION STREQUAL "fp32")
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE
+                CULBM_DISABLE_FP16C=1)
+        endif()
+        if(MPI_CXX_FOUND)
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE
+                CULBM_ENABLE_MPI=1)
+            target_link_libraries(
+                ${CULBM_SURFACE_IBM_STL_VALIDATION_TARGET} PRIVATE MPI::MPI_CXX)
+        endif()
+    endforeach()
+
+    foreach(CULBM_SURFACE_IBM_RAY_VALIDATION_PRECISION IN ITEMS fp16c fp32)
+        set(CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET
+            "CULBM-surface-ibm-ray-pipeline-validation-${CULBM_SURFACE_IBM_RAY_VALIDATION_PRECISION}")
+        add_executable(
+            ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET}
+            "${CMAKE_CURRENT_LIST_DIR}/validation/surface_ibm/surface_ibm_ray_pipeline_validation.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/src/surface_ibm_geometry.cpp"
+            ${CULBM_SURFACE_IBM_GPU_RUNTIME_TEST_SOURCES})
+        target_compile_features(
+            ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(
+            ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE
+            "${CULBM_SOLVER_SRC}"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CUDAToolkit_INCLUDE_DIRS}")
+        target_link_libraries(
+            ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE
+            CUDA::cuda_driver
+            CUDA::nvrtc
+            Threads::Threads)
+        target_compile_definitions(
+            ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE
+            CULBM_BACKEND=1
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
+        if(CULBM_SURFACE_IBM_RAY_VALIDATION_PRECISION STREQUAL "fp32")
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE
+                CULBM_DISABLE_FP16C=1)
+        endif()
+        if(MPI_CXX_FOUND)
+            target_compile_definitions(
+                ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE
+                CULBM_ENABLE_MPI=1)
+            target_link_libraries(
+                ${CULBM_SURFACE_IBM_RAY_VALIDATION_TARGET} PRIVATE MPI::MPI_CXX)
+        endif()
+    endforeach()
+
     add_executable(
         CULBM-particle-advection-config-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_particle_advection_config.cpp"
@@ -362,7 +609,7 @@ if(BUILD_TESTING)
         target_compile_definitions(
             CULBM-particle-advection-gpu-test PRIVATE
             CULBM_BACKEND=1
-            "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
         add_test(
             NAME CULBM.ParticleAdvectionGPU
             COMMAND CULBM-particle-advection-gpu-test)
@@ -386,7 +633,7 @@ if(BUILD_TESTING)
     set(CULBM_SUBGRID_GPU_TEST_SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_subgrid_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -413,7 +660,7 @@ if(BUILD_TESTING)
     target_compile_definitions(
         CULBM-subgrid-gpu-test PRIVATE
         CULBM_BACKEND=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
     add_test(
         NAME CULBM.SubgridGPU
         COMMAND CULBM-subgrid-gpu-test)
@@ -455,13 +702,13 @@ if(BUILD_TESTING)
         CULBM-subgrid-gpu-fp32-test PRIVATE
         CULBM_BACKEND=1
         CULBM_DISABLE_FP16C=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 
     add_executable(
         CULBM-temperature-analytic-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -486,7 +733,7 @@ if(BUILD_TESTING)
         CULBM-temperature-analytic-gpu-test PRIVATE
         CULBM_BACKEND=1
         FREE_SLIP_BOUNDARIES=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
     add_test(
         NAME CULBM.TemperatureAnalyticGPU
         COMMAND CULBM-temperature-analytic-gpu-test)
@@ -505,7 +752,7 @@ if(BUILD_TESTING)
         CULBM-temperature-analytic-gpu-trt-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -531,7 +778,7 @@ if(BUILD_TESTING)
         CULBM_BACKEND=1
         CULBM_USE_TRT=1
         FREE_SLIP_BOUNDARIES=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
     add_test(
         NAME CULBM.TemperatureAnalyticGPU.TRT
         COMMAND CULBM-temperature-analytic-gpu-trt-test)
@@ -548,7 +795,7 @@ if(BUILD_TESTING)
         CULBM-manual-fields-forcing-gpu-test
         "${CMAKE_CURRENT_LIST_DIR}/tests/test_temperature_analytic_gpu.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -574,7 +821,7 @@ if(BUILD_TESTING)
         CULBM_BACKEND=1
         CULBM_DISABLE_UPDATE_FIELDS=1
         FREE_SLIP_BOUNDARIES=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
     add_test(
         NAME CULBM.ManualFieldsForcingGPU
         COMMAND CULBM-manual-fields-forcing-gpu-test
@@ -600,7 +847,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -627,7 +874,7 @@ if(BUILD_TESTING)
         FREE_SLIP_BOUNDARIES=1
         CULBM_DISABLE_FP16C=1
         CULBM_DISABLE_SUBGRID=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 
     # SGS counterpart to the frozen AV validation target.  Its runtime defaults
     # select the GEA literature coefficient and full momentum/scalar closure;
@@ -636,7 +883,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation-sgs
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -663,7 +910,7 @@ if(BUILD_TESTING)
         CULBM_GEA_SGS_DEFAULT=1
         FREE_SLIP_BOUNDARIES=1
         CULBM_DISABLE_FP16C=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 
     # Isolated stability control for the GEA analogue. TRT applies to the
     # momentum populations only; thermal populations retain their existing
@@ -672,7 +919,7 @@ if(BUILD_TESTING)
         CULBM-gea-validation-trt
         "${CMAKE_CURRENT_LIST_DIR}/validation/gea/gea_validation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/particle_advection_kernels.cpp"
-        ${CULBM_SURFACE_IBM_SOURCES}
+        ${CULBM_SURFACE_IBM_RUNTIME_SOURCES}
         "${CULBM_SOLVER_SRC}/info.cpp"
         "${CULBM_SOLVER_SRC}/kernel.cpp"
         "${CULBM_SOLVER_SRC}/lbm.cpp"
@@ -700,7 +947,7 @@ if(BUILD_TESTING)
         FREE_SLIP_BOUNDARIES=1
         CULBM_DISABLE_FP16C=1
         CULBM_DISABLE_SUBGRID=1
-        "CULBM_INCLUDE_DIR=\"${CUDAToolkit_INCLUDE_DIRS}\"")
+        "CULBM_INCLUDE_DIR=\"${CULBM_CUDA_PRIMARY_INCLUDE_DIR}\"")
 
     add_executable(
         CULBM-topology-test
@@ -765,6 +1012,46 @@ if(BUILD_TESTING)
             CULBM.PhysicalOutput PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:${CULBM_HDF5_RUNTIME_TARGET}>")
     endif()
+
+    add_executable(
+        CULBM-mpi-unavailable-runtime-test
+        "${CMAKE_CURRENT_LIST_DIR}/tests/test_mpi_direct_runtime.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/cuda_mpi.cpp")
+    target_compile_features(
+        CULBM-mpi-unavailable-runtime-test PRIVATE cxx_std_17)
+    target_include_directories(
+        CULBM-mpi-unavailable-runtime-test PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    add_test(
+        NAME CULBM.MPIUnavailableDirectRuntime
+        COMMAND
+            "${CMAKE_COMMAND}" -E env
+            --unset=CULBM_MPI
+            --unset=PMI_RANK
+            --unset=PMIX_RANK
+            --unset=OMPI_COMM_WORLD_RANK
+            --unset=MV2_COMM_WORLD_RANK
+            --unset=MPI_LOCALRANKID
+            --unset=SLURM_PROCID
+            --unset=ALPS_APP_PE
+            --unset=PALS_RANKID
+            $<TARGET_FILE:CULBM-mpi-unavailable-runtime-test>)
+    add_test(
+        NAME CULBM.MPIUnavailableForcedRuntime
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:CULBM-mpi-unavailable-runtime-test>"
+            "-DTEST_MODE=forced"
+            -P
+            "${CMAKE_CURRENT_LIST_DIR}/tests/expect_mpi_unavailable.cmake")
+    add_test(
+        NAME CULBM.MPIUnavailableLauncherRuntime
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:CULBM-mpi-unavailable-runtime-test>"
+            "-DTEST_MODE=launcher"
+            -P
+            "${CMAKE_CURRENT_LIST_DIR}/tests/expect_mpi_unavailable.cmake")
 
     if(MPI_CXX_FOUND AND MPIEXEC_EXECUTABLE)
         add_executable(

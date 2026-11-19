@@ -1,29 +1,19 @@
 # CULBM
 
-这是 LatticeUrbanWind 中的 CUDA 求解器实验模块。CULBM 随包保存并改编
-宿主求解器代码，保持现有 `.luw` / `.luwpf` 配置、边界处理、修正、
-湍流模型、湍流入口和 I/O 路径，并将设备执行后端改为 CUDA。现有生产参考求解器及
-前端、前处理和耦合代码不会被此模块修改。
+这是 LatticeUrbanWind 中独立构建和维护的 CUDA 求解器。CULBM 自己持有配置、
+主机端 C++、原生 CUDA、测试和运行时所需的全部源码；配置、编译和运行均不读取、
+复制、翻译或修补相邻 FluidX3D 源码树。
 
-CULBM 是自包含的源码包，但仍是派生/改编实现；它不是独立实现，也不应表述为
-clean-room 重写。归属、来源和适用限制随包保留在 `NOTICE.md` 与
-`THIRD_PARTY_LICENSES/` 中。
-
-当前标识为 `CULBM-v3.5-261117-surface-ibm-nesting`。`v3.5` 表示随包保存的
-宿主求解器源码代际，不表示 CULBM 拥有原始宿主代码的作者身份。
-
-这里的“脱离原代码”严格指工程边界：CULBM 的配置、编译、测试和运行不读取相邻
-宿主源码树，也不在构建目录临时复制或打补丁；`src/solver/` 是由 CULBM 自己
-持有、可直接维护和发布的固定派生快照。它不表示这些宿主文件已被 clean-room
-重写，也不表示代码谱系或许可证随目录依赖消失。
+当前标识为 `CULBM-v3.5-261117-surface-ibm-nesting`。CULBM 采用独立许可，其源码、构建、
+二进制与分发受本目录 `LICENSE.md` 和 `NOTICE.md` 约束。
 
 ## 实现方式
 
-CULBM 将改编后的宿主求解器快照随源码保存在 `src/solver/`，并直接编译；构建时
-不再从相邻目录 staging 或复制宿主源码。因此配置解析、网格生成、边界设置、
-时间推进调度、多域分解、修正和输出仍来自同一套派生宿主逻辑。
-在该快照之上，CULBM 注入 CUDA 专用的多卡 halo 调度和地基层压缩。自包含仅减少
-构建期外部依赖，不改变其派生来源、原始权利人或适用限制。
+CULBM 的主机端求解器位于 `src/solver/` 和 `src/`，由 CMake 直接编译。可读的原生
+CUDA C++ 唯一真源位于 `src/device/`；配置阶段的纯机械生成器把它们嵌入 build
+目录，使生产可执行文件保持自包含。该过程不执行 OpenCL 转译，也不读取其他求解器。
+后续设备功能应直接修改这些 `.cu` / `.cuh` 文件；build 目录内生成的 `.inc` 不是
+源码，不应手工维护或提交。
 
 当输入 STL 符合 LUW 预处理器生成的基础板特征（配置的 `base_height` 对应 STL
 底部与其上方的一对大面积水平面）时，CUDA 版会自动识别该基础板。它会裁掉完整
@@ -31,9 +21,9 @@ CULBM 将改编后的宿主求解器快照随源码保存在 `src/solver/`，并
 风，同时不再为完整基础厚度分配稠密 LBM 网格。无法确认 STL 特征、或裁剪后不能
 满足 z 向多卡分解时，求解器会保留原有网格并打印跳过原因。
 
-运行时，随包保存的原生 CUDA C++ 设备源码（`src/solver/kernel_cuda_source.inc`）
-直接与 CUDA 预置代码组合，由 NVRTC 按每张卡的 compute capability 编译为 PTX；
-不执行运行时源代码翻译。CUDA Driver API 负责：
+运行时，`src/device/` 的原生 CUDA C++ 设备源码与每域专门化定义组合，由 NVRTC
+按每张卡的 compute capability 编译为 PTX；不执行运行时源代码翻译。CUDA Driver
+API 负责：
 
 - 每卡 primary context、计算/入站/出站非阻塞 stream 和 kernel launch；
 - device buffer 及 pinned host transfer buffer；
@@ -88,7 +78,7 @@ MPI 模式当前以可移植、可在本机验证的锁页主机 staging 为基�
 halo 或 PNG 解码器。数值时间推进只使用 `fi` 和 `gi` halo；标准输出仅包括 VTK、
 均值场和 probe。保留的交互显示源码不属于默认生产路径，也不提供帧文件导出。
 
-设备编译使用 FMA、快速除法/平方根及不启用 FTZ，以贴合生产参考路径。宿主
+设备编译使用 FMA、快速除法/平方根及不启用 FTZ，以贴合生产参考路径。主机端
 仍使用生产构建的快速浮点设置；MSVC 下仅对 profile 三次插值函数启用局部
 precise 语义，以消除初始化表的编译器差异。
 
@@ -111,13 +101,19 @@ precise 语义，以消除初始化表的编译器差异。
   Euler/Heun-RK2/RK4/RK6，以及单进程本地多 GPU 域间迁移；
 - 最终/非稳态 VTK、均值场和 probe CSV 输出。
 
-LUW 的 `defines.hpp` 中未启用、当前流程也不调用的宿主扩展没有纳入本次
-实现，包括自由液面、移动边界和宿主原有的颗粒-流体耦合 `PARTICLES` 扩展。
+CULBM 的 `defines.hpp` 中未启用、当前生产流程也不调用的扩展不属于当前支持范围，
+包括自由液面、移动边界和双向颗粒-流体耦合 `PARTICLES` 扩展。
 本节所列的被动粒子平流是 CULBM 独立的单向示踪功能，不向流场施加反作用；
 SurfaceIBM 则是另一套专门面向连续 STL 固壁的实现，不能与这两种粒子功能混称。
 CUDA 后端只支持 NVIDIA GPU；其他厂商设备应使用其各自已部署且受支持的求解器。
 
 ## 可选 SurfaceIBM 固壁
+
+瞬态速度输出可用 `unsteady_output = N` 设置步长，并用
+`culbm_unsteady_start_step = M` 跳过发展阶段的大体积文件。`M` 缺省为 `0`，
+保持原有输出时序；首次周期输出为不小于 `M` 的 `N` 的正整数倍。
+最终时刻的常规结果输出不受此门槛影响。均匀网格和垂直嵌套网格分别以
+自身主循环步数与粗层步数解释该值。这个参数只改变写盘时间，不改变时间推进。
 
 `ibm_enabler` 是 SurfaceIBM 的唯一总开关，默认 `false`。关闭时不构建 marker、
 不分配 IBM 力场、不发射 IBM kernel，原有 STL 体素化、`TYPE_S` link-wise
@@ -222,7 +218,23 @@ CULBM-surface-ibm-gpu-test.exe --benchmark-off 100 8
 CULBM-surface-ibm-gpu-test.exe --benchmark-on 100 8
 ```
 
-`--benchmark-on` 将残差容差设为 `1e-8`，便于复现指定强制迭代数下的耗时。
+2026-08-04 在单 RTX 2080 Ti、96³、6561 个斜面 marker、23987 个活动单元、warm-up 10
+步和 timed 100 步上，五次交错运行的 MLUPS 中位数如下。benchmark-on 固定
+`residual_tolerance=1e-8`，用于压满所列强制迭代数；它是性能压力测试，不是推荐物理容差。
+
+| 最大强制迭代 | 中位 MLUPS | 相对 IBM-off 的运行时间 |
+|---:|---:|---:|
+| off | 2948.46 | 1.00× |
+| 1 | 1635.05 | 1.80× |
+| 2 | 1499.47 | 1.97× |
+| 4 | 1206.39 | 2.44× |
+| 8 | 887.30 | 3.32× |
+
+该 96³ 网格较小、硬件与驱动特定，不能外推为大型城市域的绝对 MLUPS；表中明确说明默认
+8 次上限的边界压力工况并非“仅损失一半吞吐”。生产容差若提前收敛会更接近较低迭代行，
+而 marker/体单元比更高、复杂表面或多 GPU/MPI 会更慢。`marker_spacing_lu` 变小或迭代
+次数变大应通过无滑移残差和网格收敛验证来换取，不能据此承诺固定吞吐，更不能把启用
+IBM 描述成约 2 倍加速。
 
 ## 构建
 
@@ -235,6 +247,10 @@ CULBM-surface-ibm-gpu-test.exe --benchmark-on 100 8
 - 提供 `MPI_THREAD_MULTIPLE` 的 MPI 3 实现（多节点可选；Windows 已用
   Microsoft MPI 10，Linux 可用 OpenMPI/MPICH）。找不到 MPI 时仍会构建纯
   单进程 CUDA 模式。
+
+生产多节点构建应额外传入 `-DCULBM_REQUIRE_MPI=ON`。这样 MPI 开发环境缺失时
+CMake 会立即失败，而不会生成只能单进程运行的二进制。即使误把纯单进程二进制
+交给 `srun`/`mpirun`，启动时也会明确报错退出，不会让各 rank 独立重复整场计算。
 
 Windows 已使用 Visual Studio 2022 x64 和 CUDA 13.2 验证：
 
@@ -276,8 +292,8 @@ n_gpu = [2, 1, 1]
 
 也可使用 `[1, 2, 1]`、`[1, 1, 2]`、`[2, 2, 1]` 等分解；只要
 `Dx × Dy × Dz` 不超过不同可见 CUDA 设备数，CUDA 后端没有固定卡数上限。
-配置键、默认值、输入目录和结果目录均沿用原求解器。替换时只需由调用方选择
-CUDA 可执行文件；本实验没有修改任何调用方代码。首次遇到某个内核源码/编译选项
+配置键、默认值、输入目录和结果目录保持既有 LUW deck 与运行契约；调用方通过
+`cfd_solver` 选择 CULBM。首次遇到某个内核源码/编译选项
 组合时，NVRTC 编译属于进程启动开销；生成的 PTX 默认缓存到可执行文件目录的
 `culbm-ptx-cache/`，后续相同组合会直接加载。求解器打印的 `normal Steps/s` 只
 衡量时间推进。
@@ -414,6 +430,13 @@ anti-bounce-back 施加定温壁；非固体 `TYPE_T` 仍是 on-node 定温边�
 关闭 `buoyancy` 只会禁止温度对动量的反馈，不会再忽略输入 CSV 的温度列，
 因此温度仍可作为被动标量输运。
 
+`buoyancy` 表示耦合请求，不再无条件打开反馈。生产 setup 只有在常规 `.luw`
+工况实际读入有效的 `SurfData_*.csv` 温度列时才激活 Boussinesq 项；如果未提供温度
+边界，即使该键缺省为 `true` 或显式写成 `true`，也会自动回退为关闭，并在启动日志
+中分别打印 `Buoyancy request`、`Buoyancy active` 和 warning。此时 `beta` 以及
+CULBM 的独立浮力重力向量都置零。`.luwdg` 和 `.luwpf` 当前没有温度边界输入，因此
+默认属于这一回退路径。下游零法向梯度只定义标量出口，不构成温度输入边界。
+
 温度平衡态使用 Guo 体积力修正后的物理速度
 `u = sum(c_i f_i) / rho + F / (2 rho)`，而不是施力前的原始矩速度。对
 `TYPE_E` 定速边界，输入的 `u` 同样定义为物理 Dirichlet 速度；初始化和每个碰撞步
@@ -422,8 +445,9 @@ anti-bounce-back 施加定温壁；非固体 `TYPE_T` 仍是 on-node 定温边�
 并不等同于二阶非平衡外推或 Zou–He 边界；规定速度仍应满足低马赫 LBM 的适用条件。
 
 `culbm_boussinesq_reference_temperature_k` 定义 Boussinesq 浮力的零浮力参考
-温度，单位为 Kelvin。缺省值和显式写入 `auto` 都保持已有行为：使用输入 CSV
-温度列的 `(Tmin + Tmax) / 2`；若 CSV 没有有效温度范围，则回退到 293.15 K。
+温度，单位为 Kelvin。缺省值和显式写入 `auto` 时，有效输入 CSV 温度列使用
+`(Tmin + Tmax) / 2`。若 CSV 没有有效温度范围，温标初始化仍使用 293.15 K，
+但该参考值本身不算热边界，也不会阻止浮力自动回退为关闭。
 也可显式写入有限正数，例如：
 
 ```text
@@ -911,8 +935,9 @@ pinned-host 异步回退，因此该数字只适用于上述网格、2 × RTX 20
 不同的网格规模需要单独测量。完整命令、每组样本和逐位检查结果保存在
 `test-output/optimization-final-cb4beb3b/ab/BENCHMARK_REPORT.md`。
 
-## 来源与许可
+## 许可
 
-CULBM 的来源、版权、第三方组件与分发要求见 `NOTICE.md` 和
-`THIRD_PARTY_LICENSES/`。若分发 CULBM 源码、二进制或其生成物，应一并保留这些
-文件及各源文件中已有的版权和许可声明。
+CULBM 是 LatticeUrbanWind 仓库中的独立求解器模块，采用独立许可。其源码、
+二进制与分发要求见本目录 `LICENSE.md` 和 `NOTICE.md`。LUW 在包含、使用或分发
+CULBM 时同时受该许可约束。相邻 FluidX3D 包不是 CULBM 的组成部分或依赖；仅在
+显式启用、使用或分发该可选后端时，FluidX3D 的包内许可才作为额外约束适用。

@@ -4,6 +4,26 @@
 
 本文件记录对后续 agents 有持续价值的项目知识。若后续任务发现新的、可复用的构建方式、运行方式、排查结论、约定或长期注意事项，应更新本文件；不要只把这类信息写进一次性的 `codexlog/`。
 
+## 原生产品架构与求解器选择
+
+生产 CLI、前处理、编排、后处理和 GUI 均为 C++20 原生实现，入口统一为
+`luw <command>`；不得恢复 Python 解释器、虚拟环境、Python 子进程或生产 `.py`
+入口。历史 Python 行为与原生映射保存在 `docs/native-compatibility-matrix.md`。
+CULBM 的四个 `tests/` / `validation/` 离线分析脚本是精确许可的科研验证工具，
+不属于生产运行链，也不得据此让安装器或 GUI 重新依赖 Python。
+
+规范 deck 键为 `cfd_solver = "culbm"|"fluidx3d"`。缺失该键时也必须选择 CULBM；
+FluidX3D 只允许显式 opt-in。`ibm_enabler` 缺失时为 `false`，SurfaceIBM 只受 CULBM
+支持；`cfd_solver=fluidx3d` 与 `ibm_enabler=true` 是配置错误，不得静默忽略 IBM、
+自动关闭 IBM 或回退到另一个求解器。GUI Solve 必须通过 `luw runluw <deck>`，不能
+自行直启某个 solver，以免 CLI/GUI 选择策略分叉。
+
+原生根 CMake 工程不无条件 `add_subdirectory(CULBM)`，因为 CULBM 配置要求 CUDA
+Toolkit。原生前后处理可独立构建；安装阶段再由 `installer/3_compile_cfdcore.*`
+构建默认 CULBM。只有调用方显式设置 `LUW_ENABLE_FLUIDX3D=ON` 时，根安装规则、CFD
+编译脚本和运行自检才暴露、构建或要求 FluidX3D。FluidX3D 是冻结兼容模块，CULBM
+是活动模块；二者是彼此独立的构建与运行包。
+
 ## 代码变更版本日期
 
 每次修改会影响运行行为的代码后，应同步更新对应求解器启动横幅中的版本日期。位置：
@@ -24,7 +44,7 @@ Version - CULBM-v3.5-YYMMDD-<variant>
 
 ## C++ 跨平台类型注意
 
-`core/cfd_core/FluidX3D/src/utilities.hpp` 中 `ulong` 定义为 `uint64_t`。在 Windows/MinGW 上它可能等价于 `unsigned long long`，而在 Linux GCC 上常等价于 `unsigned long`。因此修改 `ulong` 相关计算时，尤其是传给 `std::min` / `std::max` 的参数，不要混用 `1ull`、`0ull` 等 `unsigned long long` 字面量；应显式转换为 `ulong`，例如：
+`core/cfd_core/CULBM/src/solver/utilities.hpp` 中 `ulong` 定义为 `uint64_t`。在 Windows/MinGW 上它可能等价于 `unsigned long long`，而在 Linux GCC 上常等价于 `unsigned long`。因此修改 `ulong` 相关计算时，尤其是传给 `std::min` / `std::max` 的参数，不要混用 `1ull`、`0ull` 等 `unsigned long long` 字面量；应显式转换为 `ulong`，例如：
 
 ```cpp
 std::max(current_t + (ulong)1u, avg_start_t);
@@ -35,7 +55,7 @@ std::min(avg_start_t - (ulong)1u, total_steps);
 
 ## CFD Core 编译
 
-Windows 下优先使用仓库脚本编译 FluidX3D CFD core：
+Windows 下优先使用仓库脚本编译默认 CULBM：
 
 ```powershell
 cmd /c "installer\3_compile_cfdcore.cmd < NUL"
@@ -45,13 +65,19 @@ cmd /c "installer\3_compile_cfdcore.cmd < NUL"
 
 - 命令应从仓库根目录执行。
 - `< NUL` 用于避免脚本末尾 `pause` 在非交互环境中挂起。
-- 脚本会通过 `vswhere.exe` 或常见安装路径定位 MSBuild。
+- CULBM 由自身 CMake 工程构建，要求 CUDA Toolkit 12+；输出为
+  `core\cfd_core\CULBM\bin\CULBM.exe`。
+- 默认流程不会读取或构建 FluidX3D。需要同时构建该独立可选后端时，先执行
+  `set LUW_ENABLE_FLUIDX3D=ON`；其阶段会通过 `vswhere.exe` 或常见安装路径定位 MSBuild。
 - 当前本机可用路径示例：`C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`。
 - 项目文件请求 `PlatformToolset=v143`；脚本会在必要时切换到已安装的新工具集，例如 `v145`。
-- 输出可执行文件为 `core\cfd_core\FluidX3D\bin\FluidX3D.exe`。
-- 构建过程中可能出现 `lodepng.cpp` 的 `C4267`、`C4334` 等既有 warning；只要最终为 `0 Error(s)` 且 `Build succeeded.`，本次 CFD core 编译视为通过。
+- 仅当显式启用时，FluidX3D 输出为
+  `core\cfd_core\FluidX3D\bin\FluidX3D.exe`。其构建可能出现 `lodepng.cpp` 的
+  `C4267`、`C4334` 等既有 warning；只要最终为 `0 Error(s)` 且
+  `Build succeeded.`，该可选后端编译视为通过。
 
-快速语法检查可用 MinGW `g++`，但它不能替代 MSVC Release 链接构建：
+以下 MinGW `g++` 快速语法检查仅适用于显式启用的 FluidX3D 后端，不能替代其 MSVC
+Release 链接构建，也不是 CULBM 验证步骤：
 
 ```powershell
 g++ -std=c++17 -pthread -O -Wno-comment -I./src/OpenCL/include -fsyntax-only src/setup.cpp
@@ -60,12 +86,47 @@ g++ -std=c++17 -pthread -O -Wno-comment -I./src/OpenCL/include -fsyntax-only src
 
 以上命令需在 `core\cfd_core\FluidX3D` 目录下执行。
 
+## 长时间发展后的瞬态窗口
+
+CULBM deck 的 `culbm_unsteady_start_step`（缺省 `0`）只控制周期 raw-u 写盘的
+开始步数，输出仍对齐 `unsteady_output` 的整数倍；最终常规结果不受影响。
+大型 FTLE 工作应先估算窗口文件总量，再将此门槛设到所需窗口起点，避免把
+不需要的发展阶段全部输出。该选项同时覆盖均匀与垂直嵌套主循环，嵌套时单位是粗层步数。
+
+SurfaceIBM 会清除支持带内部分固体标记以执行强制耦合，故启用 IBM 后最终 TYPE_S
+不能独立代表连续 STL 的物理内外。轨迹和 FTLE 的物理流体掩码应按真实几何另行建立；
+不要将 IBM 内侧支持节点当成建筑外部流体，也不要用膨胀固体的方法删除整个近壁首层。
+当前 `src/device/particle_advection_kernels.cu` 的粒子位置与插值判定仍直接读取
+LBM `flags` 的 `TYPE_S` 位，因此启用 SurfaceIBM 时必须另外核查原生粒子相对真实
+STL 的位置，不能把 `status=active` 当作真实几何外部的证明。NUS 2 m case 已发现
+距实体表面约一个网格以内的穿透。若以保存的瞬态速度另行推进修正粒子，应明确实际
+覆盖的时间窗，不能用冻结场补齐未保存的早期历史。
+
+FTLE 在出域或碰壁后保留最后共同有效积分时长时，各种子使用的时间窗并不相同。
+全域高百分位可能主要由短驻留种子占据：应同时报告完整时间窗比例、有效时长分布，
+并区分原始标量与显示平滑后的超水平集统计。不能仅凭全域 q95 等值面、外边界封口
+或近壁有限值覆盖率，宣称已经识别出长时 material barriers。60/120 s 对照只衡量
+积分时长敏感性；快照加密和积分步长减半是另两类独立检查。
+
+关闭 IBM 后，轨迹与 FTLE 应重新使用最终 TYPE_S 体素固体作为 CFD 的实际边界；
+连续 STL 相对体素的差异另作几何离散审计。长粒子历史可用原生在线推进保存，
+不必为全部粒龄归档三维速度。扩展速度支持域时，在线粒子还要分配全网格的
+previous_velocity（额外 12 Bytes/cell），不得仅用 LBM 核心显存估算能否装下。
+需要固定时长主 FTLE 时，应只从完整共同积分时长的种子计算主图百分位，并把
+短驻留标量单独保留；扩域不能代替实际完整时长覆盖率检查。
+
+profile 模式在 `setup.cpp::interpolate_profile_cubic` 使用非单调限制的 Hermite 插值，
+随后采样成 0.1 m 的当地 DEM AGL 查表。对在 z=0 补零、z=10 m 开始变化很小的稀疏
+年均剖面，不能默认 native 插值仍单调：NUS 案例实测会在约 13.3 m 超调 0.289 m/s。
+科研 case 可在写入 profile.dat 前，按原有统计拟合方法加密到 0.1 m，并验证实际
+float32 查表值；这不改变统计剖面，能避免第二次稀疏三次插值制造人工低空急流。
+
 ## season_average 后处理
 
-`core/tools_core/season_average.py` 可直接指定平均 VTK 输入目录并按目标 spacing 重采样输出：
+原生命令 `luw season_average` 可直接指定平均 VTK 输入目录并按目标 spacing 重采样输出：
 
 ```powershell
-python core\tools_core\season_average.py <case>\conf.luwpf --vtk-dir <case>\RESULTS\crop\cropped_vtk_stage2 --output-spacing 10 --skip-figures
+luw season_average <case>\conf.luwpf --vtk-dir <case>\RESULTS\crop\cropped_vtk_stage2 --output-spacing 10 --skip-figures
 ```
 
 说明：
@@ -75,27 +136,41 @@ python core\tools_core\season_average.py <case>\conf.luwpf --vtk-dir <case>\RESU
 - 修正后 VTK 若使用独立标量 `u/v/w/tke`，脚本会合成为 `u_avg` vector，并同时输出 `u/v/w/vm/tke` 标量。
 - `--skip-figures` 只生成 VTK 和 summary，适合几十 GiB 级别的大体积输出。
 
+历史四城含 sigma 的结果来自仓库外
+`D:/averagedField/New0518_average/synthesize_windrose_season_average.py`。
+2026-09-12 核查时，原生 `src/post/season_average_command.cpp` 尚未写出
+`sigma_u/sigma_v/sigma_w/sigma_speed`，不能把同名命令当作该外部版本的等价替代。
+该历史链先在完整水平层执行 FFT/去趋势/行条纹修正，再地理裁剪、裁剪后修正，
+最后对各方向重采样并累计一阶/二阶矩；先在粗网格计算 sigma 再插值不等价。
+历史 `batch_tke_geo_viz.py` 的 `crop_cell_size` 用于制图，VTK 导出保持源间距。
+外部经验修正不是生产求解器的一部分，也不能无条件推广为新城市的无损清理。
+
 ## HPC/Linux CFD Core 编译
 
-本地 Windows 编译只会更新 `core\cfd_core\FluidX3D\bin\FluidX3D.exe`，不会更新 HPC 上的 Linux 可执行文件。若作业脚本运行的是 HPC 路径，例如：
+本地默认 Windows 编译只会更新本地 CULBM；显式 opt-in 时才另行更新本地 FluidX3D。
+两者都不会更新 HPC 上的 Linux 可执行文件。若作业脚本运行的是 HPC 路径，例如：
 
 ```text
-/work/home/.../LatticeUrbanWind-HPC0424/core/cfd_core/FluidX3D/bin/FluidX3D
+/work/home/.../LatticeUrbanWind-HPC0424/core/cfd_core/CULBM/bin/CULBM
 ```
 
-则必须在该 HPC 仓库副本中同步源码后重新编译 Linux 版 FluidX3D。优先使用仓库脚本：
+则必须在该 HPC 仓库副本中同步源码后重新编译 Linux 版 CULBM。生产多节点构建必须
+开启强制 MPI 检查，避免 MPI 开发环境未加载时静默生成单进程二进制：
 
 ```sh
 cd /work/home/.../LatticeUrbanWind-HPC0424
-sh installer/3_compile_cfdcore.sh
+cmake -S core/cfd_core/CULBM -B core/cfd_core/CULBM/build-hpc \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DCULBM_ENABLE_MPI=ON -DCULBM_REQUIRE_MPI=ON
+cmake --build core/cfd_core/CULBM/build-hpc --target CULBM --parallel
 ```
 
-或直接：
+如需同时编译默认 CULBM 与显式可选的 FluidX3D，也可使用仓库安装脚本并要求 CULBM
+必须链接 MPI：
 
 ```sh
-cd /work/home/.../LatticeUrbanWind-HPC0424/core/cfd_core/FluidX3D
-chmod +x make.sh
-./make.sh
+cd /work/home/.../LatticeUrbanWind-HPC0424
+LUW_CULBM_REQUIRE_MPI=ON LUW_ENABLE_FLUIDX3D=ON sh installer/3_compile_cfdcore.sh
 ```
 
 诊断提示：如果运行日志仍出现旧字符串 `Avg benchmark | mean-field Steps/s = ...` 或 `ETA model | normal Steps/s = dynamic, mean-field Steps/s = ...`，说明正在使用旧版求解器。包含 timing-plan 改动的新版本应在 `SOLVER START` 前打印 `LBM TIMING PLAN`，并出现 `sample extra = ... s`、`Preprocess time`、`Estimated total` 等输出。
@@ -108,7 +183,7 @@ Timing plan 注意事项：
 
 ## 山地 LUW 风边界顶高
 
-`core/bridge_core/1_buildBC.py` 中风场垂直层按 AGL 解释。对地形起伏较大的 LUW 标准模式案例，固定 CFD 顶高不能只用 `base_height + wind_top_agl`，否则最高地形可能高于顶边界。应使用全域最高地形作为基准：
+原生 `src/cli/commands/luwbc_command.cpp` 中风场垂直层按 AGL 解释。对地形起伏较大的 LUW 标准模式案例，固定 CFD 顶高不能只用 `base_height + wind_top_agl`，否则最高地形可能高于顶边界。应使用全域最高地形作为基准：
 
 ```text
 z_top = ground_z_max + min(wind_top_agl, z_limit_agl)
@@ -118,9 +193,9 @@ z_top = ground_z_max + min(wind_top_agl, z_limit_agl)
 
 ## W 分量边界与通量修正
 
-`core/bridge_core/1_buildBC.py` 会读取输入 NetCDF 中的 `w`/`W` 变量；若不存在则回退为 0。当前边界 CSV 的 `top/south/north/west/east` patch 会保留采样得到的 `w` 分量，不再强制写成 0；`bottom` patch 仍用于地形/地面信息，不作为常规速度入口面。
+原生 `src/cli/commands/luwbc_command.cpp` 会读取输入 NetCDF 中的 `w`/`W` 变量；若不存在则回退为 0。当前边界 CSV 的 `top/south/north/west/east` patch 会保留采样得到的 `w` 分量，不再强制写成 0；`bottom` patch 仍用于地形/地面信息，不作为常规速度入口面。
 
-`core/cfd_core/FluidX3D/src/fluxcorrection.cpp` 的通量修正按外边界法向速度计算净通量：`x/y` 侧面使用对应水平法向分量，顶面 `Zp` 使用 `u.z`，因此带 W 的顶边界会进入通量平衡；侧边界上的 W 是切向分量，不应计入侧面法向通量。日志中 `Flux correction | net by face ... Zp(w)=...` 可用于确认 W 是否实际参与顶面通量修正。
+`core/cfd_core/CULBM/src/solver/fluxcorrection.cpp` 的通量修正按外边界法向速度计算净通量：`x/y` 侧面使用对应水平法向分量，顶面 `Zp` 使用 `u.z`，因此带 W 的顶边界会进入通量平衡；侧边界上的 W 是切向分量，不应计入侧面法向通量。日志中 `Flux correction | net by face ... Zp(w)=...` 可用于确认 W 是否实际参与顶面通量修正。
 
 ## VK 入口面选择与 x 向波纹排查
 
@@ -139,7 +214,7 @@ z_top = ground_z_max + min(wind_top_agl, z_limit_agl)
 - `ALL_SELECTED` 且 `enable_top_sponge=false`：禁用 top sponge 后，west/east/south/north/top 五面全部施加 VK，仍会复现 x 向 k=4 大波纹，且 k=4 接近原始全边界量级。因此波纹不是 top sponge/grid extension 本身造成的，而是 top 面 VK 扰动与域内流场耦合造成的。
 - 默认业务语义测试：`vk_inlet_inflow_only=true` 的三侧面和 `false` 的四侧面都未复现原始 x 向 k=4 大波纹；四侧面的 k=4 比三侧面通常略高，但仍远低于 top VK 参与时的量级。
 
-相关源码位置为 `core/cfd_core/FluidX3D/src/setup.cpp` 的 `VkInletFaceMode` 和 `VonKarmanInletUpdater`。新增或调试 VK 入口策略时，应优先确认日志中的 `VK inlet target`、`VK inlet face` 和频谱诊断，不要只看切片图。
+相关源码位置为 `core/cfd_core/CULBM/src/solver/setup.cpp` 的 `VkInletFaceMode` 和 `VonKarmanInletUpdater`。新增或调试 VK 入口策略时，应优先确认日志中的 `VK inlet target`、`VK inlet face` 和频谱诊断，不要只看切片图。
 
 ## Coriolis 与高空出口 u 分量
 
@@ -152,6 +227,7 @@ z_top = ground_z_max + min(wind_top_agl, z_limit_agl)
 
 因此遇到出口高空 `u` 图上的明显低值区时，应优先检查 `v/uvw` 和 `coriolis_term`，不要直接解释为出口低速或 VK 波纹。
 
+以下排查只适用于显式设置 `LUW_ENABLE_FLUIDX3D=ON` 的独立 FluidX3D 后端。其
 HPC/Linux 链接阶段如果出现类似：
 
 ```text
@@ -179,13 +255,21 @@ core/cfd_core/CULBM/bin/CULBM.exe
 内部公开编译宏与环境变量使用 `CULBM_*`，C++ 命名空间使用 `culbm`。不要再新增
 旧包名、旧宏前缀或旧命名空间标识。
 
-CULBM 是保留 FluidX3D 来源与许可证的派生实现，不是 clean-room 实现。其已适配
-宿主求解器源码固定在 `core/cfd_core/CULBM/src/solver/`，CUDA 与 MPI 后端代码位于
-`core/cfd_core/CULBM/src/`。CMake 直接编译这些包内源码，不得恢复从
-`core/cfd_core/FluidX3D` 或其他相邻源码树复制、staging、补丁生成的构建流程。
-许可证全文位于 `core/cfd_core/CULBM/THIRD_PARTY_LICENSES/FluidX3D-LICENSE.md`，
-LUW 许可证也保存在同一目录，派生关系和第三方说明位于
-`core/cfd_core/CULBM/NOTICE.md`。
+CULBM 的当前工程边界是独立、自包含的 CUDA 求解器包，不得在架构、构建或运行说明中
+把它表述为继承、托管于或依赖 FluidX3D。主机端源码固定在
+`core/cfd_core/CULBM/src/solver/` 与 `core/cfd_core/CULBM/src/`；可直接维护的原生 CUDA
+唯一真源位于 `core/cfd_core/CULBM/src/device/`。CMake 只在 build 目录机械生成嵌入
+片段，运行时由 NVRTC 直接编译 CUDA C++，不得恢复 OpenCL 转译或从
+`core/cfd_core/FluidX3D` 等相邻源码树复制、staging、补丁生成的流程。
+
+CULBM 由 CULBM/LUW 团队独立开发和维护，并受其包内独立
+`core/cfd_core/CULBM/LICENSE.md` 约束，许可人统一写作 `CULBM developers`，不得列写
+个人姓名。仓库根 `LICENSE.md` 是 LUW 许可；包含、使用或分发 CULBM 的 LUW 同时受
+CULBM 许可约束，涉及 CULBM 的权利或义务冲突时以 CULBM 许可为准。不得在架构、
+构建、运行、来源或许可说明中把 CULBM 表述为源于、继承、改编自或托管于 FluidX3D，
+也不得在 CULBM 包内恢复 FluidX3D 来源声明或许可
+副本。FluidX3D 只作为独立、冻结、显式启用的可选后端存在；启用、使用或分发该后端
+时，其包内许可再作为额外约束适用。
 
 默认 MPI-enabled 构建在普通直接启动时不会初始化 MPI，仍走单进程本地任意多卡
 路径；检测到 `PMI_RANK`、`PMIX_RANK`、`OMPI_COMM_WORLD_RANK` 等 launcher rank
@@ -194,13 +278,18 @@ LUW 许可证也保存在同一目录，派生关系和第三方说明位于
 初始化 MPI。MPI 运行时要求 `MPI_THREAD_MULTIPLE`；求解通信使用独立
 communicator 和进程内串行锁。
 
+生产多节点构建应传 `-DCULBM_REQUIRE_MPI=ON`。非 MPI CULBM 二进制检测到
+`CULBM_MPI=1` 或 Slurm/OpenMPI/PMI 等 launcher rank 标记时必须立即失败，不能让多个
+rank 各自退化为独立的本地多卡整场计算。
+
 生产 CULBM 不定义 `GRAPHICS`，不创建图形快照/halo，也不写出离线图像帧；LodePNG
 源码、PNG 纹理解码和帧文件导出均不应恢复到默认数值路径。保留的交互显示源码不是
 受支持的 headless 生产功能，若未来显式启用，仍须保证其通信与活动物理场隔离。
 
 历史 staging 补丁仅作为本地回归材料归档在
 `core/cfd_core/CULBM/test-output/legacy-staging-pipeline/`，不属于活动源码或发布
-内容。后续 CULBM 功能修改应直接落在 `src/solver/`、`src/` 或 `CMakeLists.txt`。
+内容。后续 CULBM 主机端功能修改应直接落在 `src/solver/`、`src/` 或 `CMakeLists.txt`；
+设备代码应直接修改 `src/device/*.cu` / `*.cuh`，不得手工编辑 build 目录生成的 `.inc`。
 
 ### CULBM halo 优化与性能回归约束
 
@@ -261,6 +350,24 @@ Guo forcing 下的宏观物理速度为 `sum(c_i f_i)/rho + F/(2 rho)`。温度�
 输运。Boussinesq 重力使用独立于一般体积力的向量；生产 setup 设标准向下重力，
 垂直嵌套 ratio 为 `r` 时格子重力缩放为粗层的 `1/r`。相关生产 GPU 回归为
 `CULBM.TemperatureAnalyticGPU` 和 `CULBM.TemperatureHaloMultiGPU`。
+
+生产 setup 将 `buoyancy` 解释为请求而非无条件激活：只有常规 `.luw` 工况实际采用
+有效的 `SurfData_*.csv` 温度列时才能打开 Boussinesq 反馈。请求为 true 但没有温度
+边界时（包括当前 `.luwdg` / `.luwpf` 模式），CULBM 与 FluidX3D 都必须自动回退，
+把有效 `beta` 置零；CULBM 还须把独立浮力重力向量置零，并输出 request、active 与
+warning。下游零梯度温度出口及 293.15 K 内部参考值都不是温度输入边界。显式
+`buoyancy=false` 不得阻止已有 CSV 温度作为被动标量输运。
+
+2026-09-01 的绵阳涪城 5 m、均匀 6 m/s、22.5°、南侧开口单因素复算确认：保持
+可执行文件、几何、SGS、入口/出口、50000 步和 200 样本统计窗不变，仅把默认
+`buoyancy=true` 改为 `false` 后，全域 400 m AGL 平均 TKE 从 113.775 降至
+0.038 m²/s²（-99.97%），平均垂直速度从 -5.305 变为 +0.012 m/s；400 m 的
+99.3% 配对有效点 TKE 降低。关闭后的存储 TKE 与独立末时刻偏离能量比值仍约 0.988，
+排除统计器被关闭。该结果说明默认热浮力反馈是此代表工况高 TKE/强下沉的主导来源。
+缺少经验证的温度边界、参考温度和目标大气稳定度时，生产 setup 现在会自动关闭
+浮力；中性城市风 deck 仍建议显式使用 `buoyancy=false` 以记录建模意图。恢复热浮力
+前应输出并闭合验证温度场与浮力功。该结论尚未在年均剖面驱动和其他风向重复，不能
+直接外推到所有 case 或真实大气。
 
 默认生产定义 `UPDATE_FIELDS`；显式用 `CULBM_DISABLE_UPDATE_FIELDS` 构建的手动宏观场
 重建仍必须与 `stream_collide` 使用同一总力和顺序，包括 BUFFER_NUDGING、TOP_SPONGE、
@@ -357,15 +464,31 @@ Driver `CUDA_MEMCPY2D` 复制一个局部 z 面，替代按 y 行循环的调用
 
 不要把不同前处理模式的 STL z=0 语义混用：
 
-- 普通 `.luw` 全流程走 `makeluw.py -> bridge_core/3_voxelization.py`。该脚本构造的
+- 普通 `.luw` 全流程走原生 `luw makeluw -> luwvox`（实现位于
+  `src/cli/commands/luwvox_command.cpp`）。该路径构造的
   基础板为 `z=0 .. base_height`；无 DEM 时地面是 `z=base_height`，有 DEM 时本地地面是
   `base_height + relative_dem(x,y)`。DEM 的绝对海拔会先减去最低值，插值网格也会再次
   归一到本域最低值为 0。因此普通模式 STL 的 `z=0` 是基础板底面，不是地面。
-- `.luwdg` 与 `.luwpf` 的 GUI 全流程走 `datagen_core/dgPrepare_stlinput.py`。它在原始
+- `.luwdg` 与 `.luwpf` 的 GUI 全流程走原生 `luw dgprepare`（实现位于
+  `src/cli/commands/dgprepare_command.cpp`）。它在原始
   网格最低面下方增加厚度为 `base_height` 的基础板，再整体平移到 STL 最低 z 为
   `-base_height`；原始网格最低面因而落在 `z=0`。这一路径中，`z<0` 才是人工基础板。
 - 排查 CULBM 的 VTK 高程时，必须先根据实际生成器确认上述模式。普通 raw/avg VTK 还会
   保留压缩后的固体地基层；嵌套输出则会裁掉该层，不能把数组第 0 层直接解释成地面面。
+
+## DEM 最低海拔与输入范围
+
+`src/cli/commands/dem_tif_cache.cpp::expandedBounds` 在读取 GeoTIFF 时，将
+`cut_lon_manual`、`cut_lat_manual` 向每侧各扩展原跨度的 20%；
+`luwvox_command.cpp::loadDemRaster` 的直接栅格路径也使用这一范围。因此，
+输入 DEM 的 `Datum offset applied` 可能由原始 cut 范围外的最低点决定；查询
+指定区域最低海拔时，应分别报告原始范围和扩展范围，不能混用。
+
+2026-11-04 检查本机 `database/dem.tif`：EPSG:4326、1 角秒、Int16，声明
+`NoData=0`。LUW 排除数据集 NoData 和 `-9999`，保留有效负高程；不能将该文件的
+0 值当成有效海面最低点。高程按 LUW 约定以米解释，文件本身没有 band unit 或垂直
+基准标签。最低点经纬度应标明是像元中心；并列最低像元应全部保留。此文件的静态
+高程不受 deck 中 `datetime` 影响；后续插值、局部归零和人工基础板高度另行处理。
 
 ## CULBM 物理坐标导出
 
@@ -450,6 +573,326 @@ AV75-like deck 使用 `viscosity_mode=mu/rho_ref`，即固定常运动黏度
 所以只能说明整体形态相近，不能声称逐点一致。对应融合报告保存在
 `output/reports/CULBM_density_current_fused_closure_report_20260801.docx` 与
 `output/pdf/CULBM_density_current_fused_closure_report_20260801.pdf`。
+
+Ref.[29]（Marras、Nazarov、Giraldo，JCP 301 (2015) 77–101）Figure 5 的正式
+Elsevier 300 dpi 图源为
+`https://ars.els-cdn.com/content/image/1-s2.0-S0021999115004799-gr005_lrg.jpg`
+（2310×623）。云图物理窗口是 `x=0–18 km、z=0–4 km`，不是 0–16 km；右列为
+`h=12.5 m`，三行依次为 600、750、900 s。900 s 前缘的文献定义是地面
+`theta'=-1 K`，表值 15056 m。2026-08-02 的坐标审计用该大图色条反演得到约
+15044.5 m，与表值相差 11.5 m（约 0.39 个出版源像素），可用于检查方向和坐标映射，
+但出版栅格不能用于逐点误差、相关系数、IoU 或能谱。错误地把整幅 0–18 km 栅格重标
+为 0–16 km 会把前缘压缩约 11.1%，左右翻转无法修复。
+
+2026-08-03 的原三列 AV75 四时刻图仍保留在
+`output/reports/CULBM_GEA_AV75_density_current_comparison_20260803.{png,svg}`；加入当前求解器
+h=25 m 新跑后的四列图位于
+`output/reports/CULBM_GEA_AV75_density_current_h25_h12p5_h5_comparison_20260803.{png,svg}`，
+可复现脚本与来源审计位于
+`core/cfd_core/CULBM/test-output/density-current-av75-comparison-20260803/`。文献列必须使用
+Girfoglio、Quaini、Rozza（2023）Figure 7 的 `av75-page13-000..003.png`；
+`gea-004..007.png` 是 Smagorinsky h=25 m，仍不得误标为 AV75。
+
+新的平台 h=25 m 正式运行是
+`density-current-av75-h25-current-20260803_222850/run`：h=25 m、dt=0.05 s、
+D3Q19/D3Q19、SRT、FP32、SGS off、18000 步，当前 executable SHA-256 为
+`1EEC8EC6B5D078782988BC9E382BA9D2C47C6A8C05C7717E1FAF760C3629A9D7`；单进程
+259.815 s 完成，31 个 metrics 与 5 个 1024×256 快照均 finite/positive，密度全程
+[0.992088,1.008492]，但全程峰值 Mach=0.131352，解释时必须保留弱可压误差提示。
+早先 `...20260803_222356/run` 被两个进程并发写入，已明确标记 contaminated，禁止使用。
+
+四列形态图的可视锋位统一定义为正在显示的二维场中、跨至少五个连续行持久的最右
+`theta'=-1 K` 冷到暖等值线鼻端；地面交点另存为 audit metric，不能混称。该修正把
+300 s 的 GEA/h25/h12.5/h5 标记分别改为 3978.944/4229.277/4230.789/4232.336 m；
+旧 GEA 3767.295 m 是数值正确但不适合标视觉鼻端的地面交点。GEA 900 s 地面交点
+14804.538 m 仍落在 Table 3 的 [14783,14808] m 格点区间内。出版栅格只作坐标与形态
+证据；图中按用户要求显示标签 `AV75`，本构差异仍以本节前述来源说明为准。
+
+### `.luwdg` dataset 速度开放出口实验
+
+2026-09-04 的绵阳 22.5°、均匀 6 m/s、10000 步受控实验确认：实验版在
+`downstream_open_face=false` 时，其 `avg/raw_rho/raw_u` 三个 VTK 与生产版逐文件 MD5
+一致；新代码路径在开关关闭时是 no-op。开启逐步一阶零梯度速度出口后，目标子域
+（i=190..381、j=221..444，距 south/-y 出口约 1.105–2.220 km）平均风速增加
+15.05%，TKE 增加 23.69%，平均密度下降 1.37%；末态净体积通量为
+`+5.343e6 m3/s`，占总出流 17.68%。因此该实现不是可接受的生产开放边界，不能把
+广域加速解释为可信的局部出口改善。
+
+实现审计还发现：`.luwdg` 均匀 dataset 分支虽然解析 `flux_correction=true`，但在
+`setup.cpp` 的该路由中没有调用 `apply_flux_correction`；而出口核每步重写出口
+`rho/u`，所以只补初始化通量修正也未必充分。后续应优先评估压力/密度出口或对流
+出口配合动态质量约束，并增加逐步质量与各面通量门禁。可复现脚本与 MCP 报告载荷在
+`output/reports/CULBM_open_downstream_comparison_20260904/`；数值结果和独立验证回执在
+`D:/averagedField/New0613_EUHPC/cmp_open_new/comparison_open_vs_closed_20260904/`。
+
+## 本地粒子展示与离线渲染
+
+2026-09-14 的重庆渝中/新加坡展示材料位于
+`output/pollution_showcase_20260914/`。两套均匀 6 m 剖面 case 各用一张本机
+GPU，由 `CUDA_VISIBLE_DEVICES` 隔离、原生 `luw runluw` 分派至 CULBM；每套
+26,000 步、317,376 个 prescribed RK4 粒子、47 份 CSV，实际均退出 0，所有
+快照 `invalid=0`。这是展示工况与输出完整性检查，不是浓度、沉降或网格收敛验证。
+`solid` 是粒子碰撞终止状态，不应解释为经校准的沉积量。
+
+渲染粒子必须与 STL 使用同一米制坐标，普通 `luwvox` STL 应扣除人工地基层
+`base_height`。PyVista 0.47.1 的 `points_gaussian` 默认把显示半径按粒子点集
+包围盒长度缩放；制作不同时刻对比时应显式固定 `actor.mapper.scale_factor`
+的米制值，否则会把点集变长造成的光斑变大误画成更多扩散。该显示尺度不是物理粒径。
+
+本机保留的 `build-runluw-agent` CLI 没有完整 GDAL 支持。完整依赖的旧
+`LatticeUrbanWind_rebuild/build-production` 可完成裁剪，但其 `luwvox` 在独立
+进程中缺少 `GDALAllRegister()` 初始化，无法打开有效 Shapefile；对应原生测试
+先调用该函数，因而会遮蔽独立 CLI 问题。本次通过工件目录中的小型 C++ 启动器
+初始化驱动后，直接链接并调用原有体素实现完成前处理，没有修改生产算法。
+若后续修复该问题，应增加真正新进程打开 Shapefile 的 CLI 回归。PROJ 数据库
+须与该构建配套；旧 pyproj 的 layout minor 4 数据库不能供要求 minor >=6
+的原生 PROJ 使用。配套路径与本次运行证据保存在工件说明及 `native_env.ps1`。
+
+展示图和动画应使用完整输出尺寸的渲染视口。把较矮视口的截图贴入标题或页脚
+留白，会让地形与建筑在画面内部出现硬截断；隐藏文字时也必须移除该布局。
+平行投影若需保持横向显示尺度并扩展上下视野，应将 `parallel_scale` 按新旧
+视口高度之比缩放。2026-09-14 修订采用白色背景、浅灰地面，仅保留排放源
+颜色图例；入口为 `output/pollution_showcase_20260914/render_white_showcase.py`，
+当前成品为同目录的 `white_showcase/`，此前版本另存归档。地面材质只改变
+显示颜色，不得修改 DEM、STL 或粒子坐标；相同帧应固定粒子显示半径与颜色。
+
+粒子 case 的显存估算不能只引用启动时的 `Required VRAM`：它不包含后续可选
+统计缓存及独立粒子模块。2026-09-14 新加坡展示日志记录 464×424×91、约 6 m
+网格，GPU 常驻 Welford 统计启用后的 `Memory Usage` 为 1943 MiB，随后粒子
+模块预检额外 236 MiB，合计约 2.13 GiB；这不是整卡峰值实测。维持同一物理域、
+存储精度、统计与粒子设置时，三维均匀加密可用显存约随间距的负三次方增长作
+初估，另留驱动、域间 halo/通信和分配余量。双卡总容量只有在同一个 case 做
+域分解时才可一起使用；当前粒子模块支持同进程本地多域，但显式拒绝 MPI
+分布式运行。不得将容量估算当作已验证的加密运行结果。
+
+2026-09-19 的 NUS UTown 5 m 单卡案例保存在
+`E:/#_PAPERS_#/IP_J40_SCP-FTLE/Overleaf/LUW_NUS/`。以 NUS 官方校园地图
+University Town 点为中心，沿用 2782.879×2543.967 m 水平域与 225° 来流。
+`scripts/place_sources.py` 用邻域建筑覆盖率、开放区净空、横风投影间距和顺风错开
+共同筛选三个源；本例相邻横风间距 226/198 m，在下游保持部分空间交叠。
+这是该展示工况的选址实例，不能把其统计交叠值当作分子混合效率或浓度验证。
+
+容量与结果报告须分别保存实际求解网格和导出场尺寸：上述 case 启动日志为
+557×509×110（含海绵），分析 VTK 为 557×509×91（裁剪后的核心场），不能
+通过后者反推显存规模。改变 cell_size 后，渲染时刻应从实际 SGS step/time
+或等效原始时间记录读取，不能沿用旧 6 m case 的硬编码时间尺度。
+
+按截图圈选重布源时，应先把截图配准到原图，再使用已保存的相机对原生几何
+射线求交；屏幕距离不能直接当作米制距离或横风距离。2026-09-19 的 NUS 修订
+位于上述目录的 `source_revision_20260919/`，保留原图、配准参数与实际源位移。
+STL 表面净空不能替代求解器体素检查：细窄楼间空地上方的种子仍可能落入
+5 m 建筑边缘固体格点。应按原生粒子核的 float32 格点坐标及
+`floor(x+0.5)` 最近格点规则检查 flags，并在源斑内重新采样冲突位置。
+相同几何、网格及坐标基准的既有 flags 可用于预检，但须核对输入一致性，并
+用本次正式输出再次确认；不得仅凭显示网格或视觉判断宣布种子位于流体内。
+
+CULBM 的 `unsteady_output` 是 LBM 步数间隔，不是秒。非零时按该间隔导出
+`raw_u-<step>.vtk`，末步还可能多一份非等间隔输出；向 FTLE 输入序列时须按
+步号筛选严格等间隔窗口，并以原生 float32 时间换算值计算 `physical_dt`。
+`raw_u` 的三个 SI 速度分量为大端 float32、VTK x-fast 顺序，原始数组名为
+`data`。其 z 原点仍含基础板；与粒子和物理地形统一时应减去 `base_height`，
+不能照搬已去基础板的 global VTK 原点再重复平移。按字节保留速度负载、只改
+数组名和坐标头即可接入 Streamcenter+；在同一 NTFS 卷内可填充 VTK 标题以
+保持头长不变，再原子移动完整文件，避免为 TB 级序列重复写入整个负载。
+
+原生 SGS CSV 的 `time_s` 使用 `units.si_t(step)`：先计算单精度
+`float(step) * unit_s`，再按 12 位有效数字写入。长时间序列不能以固定
+1e-5 s 残差对这些值作双精度直线拟合来判断变步长；约 3000 s 时正常舍入
+即可达到 1e-4 s。应以原生 `units.si_t(1)` 的 float32 值建立时间轴，
+逐条重现上述乘法及打印精度，并拒绝不符的时间记录。单条 `time_s/step`
+只能给近似步长。NUS 无 IBM 长算的正式 187 条记录及相邻 float32 步长
+拒绝检查保存在 case 的 `qa/solver_time_validation.json`。
+
+LUW 原生粒子插值会排除固体角点并重归一化权重；一般 FTLE 三线性插值可能
+包含固体内的零速度，两者近壁轨迹不能无条件视为同一数值问题。有限开放域
+的长时 FTLE 必须检查离域和固体端点、屏蔽无效梯度邻域；高 FTLE 等值面只能
+作为屏障候选区展示，不能单凭该图宣称已验证严格的 material barrier。
+
+FTLE 性能试算图必须同时注明原始风场起始时刻 t0、积分长度 T、种子间距与
+显示采样间距，不能只靠文件名中的分辨率判断其科学含义。NUS 的 2 m benchmark
+实际使用启动阶段约 1–6 s 的速度，T 仅约 5 s；其全域外观不能与 t0≈400 s、
+T=300/600 s 的图直接比较。开放域应先扫描积分窗及驻留/有效覆盖，再选择长时
+窗口；分别记录初末点合格数与梯度邻域合格数，不能把后者的损失都解释为离域。
+等值面图与全体采样散点叠加会改变结构可读性，应在相同数据与显示方式下做比较。
+
+2026-09-20 的 NUS 连续面修订在同一 t0≈400 s 风场上扫描 10/30/60/120 s，
+4 m 种子有效梯度覆盖分别约 88.9/74.6/56.0/27.8%；60 s 精化为 2 m 种子后为
+57.4%。这些值只适用于该有限域与筛选规则，不能固定成其他案例的推荐积分窗。
+用于展示的 FTLE 空间平滑必须单独注明尺度并保留原标量；本例采用 σ=8 m 的
+有效权重归一化 Gaussian，仅保留原有效区域。等值面顶点平滑后仍须重新检查
+实际顶点和三角形中心的有效支持，并再次筛选新分裂的小连通片；不得补齐无效
+空洞来伪造连续屏障。2 m 种子不等于经 8 m 显示平滑的图仍能解析 2 m 结构。
+PyVista 的 `clean()` 可能把退化三角形转换成线或点单元；连续面交付应在最终
+清理后显式移除这些单元，并检查保存后 VTP 的 `n_verts/n_lines` 均为零。
+按 `faces` 数组筛选前也应先去除点/线单元：PolyData 的完整单元编号包含排在
+多边形前面的点/线，直接把三角形布尔掩码当完整单元掩码会错筛边界面。
+
+NUS 同一 60.2 s 窗口、4 m 诊断种子，将锚点从约 400 s 推到 900 s 后，
+有效梯度覆盖仍为约 55.99%/55.90%；z=200 m 掩码交并比约 96.3%。矩形有效区
+主要可由前向轨迹的有限域驻留范围解释，不能据此判断启动扰动传播或统计未收敛。
+锚点统计稳定性须独立验证：全域 SGS/平均速度接近平台不足以证明局部均值与
+二阶统计量收敛，也不能把稀疏短时间块间的差异直接认定为启动漂移。
+
+有限域提前离域的种子可以保留有定义的驻留时间受限 FTLE，但必须同时输出实际
+受支持的积分时长。不能对不同退出时刻的终点直接求空间梯度，也不能把停在边界
+后的原生 FTLE 直接解除掩码。2026-09-20 的 Streamcenter+ `FlowMapProbe` 增加
+`residence_ftle` 研究模式：中心和六个求导邻点在同一个时间检查点计算梯度，失去
+支持后保存上一个共同时间的 FTLE 与时长；速度分量的全域上界保守约束 RK4 阶段
+不越过输入 AABB。这个时长可能短于真实退出时刻，需做检查步长敏感性测试；
+可变时长结果不能标成统一 T 的长时屏障。解析平移、旋转、定常/非定常应变及
+反向积分测试位于 NUS case 的 `scripts/test_residence_ftle.py`，结果记录在
+Streamcenter+ 根目录 `.tests/nus_utown_2m_ftle_20260919/residence_validation_20260920/`。
+
+NUS 该方法在约 900 s 锚点、60.201 s 上限、2 m 种子上保留了全部
+91,169,482 个初始可求导流体种子的值，其中 51,629,045 个有完整窗口，其余
+39,540,437 个保留较短历史。配套成果在案例 `residence_revision_20260920/`。
+4 m 检查步长减半时 95% 的 FTLE 绝对差异不超过 1.702e-4 s^-1，但约
+0.0605% 点超过 0.01 s^-1，最大的样本涉及近壁掩码触发时刻变化；不得略去这个
+尾部或宣称全域已收敛。原生支持原因位 2 来自流体掩码，而该掩码也包含标为
+固体的外边界行，所以不能单凭这个原因位把所有截短都归为建筑壁面。
+
+NUS 竖直截面对照位于案例 `building_sections_20260920/`，出图入口是
+`scripts/render_building_sections.py`。速度须匹配 FTLE 锚点时刻；截面内 `(u,w)`
+或 `(v,w)` 流线应明确标为瞬时投影速度场流线，不能称为三维粒子轨迹。
+原生 residence FTLE 二进制是 C-order `(x,y,z)`、z 最快，打包 VTKHDF 是
+`(z,y,x)`，截取同一平面时须独立比对以防转置错误。Matplotlib 默认流线绘图
+积分可能跳过薄墙；本例一格近壁保护加可见线段每 0.5 m 支持检查消除了该问题，
+但不应把该显示检查当作三维轨迹或积分收敛验证。
+
+2026-09-20 截面修订进一步确认：速度热图和固体填色必须采用同一最终求解体素
+分类。不得用“插值邻点全部流体”的支持掩码隐藏速度、同时用单个最近体素给
+建筑填色；这会把有速度的真实流体画成白洞。当前图直接使用最近原生网格列的
+速度与正式末步 flags，以 `TYPE_S=1` 判断固体；`TYPE_E=2` 是平衡边界，不能
+用 `flags & 15` 一概当成实体建筑。FTLE 的梯度/轨迹有效掩码另有含义，缺值
+流体不得填成固体或任意补值。当前成品位于 `building_sections_20260920/voxel_revision_20260920/`。
+用户对本组截面要求只保留图、坐标轴和色标，去除建筑突出标记、标题、说明和
+位置图；所有文字统一22 pt Times New Roman，PDF已验证仅嵌入该字体。
+
+同日逐点核查 `near_wall_ftle_exclusion_audit.json` 确认：当前可视 yz 截面内
+2,427个最终 flags 判为流体的 FTLE 种子，全在积分开始前即被筛掉；其中1,426个
+来自 `safe = ~binary_dilation(solid, iterations=1)` 的一层近壁保护，另1,001个
+是中心安全但六个中心差分邻点中有不安全点。保存的 `initial_stencil.u8` 与该
+独立重建、以及切片 FTLE 的有限值掩码完全一致，没有“初始有效而后来无值”的点。
+因此这批近壁白带不是 CFD 速度缺失，也不是提前离域造成，不能只在渲染层填补。
+其数值修复需改变近壁种子支持/流体侧求导方案；不能把这些缺值解释为物理上
+没有 FTLE，或把缺值流体改标成固体。
+
+用户随后暂缓近壁FTLE数值修复，并要求截面改用平滑填色。当前显示版在
+`building_sections_20260920/smooth_revision_20260920/`：对全部角点有效的单元作
+双线性显示插值，近固体/缺值处回退到原单元值；原始单元有效掩码与最终体素
+几何不变。显示细分不能当作新的物理分辨率，也不能藉此填补FTLE的NaN。
+
+同日 q95 边界封口版位于 NUS 案例
+`residence_revision_20260920/boundary_capped_q95_20260920/`。封口表示超阈值区域
+与有限数据域交集的边界，封口内部不必等于等值阈值；应与域内等值面区分，
+不能称为额外发现的物理屏障。只在最外有效网格的六个平面构造封口，不能用
+通用 fill-holes 填满近壁无效孔洞，或把保护层延拓成有值数据。本例平面为
+x=6/1384、y=6/1264、z=6/446 m，顶面在 q95 下没有高值区域。外部构造层的
+marching contour 顶点投影到准确平面后，需要保留接缝、固定边界平滑、检查
+顶点与面心支持、朝外法向和三角面单元；VTP 用 BoundaryFaceId 区分封口与
+域内面。解析盒体/半空间、缺值孔洞及正式网格检查见该案例的
+`scripts/test_ftle_domain_caps.py` 与 `scripts/validate_ftle_domain_caps.py`。
+
+NUS 紧凑四联图入口为案例 `scripts/render_compact_composite.py`，成品位于
+`compact_composite_20260920/`。排列为速度剖面、FTLE 剖面、底行粒子/三维 q95；
+所有最终文字以同一 22 pt Times New Roman 直接排版，PDF 仅嵌入该字体。
+比较两张三维图时，除相机参数相同，还必须共用裁切框、最终宽高和缩放比例；
+分别按内容裁切会破坏几何对齐。按用户最新要求，FTLE 三维面板除编号 (d) 外，
+左下用同色小圆点标注 FTLE⁺ = 0.07 s⁻¹（显示取两位小数，实际阈值不变）；上标须使用 Times New Roman
+原生字形，“+”根据实际时间窗确认是正向积分。粒子 Source 图例也放左下。
+该拼图保留粒子约1000 s、FTLE锚点约900 s的原时刻，
+不因视角一致就声称是同时刻的数据对比。
+
+紧凑拼图还须检查文字与后绘制面板画布的重叠，而不只是文字是否位于整张画布内。
+NUS 四联图曾因下排三维 axes 的白色背景覆盖上排 `y / m` 下缘约 8 px；现增加
+0.1 英寸行间距，并检查标签下缘与下排 axes 顶部至少有 4 pt 净空。PNG 原像素
+局部与 PDF 文本边界须分别核对；当前净空约 21.67 px / 5.00 pt。图 (b) 色标
+与图 (d) 使用同一实际积分方向上标。拼图专用流线宽度与箭头尺寸通过参数传入，
+保留独立截面渲染的默认样式。
+
+## ERA5 最终版与点时间序列取样
+
+需要排除 ERA5T 时，不能把 CDS 的 `product_type=reanalysis` 当作最终版证明。
+应保存版本核查证据；ECMWF GRIB 的 `expver=0001` 为最终 ERA5，`0005` 为 ERA5T。
+若按最近完整一年制备剖面，应先确定最终版截止月，再取连续十二个完整月，避免
+把近期 ERA5T 静默混入年平均。不同镜像的更新截止日期可能晚于或早于 CDS，
+不能把一个镜像的截止日期直接当成所有数据源的统一截止日期。
+
+官方 `reanalysis-era5-single-levels-timeseries` 可高效提取单点逐小时数据；
+`reanalysis-era5-pressure-levels-timeseries` 虽标题含 hourly，实际时间分辨率为
+00/06/12/18 UTC、13 个压力层。必须核对返回时间坐标，并记录高空样本数；
+不能把每六小时样本或其时间插值称为原始的 8760 个逐小时高空场。
+年均标量速度剖面应明确先求逐时/逐样本水平风速模长再平均，还是先平均 U/V。
+
+## 大网格 MPI 输出的主机内存与磁盘预算
+
+当前 `src/solver/lbm.hpp::Memory_Container` 在 distributed 模式下为每个 rank
+分配全域 `distributed_data`；`read_from_device()` 使用 allgather，
+`lbm.cpp::read_device_statistics()` 还构造全域 mean/M2 view 与输出数组。
+因此每 rank 只使用一张 GPU，不代表主机内存也只保存局部网格。多节点预算必须
+同时计入各 rank 的全域主机副本、统计回读及最终写出峰值，不能只除总显存。
+
+均匀网格的周期 raw-u VTK 为每点 3 个 float32，即 12 B/点，保留固体格且输出
+范围由核心网格决定；当前没有周期 raw-u 的中心 ROI 写盘选项。后处理裁剪可以
+减少归档量，但不能直接减少求解器已经写出的全域原始数据量。`unsteady_output=1`
+与起写步 `Nconv+1`、终止步 `Nconv+500` 配合可产生 500 个连续样本；起写门槛
+本身不是收敛检测器。LES 中必须区分统计平稳验收与末端有限时间窗的平均/TKE，
+尤其要报告 500 个相邻 dt 样本仅跨越 `499*dt` 的实际时长。
+
+跨格距预算应先用各自 `dt` 匹配发展物理时长，再比较步数和耗时，不能简单保持
+`run_nstep` 相同。相同剖面下 CULBM 的参考格子速度固定，故 `dt` 随实际格距变化；
+格点数约按格距的三次方变化，同物理时间的推进步数还约按格距反比变化。
+同为 500 个相邻快照时，两套网格也不覆盖相同物理时长。已有同几何/同网格的
+短测可校准容量和步速，但更换剖面、风向和长时发展后仍需另验稳定性与统计收敛。
+
+Arrhenius 的 `GPU/buildenv-gcccuda/2026.03-cu13.0` 使用 MPICH，现场模块设置
+`SLURM_MPI_TYPE=pmi2`；显式 `srun --mpi=pmix` 会在初始化时报
+`launcher not compatible with PMI1 client`。多节点作业应先用同一 binary 的小型
+MPI 检查确认 launcher，不能把单卡编译/短测通过当成 MPI 启动已验证。
+
+2026-10-30 现场调度器要求 GPU 作业申请量至少为 `(nodes-1)*4+1`；
+八节点各申请一张 GPU 会被拒绝。GPU 节点 `RealMemory=485854 MiB` 另有
+`MemSpecLimit=65536 MiB`，故 `--mem=450G` 不可申请，`400G` 已通过调度检查。
+实际规则、保留内存、`PriorityFlags=MAX_TRES` 和 Req/AllocTRES 必须实时复核。
+
+`unsteady_output=0` 只关闭周期 raw-u；普通流程仍写最终瞬时场，不能据此承诺
+“仅平均场”。本次绵阳案例在 `output/mianyang_20261029_preflight/production_2m_stats/`
+保存独立原生 C++ 控制层，沿用已归档 CULBM 动力学内核，并在 GPU 上累积统计、
+按子域直接写中心 ROI 的均值/TKE/掩码。该案例控制层不是公共 deck 功能；不要
+将其环境开关解释为普通已安装 binary 的能力。块间监测验收、技术检查的绕过开关
+及科研结果状态分开记录，技术检查输出不能作为物理收敛结果。
+
+2026-10-30 的 `vram8_bill8_20261030` 原生容量检查使用两节点、每节点四卡，
+ReqTRES、AllocTRES 和最终 sacct 均为 `billing=8,gres/gpu=8`。它直接构造八个
+与 2 m 案例相同的 `377×2999×532` 本地子域，跳过全域主机副本和 MPI 编排；
+核心/halo/Welford 及原动力学核函数不变。实测每卡核心+统计约 63.97 GiB，
+另加保守入口容量预留后约 64.50 GiB；八卡同时驻留约 30 s、推进 32 步通过。
+这是显存容量检查，不代表含真实几何、全域主机副本和跨节点交换的正式流程已在
+billing=8 下跑通。后续引用必须保留这个适用范围；不能用容量测试的主机 RSS
+代替原完整 MPI 流程的主机内存预算。
+
+5 m、仅平均/TKE 的最新配置保存在
+`output/mianyang_20261029_preflight/production_5m_stats_20261031/`，不要与
+`variants/5m/` 中历史的500帧瞬态方案混用。按相同物理时长换算后，最低发展
+72025步、监测块5064步/每8步采样、最少统计20256步，dt约0.118709883 s。
+单卡/双卡模板都采用单进程本地GPU（`CULBM_MPI=0`，清除launcher rank环境），
+不走跨节点MPI主机副本路径。5 m同网格已有单卡短测：正常33.938步/s、日志GPU
+33077 MiB、主机峰值约30.24 GiB；双卡约16.30 GiB/卡是静态模型，尚未实测。
+新控制层的步数已经随格距调整，不能直接用旧2 m专用binary只改cell_size来运行。
+
+16个独立风向可在Arrhenius四个整节点上各用一张GPU并行；本例实际
+`--nodes=4 --ntasks=16 --ntasks-per-node=4 --cpus-per-task=72`
+配合每节点4GPU、`--mem=256G --exclusive`，ReqTRES与AllocTRES均为
+`billing=16,gres/gpu=16,node=4`。任务步骤使用`--mpi=none --gpus-per-task=1
+--gpu-bind=single:1`，求解器子进程清除全部已支持的launcher rank标记并设
+`CULBM_MPI=0`；应以16个互异GPU UUID验证绑定，不能只比较每个任务都重映射为0的
+`CUDA_VISIBLE_DEVICES`。整批allocation在最慢风向结束后释放，先结束风向的尾段
+仍计入整批billing。当前最终ERA5剖面的5 m正式首10,000步实测33.147–34.852步/s，
+`setup.cpp`的`dt_si`按名义`cell_m=5`打印0.11875645305626485 s，但
+`Units::set_m_kg_s_K`使用实际`si_size.y/Ny`，该工况真实float32求解步长为
+0.11870988458395004 s，两者相差约0.0392%。本例最终审计器v2在全场审计后校正
+JSON/监测CSV的物理时间，并以`.native_controller`保留原始元数据；不可把控制层
+名义步长直接当作`Units::si_t(1)`。首段速度和短技术检查均不能替代长时统计平稳性验收。
 ## CULBM 几何与节点坐标（261116）
 
 STL 最低坐标映射到格点坐标 `+0.5`，整数索引表示节点中心。均匀网格
@@ -474,3 +917,32 @@ raw SI 坐标因此为 `stl_min + (index - 0.5) * dx`；z 再加上实际移除�
 此修复会改变旧版本的固体占据和坐标标签。已有流场检查点及按旧原点处理的
 结果应保留版本标识；更新几何后从初始条件重新计算，不能只平移旧结果
 代替重算。
+
+## AIJ Case E 近地面低估排查（261117）
+
+2.5 m 几何修复算例的 profile 分支仍存在出口语义问题：
+`apply_profile_boundaries` 先设 `TYPE_E`，随后因 `downstream_open_face`
+而跳过赋值；内部初始化的速度却仍保留。`TYPE_E` 动量核持续使用保存的
+rho/u，纯风构建中没有随后更新出口速度的代码。因此这条路径实际是固定
+初始剖面的平衡边界，不能仅凭 deck 的 `downstream_open_face=true` 或
+日志中的 `no fixed velocity` 将它认作速度零梯度出口。AIJ 三个 200 s
+统计块在出口的速度完全一致，TKE 仅有 float32 舍入量。正式修复需要检查
+动量边界的分布函数和质量通量，不能只修改标签或温度出口。
+
+AIJ 的 1 m canonical 入流只是中间采样网格；将含 z=0 补零和 z=1.25 m
+首个实测值的 AF 均值剖面先采到整数米，再采到 2.5 m 的中心节点，会丢失
+首层折点：U(1.25) 从 2.847 降到 2.4492 m/s，随后在 2 m 的离散插值为
+2.6598 m/s，原 AF 线性插值为 2.964 m/s。均值应在求解器实际节点直接按
+原 AF 求值，脉动另行插值；不要将这个确定性损失归为随机入流采样误差。
+
+当前该算例采用 SRT、常系数 Smagorinsky Cs=0.17、普通无滑移反弹，
+没有近壁阻尼或壁面应力模型。2.5 m 网格的首个空气节点为 1.25 m。
+原生平均场在无建筑上游已出现明显近地面沿程衰减；这定位了近壁计算路径
+的问题，但不能由单张误差图分摊壁面模型、碰撞格式和网格各自的贡献。
+小型恒定入流对照的无滑移分支出现强振荡或回流；应保存并报告其物理异常，
+不能以进程退出码 0 当作验证通过，也不能据其数值拟合正式 AIJ 参数。
+
+风洞记录为平均标量速率，时均速度矢量的模不是同一统计量。已有原生
+一、二阶矩可给出解析场平均速率的上界，不能重建精确的平均速率；空间
+插值后的节点二阶矩还包含空间差异的上界。SGS 未解析运动也不在该上界内。
+以后在线采样应同时累计测点的 |u(t)|，并保留时均矢量作方向性比较。

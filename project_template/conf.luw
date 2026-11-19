@@ -31,7 +31,12 @@ um_bc = [0.464899, 1.326544, 0.000000]
 downstream_bc = "+y"
 downstream_bc_yaw = 30.19
 
+// Preprocessing
+preprocess_use_gpu = false
+preprocess_gpu_device = 0
+
 // CFD Controls
+cfd_solver = "culbm"
 n_gpu = [2, 1, 1]
 mesh_control = "gpu_memory"
 gpu_memory = 20000

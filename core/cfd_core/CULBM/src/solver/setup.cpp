@@ -1,4 +1,5 @@
 #include "setup.hpp"
+#include "../thermal_coupling_policy.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -229,6 +230,7 @@ bool use_high_order = false;
 bool flux_correction = false;
 uint research_output_steps = 0u; 
 uint unsteady_output_interval = 0u;
+ulong culbm_unsteady_start_step = 0u;
 uint purge_avg_steps = 0u;
 uint purge_avg_stride = 1u;
 ulong run_nstep_override = 0ull;
@@ -3723,6 +3725,13 @@ void main_setup() {
                         unsteady_output_interval = v > 0 ? static_cast<uint>(v) : 0u;
                     }
                 }
+                else if (key == "culbm_unsteady_start_step") {
+                    const std::string raw = unquote(val);
+                    if (!raw.empty()) {
+                        const long long v = atoll(raw.c_str());
+                        culbm_unsteady_start_step = v > 0ll ? static_cast<ulong>(v) : 0u;
+                    }
+                }
                 else if (key == "run_nstep") {
                     const std::string raw = unquote(val);
                     if (!raw.empty()) {
@@ -4263,7 +4272,7 @@ void main_setup() {
         }
         println("| Probes Window  | " + alignr(57u, probe_window_desc) + " |");
     }
-    println("| Buoyancy Switch | " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
+    println("| Buoyancy request| " + alignr(57u, buoyancy_enabled ? (buoyancy_explicit ? string("true") : string("true (default)")) : string("false")) + " |");
     println("| Boussinesq Tref | " + alignr(57u, boussinesq_reference_auto
             ? string("auto (input Tmin/Tmax center)")
             : to_string(fmtf(boussinesq_reference_setting_kelvin)) + " K (explicit)") + " |");
@@ -4807,6 +4816,25 @@ void main_setup() {
         println("| Profile domain  | " + alignr(57u, to_string(fmtf(profile_domain_agl_si))) + " m AGL |");
     }
 
+    const bool thermal_boundary_available =
+        !dataset_generation && !profile_generation &&
+        csv_has_temperature && csv_rows_with_temperature > 0ul;
+    const luw::cfd::ThermalCouplingDecision thermal_coupling =
+        luw::cfd::resolve_thermal_coupling(
+            buoyancy_enabled, thermal_boundary_available);
+    buoyancy_enabled = thermal_coupling.buoyancy_active;
+    if (thermal_coupling.fallback_applied) {
+        print_kv_row("Buoyancy active",
+            "false (fallback: no valid temperature boundary)");
+        print_kv_row("WARNING",
+            "buoyancy requested without a temperature boundary; feedback disabled");
+    }
+    else {
+        print_kv_row("Buoyancy active", buoyancy_enabled
+            ? string("true (temperature boundary detected)")
+            : string("false (requested off)"));
+    }
+
     units.set_m_kg_s_K((float)lbm_N.y, lbm_ref_u, 1.0f, 1.0f, si_size.y, si_ref_u, si_rho, temperature_scale_kelvin);
     units.set_temperature_reference(1.0f, temperature_ref_kelvin); // T_lbm=1.0 maps to the selected auto/explicit T_ref
 
@@ -5187,7 +5215,7 @@ void main_setup() {
         }
         print_base_transport("initial units", base_transport);
         println("| Thermal lattice | " + alignr(57u, string(get_temperature_lattice_name())) + " |");
-        println("| Thermal beta    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_beta, 8u) : string("0 (disabled by buoyancy=false)")) + " |");
+        println("| Thermal beta    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_beta, 8u) : string("0 (buoyancy inactive)")) + " |");
         println("| Buoyancy g_z    | " + alignr(57u, buoyancy_enabled ? to_string(lbm_buoyancy_gz, 8u) : string("0 (disabled)")) + " |");
         if (buoyancy_enabled && boussinesq_temperature_range_checked) {
             println("| Boussinesq dT/T | " + alignr(57u,
@@ -6277,6 +6305,7 @@ void main_setup() {
         }
         if (unsteady_interval > 0u) {
             print_kv_row("Unsteady u VTK", "every " + to_string(unsteady_interval) + " coarse step(s)");
+            print_kv_row("Unsteady start", to_string(culbm_unsteady_start_step) + " coarse step(s)");
         }
         std::ofstream nested_sgs_diagnostics_output;
         bool nested_sgs_diagnostics_warned = false;
@@ -6401,7 +6430,7 @@ void main_setup() {
             const bool sample_avg = avg_window > 0u && t >= avg_start_t &&
                 ((t - avg_start_t) % avg_stride) == 0u;
             const bool sample_probes = !nested_probes.empty() && t >= probe_start_t;
-            const bool write_unsteady = unsteady_interval > 0u &&
+            const bool write_unsteady = unsteady_interval > 0u && t >= culbm_unsteady_start_step &&
                 (t % unsteady_interval) == 0u;
             if (sample_avg || sample_probes || write_unsteady) {
                 const culbm::NestedStitchedFields fields = stitch_or_fail();
@@ -6725,6 +6754,7 @@ void main_setup() {
         }
         if (enable_unsteady_u_output) {
             print_kv_row("Unsteady u VTK", "every " + to_string(unsteady_interval) + " steps");
+            print_kv_row("Unsteady start", to_string(culbm_unsteady_start_step) + " steps");
         }
         if (write_diagnostic_flags) {
             print_kv_row("Diagnostic VTK", "raw flags enabled by CULBM_WRITE_FLAGS");
@@ -7297,7 +7327,7 @@ void main_setup() {
         auto maybe_write_unsteady_u = [&]() {
             if (!enable_unsteady_u_output) return;
             const ulong t = lbm.get_t();
-            if (t == 0ull || (t % unsteady_interval) != 0ull) return;
+            if (t == 0ull || t < culbm_unsteady_start_step || (t % unsteady_interval) != 0ull) return;
             push_vtk_saved_file(default_filename(vtk_dir, "u", ".vtk", t));
             lbm.u.write_device_to_vtk(vtk_dir, true, false, vtk_output_Nz);
             last_u_host_t = t;
