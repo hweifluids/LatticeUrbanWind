@@ -86,6 +86,9 @@ struct Wall_Model_Configuration {
 // Lattice constants of one LBM domain; derived from the configuration, the
 // global Units scale and the active nesting level scope.
 struct Wall_Model_Lattice {
+	// The retained voxel represents a full lattice control volume. Its velocity
+	// can match a wall law no closer than the first halfway-wall sample.
+	static constexpr float first_cell_distance_lu = 0.5f;
 	bool enabled = false;
 	bool ground_only = false; // SurfaceIBM domain (immersed surfaces handled by the runtime)
 	bool smooth_h = false, smooth_v = false;

@@ -543,9 +543,12 @@ extern "C" __global__ void surface_ibm_mark_core_cells(const ulong *cells, uchar
   mask[n] = (uchar)(mask[n] | (uchar)2u);
 }
 
-// tau_w = rho*k*|u_t| with the probe at mean wall distance h (lattice units).
-__device__ __forceinline__ float surface_ibm_wm_factor(const float ut, const float h, const bool smooth,
+// The input velocity is grid filtered. A grazing cut can put its one remaining
+// support cell arbitrarily close to the surface; use the native first-cell
+// distance for the wall law in that unresolved interval.
+__device__ __forceinline__ float surface_ibm_wm_factor(const float ut, const float mean_distance, const bool smooth,
                                                        const float z0) {
+  const float h = fmaxf(mean_distance, def_wm_ibm_first_cell_distance);
   if (!smooth) {
     const float r = def_wm_kappa / log1pf(h / z0);
     return r * r * ut;

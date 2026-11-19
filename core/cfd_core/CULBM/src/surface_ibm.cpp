@@ -106,9 +106,11 @@ int nearest_grid_coordinate(const float value) {
 constexpr float wall_model_min_exterior_weight = 0.01f;
 constexpr float wall_model_upward_cosine = 0.70710678f;
 
-// tau_w = rho*k*|u_t| for a probe at mean wall distance h (lattice units).
+// Use the resolved first-cell distance for subcell cuts, after combining
+// all fragments so that the matching height is independent of decomposition.
 float wall_model_factor(const Wall_Model_Lattice& wm, const float ut,
-                        const float h, const bool upward) {
+                        const float mean_distance, const bool upward) {
+    const float h = std::max(mean_distance, Wall_Model_Lattice::first_cell_distance_lu);
     const bool smooth = upward ? wm.smooth_h : wm.smooth_v;
     if(!smooth) {
         const float z0 = upward ? wm.z0_h_lu : wm.z0_v_lu;

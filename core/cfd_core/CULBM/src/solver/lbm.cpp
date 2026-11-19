@@ -184,7 +184,7 @@ Wall_Model_Lattice resolve_wall_model_lattice(
 			"wall model requires a positive finite lattice cell size and time step");
 	}
 	// Halfway bounce-back places the wall half a cell below the first node.
-	const double d = 0.5*(double)dx_m;
+	const double d = Wall_Model_Lattice::first_cell_distance_lu*(double)dx_m;
 	const double kappa = (double)configuration.kappa;
 	const auto drag = [&](const double z0) {
 		const double l = std::log1p(d/z0);
@@ -1540,6 +1540,7 @@ string LBM_Domain::device_defines() const {
 			  "\n\t#define def_wm_z0_h " + to_string(wall_model.z0_h_lu) + "f"
 			  "\n\t#define def_wm_z0_v " + to_string(wall_model.z0_v_lu) + "f"
 			  "\n\t#define def_wm_ibm_retraction " + to_string(wall_model.ibm_retraction_lu) + "f"
+			  "\n\t#define def_wm_ibm_first_cell_distance " + to_string(Wall_Model_Lattice::first_cell_distance_lu) + "f"
 			  "\n\t#define def_wm_ibm_min_weight 0.01f"
 			  "\n\t#define def_wm_ibm_cos_h 0.70710678f"
 			: string(""))

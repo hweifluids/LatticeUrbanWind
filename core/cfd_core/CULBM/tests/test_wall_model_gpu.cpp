@@ -717,9 +717,8 @@ struct IbmSlabResult {
 };
 
 IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ulong steps,
-                       const double g, const float nu, const float z0) {
+                       const double g, const float nu, const float z0, const float zb=4.3f) {
     constexpr uint n = 64u, nz = 24u;
-    constexpr float zb = 4.3f;
     const float zt = (float)(nz-1u)-zb;
     configure(true, z0, 0.41f, false, 0.0f, nu);
     {
@@ -849,6 +848,27 @@ void test_ibm_laminar_balance(TestState& test) {
                 "culbm_wall_model_ibm=false keeps the no-slip immersed surface");
 }
 
+void test_ibm_subcell_wall_distance(TestState& test, const uint domains_x) {
+    // Both geometries have the same voxel core and sample the same exterior
+    // fluid row. Moving the immersed surface through that row's volume must
+    // not turn its bounded first-cell wall stress into a singular impulse.
+    for(const float z0 : {0.016f, 0.0f}) {
+        const auto halfway = ibm_slab(true, domains_x, 4u, 0.0, 0.02f, z0, 4.5f);
+        const auto cut = ibm_slab(true, domains_x, 4u, 0.0, 0.02f, z0, 4.9999f);
+        const double reference = halfway.statistics.reaction_force_lu.x;
+        const double reaction = cut.statistics.reaction_force_lu.x;
+        std::cout << "IBM subcell wall z0=" << z0 << " domains=" << domains_x
+                  << " halfway reaction=" << reference << " cut reaction=" << reaction
+                  << " cut probe=" << cut.u_probe << '\n';
+        test.expect(halfway.finite && cut.finite && reference>0.0 &&
+                    std::fabs(reaction-reference) < 0.002*reference,
+                    "a subcell IBM wall matches the resolved first-cell shear");
+        test.expect(std::fabs(cut.u_probe-halfway.u_probe)<2.0E-5 &&
+                    std::fabs(cut.mass_ratio-1.0)<1.0E-5,
+                    "subcell IBM wall conserves mass and keeps the probe velocity bounded");
+    }
+}
+
 void test_ibm_multi_gpu(TestState& test) {
     constexpr float nu = 0.02f, z0 = 0.05f;
     const double cd = std::pow(0.41/std::log1p(0.7/(double)z0), 2.0);
@@ -898,6 +918,12 @@ int main(const int argc, const char* const argv[]) {
             TestState test;
             test_multi_gpu(test);
             test_ibm_multi_gpu(test);
+            test_ibm_subcell_wall_distance(test, 2u);
+            return test.failures==0 ? 0 : 1;
+        }
+        if(argc==2 && std::string(argv[1])=="--ibm-cut-cell") {
+            TestState test;
+            test_ibm_subcell_wall_distance(test, 1u);
             return test.failures==0 ? 0 : 1;
         }
         if(argc==2 && std::string(argv[1])=="--ibm") {
@@ -906,7 +932,7 @@ int main(const int argc, const char* const argv[]) {
             return test.failures==0 ? 0 : 1;
         }
         if(argc!=1) {
-            std::cerr << "Usage: " << argv[0] << " [--multi-gpu|--channel [options]|--benchmark [options]]\n";
+            std::cerr << "Usage: " << argv[0] << " [--ibm|--ibm-cut-cell|--multi-gpu|--channel [options]|--benchmark [options]]\n";
             return 2;
         }
         TestState test;
@@ -917,6 +943,7 @@ int main(const int argc, const char* const argv[]) {
             test_smooth_viscous_sublayer(test);
             test_concave_pocket(test);
             test_ibm_laminar_balance(test);
+            test_ibm_subcell_wall_distance(test, 1u);
         }
         if(test.failures==0) std::cout << "GPU wall-model tests passed.\n";
         return test.failures==0 ? 0 : 1;
