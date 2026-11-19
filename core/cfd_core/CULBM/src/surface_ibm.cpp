@@ -792,9 +792,8 @@ private:
         return cleared;
     }
 
-    // Wall-modelled bodies keep their voxel core.  Its cells inside the
-    // marker supports (TYPE_S active cells) get mask bit 1 so that faces
-    // towards them reflect specularly; returns the marked cell count.
+    // Mark core cells. A fluid face also needs an exterior marker stencil
+    // in the same direction before its voxel shear can be replaced.
     std::uint64_t mark_core_cells() {
         std::uint64_t marked = 0u;
         for(const auto& state : domains_) {
@@ -831,6 +830,59 @@ private:
         if(culbm::mpi_is_distributed())
             culbm::mpi_allreduce_sum_uint64(&marked, 1u);
         return marked;
+    }
+
+    void mark_wall_model_faces() {
+        std::vector<float> weights(2u*markers_.size(), 0.0f);
+        for(const auto& state : domains_) {
+            const ulong count = state->fragment_count();
+            if(count==0ull) continue;
+            LBM_Domain& domain = *state->domain;
+            // Attach precedes external_initialize(), which normally uploads flags.
+            domain.flags.enqueue_write_to_device();
+            Kernel measure(domain.get_device(), count, "surface_ibm_wm_support_weights",
+                           *state->positions, *state->normals, domain.flags, *state->wm_force, count);
+            measure.enqueue_run();
+            state->wm_force->enqueue_read_from_device(0ull, 2ull*count);
+            domain.finish_queue();
+            for(ulong f=0ull; f<count; ++f) {
+                const std::size_t m = (std::size_t)state->marker_indices[(std::size_t)f];
+                weights[2u*m] += (*state->wm_force)[f];
+                weights[2u*m+1u] += (*state->wm_force)[count+f];
+            }
+        }
+        if(culbm::mpi_is_distributed()) {
+            for(std::size_t start=0u; start<weights.size(); start+=reduction_marker_chunk) {
+                const auto length = (std::uint32_t)std::min<std::size_t>(
+                    reduction_marker_chunk, weights.size()-start);
+                culbm::mpi_allreduce_sum_float(weights.data()+start, length);
+            }
+        }
+        for(const auto& state : domains_) {
+            const ulong count = state->fragment_count();
+            if(count==0ull) continue;
+            for(ulong f=0ull; f<count; ++f) {
+                const std::size_t m = (std::size_t)state->marker_indices[(std::size_t)f];
+                (*state->wm_force)[f] = weights[2u*m]>wall_model_min_exterior_weight ? 1.0f
+                    : weights[2u*m+1u]>wall_model_min_exterior_weight ? -1.0f : 0.0f;
+            }
+            state->wm_force->enqueue_write_to_device(0ull, count);
+            LBM_Domain& domain = *state->domain;
+            // The first force lane is aligned 32-bit scratch during attach.
+            // The commit clears it before the first physical predictor.
+            state->enqueue_reset_force();
+            Kernel cover(domain.get_device(), count, "surface_ibm_wm_cover_faces", *state->positions,
+                         *state->normals, domain.flags, domain.get_surface_ibm_active_mask(),
+                         *state->wm_force, domain.get_surface_ibm_force(), count);
+            cover.enqueue_run();
+            const ulong active = state->active_cell_count();
+            if(active!=0ull) {
+                Kernel commit(domain.get_device(), active, "surface_ibm_wm_commit_faces", *state->active_cells,
+                              domain.get_surface_ibm_force(), domain.get_surface_ibm_active_mask(), active);
+                commit.enqueue_run();
+            }
+            domain.finish_queue();
+        }
     }
 
     // Portable (multi-domain/MPI) wall-model step: reduce the exterior probe
@@ -1441,9 +1493,9 @@ public:
         build_marker_coupling();
         enable_device_direct_path();
         if(wall_model_) {
-            // Wall-modelled bodies keep their voxel solid core: its faces
-            // reflect specularly and the stress is applied one-sided.
+            // Replace voxel shear only on core faces served by a marker.
             statistics_.wall_model_core_cells = mark_core_cells();
+            mark_wall_model_faces();
             if(!device_direct_) {
                 wm_spread_value_.assign(markers_.size(), float3(0.0f));
                 wm_side_.assign(markers_.size(), 1.0f);

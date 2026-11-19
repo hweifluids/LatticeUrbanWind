@@ -2428,25 +2428,22 @@ void apply_wall_model(const uxx n, float *fhn, const uxx *j, const uchar *flags,
 #ifdef WALL_MODEL_IBM
 // Wall-modelled SurfaceIBM.  Immersed bodies keep their voxel solid core; its
 // cells inside the marker supports carry SurfaceIBM mask bit 1.  Faces towards
-// them reflect specularly only (free slip): their tangential stress is applied
-// one-sided by the SurfaceIBM runtime as an explicit force on the exterior
-// cells, from the input surface's normal, area and wall distance.  Every other
-// solid face (compacted ground, terrain or seam voxels without markers) keeps
-// the bounce-back wall stress of apply_wall_model().
+// them reflect specularly only where an exterior shear stencil covers the
+// fluid cell in that face direction. Buried or slab-clipped markers cannot
+// provide traction there, so the exposed voxel face retains its wall law.
 void apply_wall_model_ibm(const uxx n, float *fhn, const uxx *j, const uchar *flags, const uchar *ibm_mask,
                           const float rhon, float *uxn, float *uyn, float *uzn) {
-  uint faces = 0u, ibm_faces = 0u;
+  uint faces = 0u;
 #pragma unroll
   for (uint f = 0u; f < 6u; f++) {
     const uxx nb = j[f + 1u];
     if (!wall_model_solid(flags[nb]))
       continue;
     faces |= 1u << f;
-    if ((ibm_mask[nb] & (uchar)2u) != (uchar)0u)
-      ibm_faces |= 1u << f;
   }
   if (faces == 0u)
     return;
+  const uint ibm_faces = faces & ((uint)ibm_mask[n] >> 1u);
   const uint pair_face[12] = {0u, 0u, 1u, 1u, 2u, 2u, 3u, 3u, 4u, 4u, 5u, 5u};
   const uint pair_P[12] = {14u, 16u, 7u, 9u, 13u, 18u, 7u, 11u, 15u, 17u, 9u, 11u};
   const uint pair_M[12] = {8u, 10u, 13u, 15u, 8u, 12u, 14u, 17u, 10u, 12u, 16u, 18u};

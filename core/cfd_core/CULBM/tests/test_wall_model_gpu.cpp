@@ -716,10 +716,16 @@ struct IbmSlabResult {
     std::vector<float> velocity;
 };
 
-IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ulong steps,
-                       const double g, const float nu, const float z0, const float zb=4.3f) {
+enum class IbmSlabMode { normal, padded_core, padded_voxel_only, z_partition };
+
+IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains, const ulong steps,
+                       const double g, const float nu, const float z0, const float zb=4.3f,
+                       const IbmSlabMode mode=IbmSlabMode::normal) {
     constexpr uint n = 64u, nz = 24u;
-    const float zt = (float)(nz-1u)-zb;
+    const bool split_z = mode==IbmSlabMode::z_partition;
+    const bool attach_markers = mode!=IbmSlabMode::padded_voxel_only;
+    const float core_padding = mode==IbmSlabMode::padded_core || !attach_markers ? 0.2f : 0.0f;
+    const float zt = split_z ? 18.7f : (float)(nz-1u)-zb;
     configure(true, z0, 0.41f, false, 0.0f, nu);
     {
         Wall_Model_Configuration configuration = get_wall_model_configuration();
@@ -727,13 +733,14 @@ IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ul
         if(!set_wall_model_configuration(configuration))
             throw std::runtime_error("cannot select the IBM wall-model mode");
     }
-    configure_surface_ibm(true);
+    configure_surface_ibm(attach_markers);
     IbmSlabResult result;
     {
-        LBM lbm(n, n, nz, domains_x, 1u, 1u, nu, (float)g, 0.0f, 0.0f, 0.0f, nu, 0.0f);
+        LBM lbm(n, n, nz, split_z ? 1u : domains, 1u, split_z ? domains : 1u,
+                nu, (float)g, 0.0f, 0.0f, 0.0f, nu, 0.0f);
         for(uint z=0u; z<nz; ++z) for(uint y=0u; y<n; ++y) for(uint x=0u; x<n; ++x) {
             const ulong c = lbm.index(x, y, z);
-            const bool solid = (float)z<zb || (float)z>zt;
+            const bool solid = (float)z<zb+core_padding || (float)z>zt-core_padding;
             lbm.rho[c] = 1.0f;
             lbm.u.x[c] = solid ? 0.0f : 0.02f;
             lbm.u.y[c] = 0.0f;
@@ -744,7 +751,7 @@ IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ul
         std::vector<culbm::surface_ibm::Marker> markers;
         append_plane_markers(markers, n, zb, 1.0f);
         append_plane_markers(markers, n, zt, -1.0f);
-        lbm.attach_surface_ibm(markers);
+        if(attach_markers) lbm.attach_surface_ibm(markers);
         double mass0 = 0.0;
         for(ulong c=0ull; c<lbm.get_N(); ++c) if((lbm.flags[c]&TYPE_S)==0u) mass0 += 1.0;
         lbm.external_initialize();
@@ -795,7 +802,8 @@ IbmSlabResult ibm_slab(const bool wall_model_ibm, const uint domains_x, const ul
             for(uint z=0u; z<nz; ++z) std::cout << ' ' << mean[z];
             std::cout << '\n';
         }
-        result.u_probe = 0.5*(mean[5]+mean[nz-6u]);
+        const uint first_fluid = (uint)std::ceil(zb+core_padding);
+        result.u_probe = 0.5*(mean[first_fluid]+mean[(uint)std::floor(zt-core_padding)]);
         result.u_mid = 0.5*(mean[nz/2u-1u]+mean[nz/2u]);
         result.velocity.resize(3u*(std::size_t)lbm.get_N());
         for(ulong c=0ull; c<lbm.get_N(); ++c) {
@@ -867,9 +875,29 @@ void test_ibm_subcell_wall_distance(TestState& test, const uint domains_x) {
                     std::fabs(cut.mass_ratio-1.0)<1.0E-5,
                     "subcell IBM wall conserves mass and keeps the probe velocity bounded");
     }
+    // A conservatively voxelized roof can cover the last cell in a retracted
+    // marker's support. With no exterior stress to spread, the first fluid
+    // row must retain the voxel wall law on that face.
+    const auto voxel = ibm_slab(true, domains_x, 24u, 0.0, 0.02f, 0.05f, 4.9f, IbmSlabMode::padded_voxel_only);
+    const auto covered = ibm_slab(true, domains_x, 24u, 0.0, 0.02f, 0.05f, 4.9f, IbmSlabMode::padded_core);
+    std::cout << "Buried IBM support, voxel probe=" << voxel.u_probe
+              << " with markers=" << covered.u_probe
+              << " marker reaction=" << covered.statistics.reaction_force_lu.x << '\n';
+    test.expect(covered.finite && voxel.finite && voxel.u_probe<0.01999 &&
+                std::fabs(covered.u_probe-voxel.u_probe)<2.0E-6 &&
+                std::fabs(covered.statistics.reaction_force_lu.x)<1.0E-8,
+                "a wall without an exterior marker sample retains the voxel shear");
 }
 
 void test_ibm_multi_gpu(TestState& test) {
+    // At z=11.3 the solid neighbour and its fluid recipient at z=12 belong
+    // to different devices. Coverage is owned by the fluid cell.
+    const auto local_wall = ibm_slab(true, 1u, 24u, 0.0, 0.02f, 0.05f, 11.3f, IbmSlabMode::z_partition);
+    const auto split_wall = ibm_slab(true, 2u, 24u, 0.0, 0.02f, 0.05f, 11.3f, IbmSlabMode::z_partition);
+    const std::size_t recipient = 32u+64u*(32u+64u*12u);
+    test.expect(local_wall.finite && split_wall.finite &&
+                std::fabs(local_wall.velocity[recipient]-split_wall.velocity[recipient])<2.0E-6,
+                "a marker-supported wall across a GPU boundary keeps single-device shear");
     constexpr float nu = 0.02f, z0 = 0.05f;
     const double cd = std::pow(0.41/std::log1p(0.7/(double)z0), 2.0);
     const double g = cd*0.02*0.02/7.0;

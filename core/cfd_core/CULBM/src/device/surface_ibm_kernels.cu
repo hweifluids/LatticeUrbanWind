@@ -533,8 +533,7 @@ extern "C" __global__ void surface_ibm_apply_active_force_delta(const ulong *act
 // renormalized Roma3 weights give the probe velocity and mean wall distance h
 // and distribute the force, so the fluid loses exactly tau_w*area per step.
 
-// Mask bit 1 marks the solid support cells of wall-modelled bodies, whose
-// faces reflect specularly in stream_collide/update_fields.
+// On a solid cell, bit 1 marks a core cell inside marker support.
 extern "C" __global__ void surface_ibm_mark_core_cells(const ulong *cells, uchar *mask, const ulong count) {
   const ulong i = (ulong)cuda_global_thread_id(0);
   if (i >= count)
@@ -607,6 +606,64 @@ __device__ __forceinline__ void surface_ibm_wm_stencil(const float px, const flo
       }
     }
   }
+}
+
+// Attach-time geometry only. A fragment can be too small to carry traction by
+// itself, so choose the exterior side after summing weights across all owners.
+extern "C" __global__ void surface_ibm_wm_support_weights(const float *position, const float *normal,
+                                                          const uchar *flags, float *weights, const ulong count) {
+  const ulong m = (ulong)cuda_global_thread_id(0);
+  if (m >= count) return;
+  for (uint s = 0u; s < 2u; ++s) {
+    float w[27], sum, distance;
+    uxx cell[27];
+    surface_ibm_wm_stencil(position[m], position[count+m], position[2ull*count+m],
+                           normal[m], normal[count+m], normal[2ull*count+m], s == 0u ? 1.0f : -1.0f,
+                           flags, w, cell, &sum, &distance);
+    weights[(ulong)s*count+m] = sum;
+  }
+}
+
+// A represented face has both a fluid recipient and its wall-side neighbour
+// inside the same marker footprint. Ownership of the neighbour may be remote.
+__device__ __forceinline__ uint surface_ibm_wm_face_axis(const float outward, const float weights[3],
+                                                        const uint i, const uint axis) {
+  if (outward > 0.f && i > 0u && weights[i-1u] > 0.f) return 2u << (2u*axis+1u);
+  if (outward < 0.f && i < 2u && weights[i+1u] > 0.f) return 1u << (2u*axis+1u);
+  return 0u;
+}
+
+// Bits 1..6 on a fluid cell identify solid-neighbour directions represented
+// by an actual one-sided shear stencil. Bit 0 keeps its force-update meaning.
+extern "C" __global__ void surface_ibm_wm_cover_faces(const float *position, const float *normal,
+                                                      const uchar *flags, const uchar *active, const float *sides,
+                                                      uint *covered, const ulong count) {
+  const ulong m = (ulong)cuda_global_thread_id(0);
+  if (m >= count || sides[m] == 0.0f) return;
+  const float side = sides[m], nx = normal[m], ny = normal[count+m], nz = normal[2ull*count+m];
+  const float px = position[m], py = position[count+m], pz = position[2ull*count+m];
+  float w[27], wx[3], wy[3], wz[3], sum, distance;
+  uxx cell[27];
+  surface_ibm_wm_stencil(px, py, pz, nx, ny, nz, side, flags, w, cell, &sum, &distance);
+  surface_ibm_axis_weights(px, (int)floorf(px+.5f), wx);
+  surface_ibm_axis_weights(py, (int)floorf(py+.5f), wy);
+  surface_ibm_z_weights(pz, (int)floorf(pz+.5f), wz);
+  for (uint i = 0u; i < 27u; ++i) {
+    if (!(w[i] > 0.f) || !(active[cell[i]] & 1u)) continue;
+    const uint faces = surface_ibm_wm_face_axis(side*nx, wx, i%3u, 0u)
+                     | surface_ibm_wm_face_axis(side*ny, wy, i/3u%3u, 1u)
+                     | surface_ibm_wm_face_axis(side*nz, wz, i/9u, 2u);
+    if (faces) atomicOr(covered + cell[i], faces);
+  }
+}
+
+extern "C" __global__ void surface_ibm_wm_commit_faces(const ulong *cells, uint *covered, uchar *mask,
+                                                       const ulong count) {
+  const ulong i = (ulong)cuda_global_thread_id(0);
+  if (i >= count) return;
+  const ulong n = cells[i];
+  mask[n] |= (uchar)covered[n];
+  covered[n] = 0u;
 }
 
 // Multi-domain path, one thread per marker fragment.  SoA output, lanes 0-5
