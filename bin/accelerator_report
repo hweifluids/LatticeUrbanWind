@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=accelerator_report exec "$(dirname "$0")/.luw-wrapper" "$@"

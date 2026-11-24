@@ -1,0 +1,1833 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "CULBM 对 GEA 两个大气基准的数值验证",
+    "description": "CULBM 对 GEA Rising thermal bubble 与 Density current 的完整网格、稳定性和敏感性技术验证。",
+    "generatedAt": "2026-07-31T04:58:16Z",
+    "charts": [
+      {
+        "id": "bubble_wmax_chart",
+        "title": "热泡终态最大上升速度：CULBM 与 GEA AV15",
+        "subtitle": "t=1020 s；全部已完成主网格；无同网格 GEA 表值时文献柱留空；单位 m/s",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "CULBM 的热泡 w_max 是否随网格加密趋近 GEA AV15？",
+        "rationale": "完成网格是离散、同单位的分辨率比较；分组柱形能显示具有文献基线网格上的绝对差距，同时以缺失文献柱诚实保留更细 CULBM 点。",
+        "comparisonContext": {
+          "baseline": "GEA AV15, arXiv:2302.04836 Table 1",
+          "grain": "每个已完成 CULBM 主网格；GEA 仅覆盖论文表 1 网格",
+          "normalization": "t=1020 s 全域竖直速度最大值",
+          "semanticFamily": "CULBM 对 GEA",
+          "unit": "m/s"
+        },
+        "type": "bar",
+        "dataset": "bubble_wmax",
+        "sourceId": "src_bubble_wmax",
+        "encodings": {
+          "x": {
+            "field": "grid",
+            "type": "ordinal",
+            "label": "网格步长 h"
+          },
+          "y": {
+            "fields": [
+              "culbm_w_max",
+              "gea_av15_w_max"
+            ],
+            "type": "quantitative",
+            "format": "number",
+            "label": "w_max",
+            "unit": "m/s"
+          },
+          "tooltip": [
+            {
+              "field": "h_m",
+              "type": "quantitative",
+              "label": "h",
+              "unit": "m"
+            },
+            {
+              "field": "relative_difference_percent",
+              "type": "quantitative",
+              "label": "相对偏差",
+              "unit": "%"
+            },
+            {
+              "field": "culbm_theta_max",
+              "type": "quantitative",
+              "label": "CULBM theta'_max",
+              "unit": "K"
+            }
+          ]
+        },
+        "xAxisTitle": "网格步长 h",
+        "yAxisTitle": "w_max (m/s)",
+        "valueFormat": "number",
+        "unit": "m/s",
+        "layout": "full",
+        "combinationRationale": "两列均为同一物理量和单位，分别表示实际计算与文献基线。",
+        "maxRows": 10
+      },
+      {
+        "id": "density_front_chart",
+        "title": "密度流终态前缘：CULBM 与 GEA AV75",
+        "subtitle": "t=900 s，z=1200 m，theta'=-1 K；无同网格 GEA 表值时文献柱留空；单位 km",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "CULBM 密度流前缘如何随网格加密接近或越过 GEA AV75？",
+        "rationale": "网格点是离散分辨率比较，分组柱形同时展示绝对前缘与可用文献中点；超出论文表 3 网格范围的文献值明确保留为空。",
+        "comparisonContext": {
+          "baseline": "GEA AV75, arXiv:2302.04836 Table 3",
+          "grain": "每个已完成 CULBM 主网格；GEA 仅覆盖论文表 3 网格",
+          "normalization": "theta'=-1 K 前缘位置",
+          "semanticFamily": "CULBM 对 GEA",
+          "unit": "km"
+        },
+        "type": "bar",
+        "dataset": "density_front",
+        "sourceId": "src_density_front",
+        "encodings": {
+          "x": {
+            "field": "grid",
+            "type": "ordinal",
+            "label": "网格步长 h"
+          },
+          "y": {
+            "fields": [
+              "culbm_front_km",
+              "gea_av75_midpoint_km"
+            ],
+            "type": "quantitative",
+            "format": "number",
+            "label": "前缘位置",
+            "unit": "km"
+          },
+          "tooltip": [
+            {
+              "field": "difference_m",
+              "type": "quantitative",
+              "label": "CULBM-文献中点",
+              "unit": "m"
+            },
+            {
+              "field": "relative_difference_percent",
+              "type": "quantitative",
+              "label": "相对偏差",
+              "unit": "%"
+            },
+            {
+              "field": "gea_av75_lower_km",
+              "type": "quantitative",
+              "label": "GEA 区间下界",
+              "unit": "km"
+            },
+            {
+              "field": "gea_av75_upper_km",
+              "type": "quantitative",
+              "label": "GEA 区间上界",
+              "unit": "km"
+            }
+          ]
+        },
+        "xAxisTitle": "网格步长 h",
+        "yAxisTitle": "前缘位置 (km)",
+        "valueFormat": "number",
+        "unit": "km",
+        "layout": "full",
+        "combinationRationale": "两列均为相同阈值和时刻下的前缘位置，文献列采用区间中点。",
+        "maxRows": 10
+      }
+    ],
+    "tables": [
+      {
+        "id": "run_audit_table",
+        "title": "主网格运行审计",
+        "subtitle": "严格完成状态、目标时刻、松弛时间与最后有效/终态 Mach 数",
+        "showDescription": true,
+        "dataset": "run_audit",
+        "defaultSort": {
+          "field": "run_order",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "sourceId": "src_run_audit",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "run_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "case_label",
+            "label": "算例",
+            "type": "text"
+          },
+          {
+            "field": "h_m",
+            "label": "h (m)",
+            "format": "number"
+          },
+          {
+            "field": "status_label",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "completion_percent",
+            "label": "完成度 (%)",
+            "format": "number"
+          },
+          {
+            "field": "tau",
+            "label": "tau",
+            "format": "number"
+          },
+          {
+            "field": "diagnostic_max_mach",
+            "label": "诊断 max Mach",
+            "format": "number"
+          },
+          {
+            "field": "key_metric",
+            "label": "关键指标",
+            "type": "text"
+          },
+          {
+            "field": "key_value",
+            "label": "终态值",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "robustness_table",
+        "title": "敏感性与稳定性控制组",
+        "subtitle": "相对同算例、同网格主结果；旧半网格平移注册归档不在此表",
+        "showDescription": true,
+        "dataset": "robustness",
+        "defaultSort": {
+          "field": "experiment_order",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "sourceId": "src_robustness",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "experiment_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "case_label",
+            "label": "算例",
+            "type": "text"
+          },
+          {
+            "field": "h_m",
+            "label": "h (m)",
+            "format": "number"
+          },
+          {
+            "field": "experiment",
+            "label": "控制变量",
+            "type": "text"
+          },
+          {
+            "field": "status_label",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "relative_to_main_percent",
+            "label": "主比较量变化 (%)",
+            "format": "number",
+            "movement": true,
+            "role": "movement",
+            "semantic": "movement"
+          },
+          {
+            "field": "max_mach",
+            "label": "max Mach",
+            "format": "number"
+          },
+          {
+            "field": "theta_prime_max_K",
+            "label": "theta'_max (K)",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "time_step_table",
+        "title": "细网格时间步与 Mach 收敛",
+        "subtitle": "逐级比较同一 D3Q19 网格；密度流关键值单位为 m",
+        "showDescription": true,
+        "dataset": "time_step_convergence",
+        "defaultSort": {
+          "field": "sequence",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "sourceId": "src_time_step_convergence",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "sequence",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "case_label",
+            "label": "算例",
+            "type": "text"
+          },
+          {
+            "field": "h_m",
+            "label": "h (m)",
+            "format": "number"
+          },
+          {
+            "field": "dt_s",
+            "label": "dt (s)",
+            "format": "number"
+          },
+          {
+            "field": "status_label",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "metric_label",
+            "label": "主指标",
+            "type": "text"
+          },
+          {
+            "field": "metric_value",
+            "label": "终态值",
+            "format": "number"
+          },
+          {
+            "field": "max_mach",
+            "label": "max Mach",
+            "format": "number"
+          },
+          {
+            "field": "relative_to_dt0p1_percent",
+            "label": "相对 dt=0.1 (%)",
+            "format": "number",
+            "movement": true,
+            "role": "movement",
+            "semantic": "movement"
+          },
+          {
+            "field": "relative_to_next_coarser_dt_percent",
+            "label": "逐级变化 (%)",
+            "format": "number",
+            "movement": true,
+            "role": "movement",
+            "semantic": "movement"
+          }
+        ]
+      },
+      {
+        "id": "fine_grid_scaling_table",
+        "title": "h/2 加密的三条缩放路径",
+        "subtitle": "均相对上一层最细主网格；固定 dt、等 Mach 与同 tau 分开解释",
+        "showDescription": true,
+        "dataset": "fine_grid_scaling",
+        "defaultSort": {
+          "field": "sequence",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "sourceId": "src_fine_grid_scaling",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "sequence",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "case_label",
+            "label": "算例",
+            "type": "text"
+          },
+          {
+            "field": "scaling_label",
+            "label": "缩放",
+            "type": "text"
+          },
+          {
+            "field": "refined_dt_s",
+            "label": "新 dt (s)",
+            "format": "number"
+          },
+          {
+            "field": "status_label",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "metric_label",
+            "label": "主指标",
+            "type": "text"
+          },
+          {
+            "field": "refined_value",
+            "label": "新网格值",
+            "format": "number"
+          },
+          {
+            "field": "relative_change_percent",
+            "label": "相对上一层 (%)",
+            "format": "number",
+            "movement": true,
+            "role": "movement",
+            "semantic": "movement"
+          },
+          {
+            "field": "refined_tau",
+            "label": "新 tau",
+            "format": "number"
+          },
+          {
+            "field": "refined_max_mach",
+            "label": "新 max Mach",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "src_bubble_wmax",
+        "label": "热泡主网格与 GEA AV15 对比查询",
+        "path": "sources/bubble_wmax.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "SELECT\n    'h=' ||\n        rtrim(rtrim(printf('%.4f', CAST(w.h_m AS REAL)), '0'), '.') ||\n        ' m' AS grid,\n    CAST(w.h_m AS REAL) AS h_m,\n    CAST(w.culbm_value AS REAL) AS culbm_w_max,\n    CASE\n        WHEN NULLIF(w.reference_value, '') IS NULL THEN NULL\n        ELSE CAST(w.reference_value AS REAL)\n    END AS gea_av15_w_max,\n    CASE\n        WHEN NULLIF(w.difference, '') IS NULL THEN NULL\n        ELSE CAST(w.difference AS REAL)\n    END AS difference_m_s,\n    CASE\n        WHEN NULLIF(w.relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(w.relative_difference_percent AS REAL)\n    END AS relative_difference_percent,\n    CAST(t.culbm_value AS REAL) AS culbm_theta_max,\n    CASE\n        WHEN NULLIF(t.reference_value, '') IS NULL THEN NULL\n        ELSE CAST(t.reference_value AS REAL)\n    END AS gea_av15_theta_max,\n    CASE\n        WHEN NULLIF(t.relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(t.relative_difference_percent AS REAL)\n    END AS theta_relative_difference_percent,\n    w.status AS status,\n    w.grid_registration AS grid_registration\nFROM main_grid_comparison AS w\nLEFT JOIN main_grid_comparison AS t\n    ON t.\"case\" = w.\"case\"\n   AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n   AND t.metric = 'theta_prime_max_K'\nWHERE w.\"case\" = 'rising_thermal'\n  AND w.metric = 'w_max_m_s'\n  AND w.status = 'complete'\n  AND NULLIF(w.culbm_value, '') IS NOT NULL\nORDER BY CAST(w.h_m AS REAL) DESC",
+          "description": "从分析器的逐网格比较表连接 w_max 与 theta'_max，保留全部严格完成的热泡主计算；论文未列出的更细网格参考值为 NULL。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/main_grid_comparison.csv"
+          ],
+          "filters": [
+            "case = rising_thermal",
+            "metric = w_max_m_s（并连接 theta_prime_max_K）",
+            "status = complete",
+            "必须存在 CULBM 值；GEA 参考值允许为空"
+          ],
+          "metric_definitions": [
+            "w_max：t=1020 s 全域竖直速度最大值，单位 m/s。",
+            "相对偏差：100*(CULBM-GEA)/abs(GEA)。",
+            "theta'_max：t=1020 s 全域位温扰动最大值，单位 K。"
+          ]
+        }
+      },
+      {
+        "id": "src_density_front",
+        "label": "密度流主网格与 GEA AV75 对比查询",
+        "path": "sources/density_front.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "SELECT\n    'h=' ||\n        rtrim(rtrim(printf('%.4f', CAST(h_m AS REAL)), '0'), '.') ||\n        ' m' AS grid,\n    CAST(h_m AS REAL) AS h_m,\n    CAST(culbm_value AS REAL) / 1000.0 AS culbm_front_km,\n    CASE\n        WHEN NULLIF(reference_value, '') IS NULL THEN NULL\n        ELSE CAST(reference_value AS REAL) / 1000.0\n    END AS gea_av75_midpoint_km,\n    CASE\n        WHEN NULLIF(reference_lower, '') IS NULL THEN NULL\n        ELSE CAST(reference_lower AS REAL) / 1000.0\n    END AS gea_av75_lower_km,\n    CASE\n        WHEN NULLIF(reference_upper, '') IS NULL THEN NULL\n        ELSE CAST(reference_upper AS REAL) / 1000.0\n    END AS gea_av75_upper_km,\n    CASE\n        WHEN NULLIF(difference, '') IS NULL THEN NULL\n        ELSE CAST(difference AS REAL)\n    END AS difference_m,\n    CASE\n        WHEN NULLIF(relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(relative_difference_percent AS REAL)\n    END AS relative_difference_percent,\n    status,\n    grid_registration\nFROM main_grid_comparison\nWHERE \"case\" = 'density_current'\n  AND metric = 'front_x_m'\n  AND status = 'complete'\n  AND NULLIF(culbm_value, '') IS NOT NULL\nORDER BY CAST(h_m AS REAL) DESC",
+          "description": "读取完成的密度流主计算前缘；文献区间存在时同时给出中点和上下界。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/main_grid_comparison.csv"
+          ],
+          "filters": [
+            "case = density_current",
+            "metric = front_x_m",
+            "status = complete"
+          ],
+          "metric_definitions": [
+            "前缘：t=900 s、z=1200 m 上 theta'=-1 K 的最右交点。",
+            "GEA 对比值：Table 3 AV75 区间中点；上下界保留在 tooltip。",
+            "相对偏差：100*(CULBM-GEA中点)/abs(GEA中点)。"
+          ]
+        }
+      },
+      {
+        "id": "src_run_audit",
+        "label": "严格主网格运行审计查询",
+        "path": "sources/run_audit.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "WITH preferred AS (\n    SELECT DISTINCT\n        run_name,\n        \"case\",\n        CAST(h_m AS REAL) AS h_m,\n        grid_registration\n    FROM main_grid_comparison\n    WHERE NULLIF(run_name, '') IS NOT NULL\n),\nselected AS (\n    SELECT s.*\n    FROM run_summary AS s\n    INNER JOIN preferred AS p\n        ON p.run_name = s.run_name\n       AND p.\"case\" = s.\"case\"\n       AND p.h_m = CAST(s.h_m AS REAL)\n       AND p.grid_registration = s.grid_registration\n)\nSELECT\n    ROW_NUMBER() OVER (\n        ORDER BY selected.\"case\" ASC, CAST(selected.h_m AS REAL) DESC\n    ) AS run_order,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE selected.\"case\"\n    END AS case_label,\n    CAST(selected.h_m AS REAL) AS h_m,\n    CASE selected.status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    selected.status_detail AS status_detail,\n    CAST(selected.observed_time_s AS REAL) AS observed_time_s,\n    CAST(selected.end_time_s AS REAL) AS target_time_s,\n    100.0 * CAST(selected.completion_fraction AS REAL) AS completion_percent,\n    CAST(selected.tau AS REAL) AS tau,\n    CASE\n        WHEN NULLIF(selected.max_mach, '') IS NOT NULL\n            THEN CAST(selected.max_mach AS REAL)\n        WHEN NULLIF(selected.last_valid_max_mach, '') IS NOT NULL\n            THEN CAST(selected.last_valid_max_mach AS REAL)\n        ELSE NULL\n    END AS diagnostic_max_mach,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN 'w_max (m/s)'\n        WHEN 'density_current' THEN 'front_x (m)'\n        ELSE '关键指标'\n    END AS key_metric,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN CAST(NULLIF(selected.w_max_m_s, '') AS REAL)\n        WHEN 'density_current' THEN CAST(NULLIF(selected.front_x_m, '') AS REAL)\n        ELSE NULL\n    END AS key_value\nFROM selected\nORDER BY selected.\"case\" ASC, CAST(selected.h_m AS REAL) DESC",
+          "description": "用主比较表选定的首选 run 连接严格状态汇总，失败 run 只显示最后有效诊断而不暴露异常终态。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/main_grid_comparison.csv",
+            "data/summary.csv"
+          ],
+          "filters": [
+            "仅保留 main_grid_comparison 选定的首选 run_name"
+          ],
+          "metric_definitions": [
+            "complete：达到目标时刻、终态有限、密度为正且最新 manifest 退出码为 0。",
+            "diagnostic max Mach：完成 run 用终态值，失败 run 用最后有效采样值。"
+          ]
+        }
+      },
+      {
+        "id": "src_robustness",
+        "label": "敏感性与稳定性控制组查询",
+        "path": "sources/robustness.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY sensitivity_comparison.\"case\" ASC,\n                 CAST(sensitivity_comparison.h_m AS REAL) DESC,\n                 sensitivity_comparison.run_group ASC,\n                 sensitivity_comparison.run_name ASC\n    ) AS experiment_order,\n    CASE sensitivity_comparison.\"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE sensitivity_comparison.\"case\"\n    END AS case_label,\n    sensitivity_comparison.run_group AS run_group,\n    sensitivity_comparison.run_name AS run_name,\n    CAST(sensitivity_comparison.h_m AS REAL) AS h_m,\n    CAST(sensitivity_comparison.dt_s AS REAL) AS dt_s,\n    sensitivity_comparison.thermal_lattice AS thermal_lattice,\n    sensitivity_comparison.viscosity_mode AS viscosity_mode,\n    CAST(NULLIF(sensitivity_comparison.nu_m2_s, '') AS REAL) AS nu_m2_s,\n    CASE\n        WHEN lower(sensitivity_comparison.run_name) LIKE '%_trt' THEN 'TRT 碰撞'\n        WHEN lower(sensitivity_comparison.run_name) LIKE '%_srt' THEN 'SRT 大时间步'\n        WHEN sensitivity_comparison.thermal_lattice = 'D3Q7' THEN '热标量 D3Q7'\n        WHEN sensitivity_comparison.viscosity_mode LIKE 'numeric%' THEN '数值黏度解释'\n        WHEN lower(sensitivity_comparison.run_group) = 'viscosity_profile'\n            THEN '等效高度黏度'\n        WHEN ABS(CAST(sensitivity_comparison.dt_s AS REAL) - 0.1) > 1.0e-12\n            THEN '时间步敏感性'\n        ELSE sensitivity_comparison.run_group\n    END AS experiment,\n    CASE sensitivity_comparison.status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    sensitivity_comparison.comparison_metric AS comparison_metric,\n    CAST(NULLIF(sensitivity_comparison.matching_main_value, '') AS REAL)\n        AS matching_main_value,\n    CAST(NULLIF(sensitivity_comparison.relative_to_matching_main_percent, '') AS REAL)\n        AS relative_to_main_percent,\n    CAST(NULLIF(sensitivity_comparison.max_mach, '') AS REAL) AS max_mach,\n    CAST(NULLIF(sensitivity_comparison.theta_prime_min_K, '') AS REAL)\n        AS theta_prime_min_K,\n    CAST(NULLIF(sensitivity_comparison.theta_prime_max_K, '') AS REAL)\n        AS theta_prime_max_K,\n    CAST(NULLIF(sensitivity_comparison.front_x_m, '') AS REAL) AS front_x_m,\n    CAST(NULLIF(sensitivity_comparison.w_max_m_s, '') AS REAL) AS w_max_m_s\nFROM sensitivity_comparison\nWHERE lower(sensitivity_comparison.run_group) <> 'registration_sensitivity'\nORDER BY sensitivity_comparison.\"case\" ASC,\n         CAST(sensitivity_comparison.h_m AS REAL) DESC,\n         sensitivity_comparison.run_group ASC,\n         sensitivity_comparison.run_name ASC",
+          "description": "汇总时间步、热格子、黏度解释与 SRT/TRT 控制组，并保留相对同网格主结果的变化。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/sensitivity_comparison.csv"
+          ],
+          "filters": [
+            "排除 registration_sensitivity 旧半网格平移归档"
+          ],
+          "metric_definitions": [
+            "主比较量：热泡为 w_max，密度流为 front_x。",
+            "相对主结果变化：100*(控制组-同网格主结果)/abs(同网格主结果)。"
+          ]
+        }
+      },
+      {
+        "id": "src_time_step_convergence",
+        "label": "细网格时间步与 Mach 收敛查询",
+        "path": "sources/time_step_convergence.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY \"case\" ASC, CAST(h_m AS REAL) ASC, CAST(dt_s AS REAL) DESC\n    ) AS sequence,\n    CASE \"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE \"case\"\n    END AS case_label,\n    CAST(h_m AS REAL) AS h_m,\n    CAST(dt_s AS REAL) AS dt_s,\n    CASE status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    CASE metric\n        WHEN 'w_max_m_s' THEN 'w_max (m/s)'\n        WHEN 'front_x_m' THEN 'front_x (m)'\n        ELSE metric\n    END AS metric_label,\n    CAST(NULLIF(value, '') AS REAL) AS metric_value,\n    CAST(NULLIF(max_mach, '') AS REAL) AS max_mach,\n    CAST(NULLIF(relative_to_dt0p1_percent, '') AS REAL)\n        AS relative_to_dt0p1_percent,\n    CAST(NULLIF(next_coarser_dt_s, '') AS REAL) AS next_coarser_dt_s,\n    CAST(NULLIF(relative_to_next_coarser_dt_percent, '') AS REAL)\n        AS relative_to_next_coarser_dt_percent\nFROM time_step_convergence\nORDER BY \"case\" ASC, CAST(h_m AS REAL) ASC, CAST(dt_s AS REAL) DESC",
+          "description": "对同一 D3Q19 动态黏度网格按 dt 逐级比较主指标和最大格子 Mach，同时保留相对 dt=0.1 及相邻更粗时间步的变化。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/time_step_convergence.csv"
+          ],
+          "filters": [
+            "仅含同 case/h 至少两个时间步的 D3Q19 动态黏度结果",
+            "严格完成 run 才提供终态主指标和 max Mach"
+          ],
+          "metric_definitions": [
+            "热泡主指标为 w_max，单位 m/s；密度流主指标为 front_x，单位 m。",
+            "逐级变化：100*(当前 dt 值-相邻更粗 dt 值)/abs(相邻更粗 dt 值)。"
+          ]
+        }
+      },
+      {
+        "id": "src_fine_grid_scaling",
+        "label": "h/2 加密三路径比较查询",
+        "path": "sources/fine_grid_scaling.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY \"case\" ASC,\n                 CASE scaling\n                     WHEN 'fixed_dt' THEN 1\n                     WHEN 'acoustic_dt_proportional_h' THEN 2\n                     WHEN 'diffusive_dt_proportional_h2' THEN 3\n                     ELSE 4\n                 END\n    ) AS sequence,\n    CASE \"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE \"case\"\n    END AS case_label,\n    CASE scaling\n        WHEN 'fixed_dt' THEN 'fixed dt'\n        WHEN 'acoustic_dt_proportional_h' THEN 'dt proportional to h'\n        WHEN 'diffusive_dt_proportional_h2' THEN 'dt proportional to h^2'\n        ELSE scaling\n    END AS scaling_label,\n    CAST(baseline_h_m AS REAL) AS baseline_h_m,\n    CAST(baseline_dt_s AS REAL) AS baseline_dt_s,\n    CAST(refined_h_m AS REAL) AS refined_h_m,\n    CAST(refined_dt_s AS REAL) AS refined_dt_s,\n    CASE status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    CASE metric\n        WHEN 'w_max_m_s' THEN 'w_max (m/s)'\n        WHEN 'front_x_m' THEN 'front_x (m)'\n        ELSE metric\n    END AS metric_label,\n    CAST(NULLIF(baseline_value, '') AS REAL) AS baseline_value,\n    CAST(NULLIF(refined_value, '') AS REAL) AS refined_value,\n    CAST(NULLIF(relative_change_percent, '') AS REAL) AS relative_change_percent,\n    CAST(NULLIF(baseline_tau, '') AS REAL) AS baseline_tau,\n    CAST(NULLIF(refined_tau, '') AS REAL) AS refined_tau,\n    CAST(NULLIF(baseline_max_mach, '') AS REAL) AS baseline_max_mach,\n    CAST(NULLIF(refined_max_mach, '') AS REAL) AS refined_max_mach\nFROM fine_grid_scaling_comparison\nORDER BY \"case\" ASC, sequence ASC",
+          "description": "把新增 h/2 网格的固定 dt、dt∝h 和 dt∝h² 三条路径分别与上一层最细 dt=0.1 主网格比较。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/fine_grid_scaling_comparison.csv"
+          ],
+          "filters": [
+            "热泡 15.625→7.8125 m；密度流 25→12.5 m",
+            "D3Q19、动态黏度映射；严格完成 run 才给出终态值"
+          ],
+          "metric_definitions": [
+            "dt∝h：近似保持格子速度/Mach；dt∝h²：保持 nu_LBM 与 tau。",
+            "相对变化：100*(新网格-上一层最细主网格)/abs(上一层值)。"
+          ]
+        }
+      },
+      {
+        "id": "src_derived_metrics",
+        "label": "报告头部派生指标查询",
+        "path": "sources/derived_metrics.sql",
+        "query": {
+          "engine": "SQLite (Python sqlite3)",
+          "sql": "WITH main_unique AS (\n    SELECT DISTINCT \"case\", CAST(h_m AS REAL) AS h_m, status, run_name\n    FROM main_grid_comparison\n),\nbubble_fine AS (\n    SELECT\n        CAST(w.h_m AS REAL) AS h_m,\n        CAST(w.culbm_value AS REAL) AS culbm_w_max,\n        CAST(w.reference_value AS REAL) AS gea_w_max,\n        CAST(w.relative_difference_percent AS REAL) AS w_relative_percent,\n        CAST(t.culbm_value AS REAL) AS culbm_theta_max,\n        CAST(t.reference_value AS REAL) AS gea_theta_max,\n        CAST(t.relative_difference_percent AS REAL) AS theta_relative_percent\n    FROM main_grid_comparison AS w\n    LEFT JOIN main_grid_comparison AS t\n      ON t.\"case\" = w.\"case\"\n     AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n     AND t.metric = 'theta_prime_max_K'\n    WHERE w.\"case\" = 'rising_thermal'\n      AND w.metric = 'w_max_m_s'\n      AND w.status = 'complete'\n      AND NULLIF(w.reference_value, '') IS NOT NULL\n    ORDER BY CAST(w.h_m AS REAL) ASC\n    LIMIT 1\n),\nbubble_finest_all AS (\n    SELECT\n        CAST(w.h_m AS REAL) AS h_m,\n        CAST(w.culbm_value AS REAL) AS culbm_w_max,\n        CASE\n            WHEN NULLIF(w.reference_value, '') IS NULL THEN NULL\n            ELSE CAST(w.reference_value AS REAL)\n        END AS gea_w_max,\n        CAST(t.culbm_value AS REAL) AS culbm_theta_max\n    FROM main_grid_comparison AS w\n    LEFT JOIN main_grid_comparison AS t\n      ON t.\"case\" = w.\"case\"\n     AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n     AND t.metric = 'theta_prime_max_K'\n    WHERE w.\"case\" = 'rising_thermal'\n      AND w.metric = 'w_max_m_s'\n      AND w.status = 'complete'\n      AND NULLIF(w.culbm_value, '') IS NOT NULL\n    ORDER BY CAST(w.h_m AS REAL) ASC\n    LIMIT 1\n),\ndensity_ref AS (\n    SELECT\n        CAST(h_m AS REAL) AS h_m,\n        CAST(culbm_value AS REAL) AS culbm_front_m,\n        CAST(reference_value AS REAL) AS gea_front_m,\n        CAST(difference AS REAL) AS difference_m,\n        CAST(relative_difference_percent AS REAL) AS relative_percent\n    FROM main_grid_comparison\n    WHERE \"case\" = 'density_current'\n      AND metric = 'front_x_m'\n      AND status = 'complete'\n      AND NULLIF(reference_value, '') IS NOT NULL\n),\ndensity_finest_all AS (\n    SELECT\n        CAST(h_m AS REAL) AS h_m,\n        CAST(culbm_value AS REAL) AS culbm_front_m,\n        CASE\n            WHEN NULLIF(reference_value, '') IS NULL THEN NULL\n            ELSE CAST(reference_value AS REAL)\n        END AS gea_front_m\n    FROM main_grid_comparison\n    WHERE \"case\" = 'density_current'\n      AND metric = 'front_x_m'\n      AND status = 'complete'\n      AND NULLIF(culbm_value, '') IS NOT NULL\n    ORDER BY CAST(h_m AS REAL) ASC\n    LIMIT 1\n)\nSELECT\n    (SELECT COUNT(*) FROM main_unique) AS main_total,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'complete') AS main_complete,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'failed') AS main_failed,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'incomplete') AS main_incomplete,\n    (SELECT h_m FROM bubble_fine) AS bubble_fine_h_m,\n    (SELECT culbm_w_max FROM bubble_fine) AS bubble_culbm_w_max,\n    (SELECT gea_w_max FROM bubble_fine) AS bubble_gea_w_max,\n    (SELECT w_relative_percent FROM bubble_fine) AS bubble_w_relative_percent,\n    (SELECT culbm_theta_max FROM bubble_fine) AS bubble_culbm_theta_max,\n    (SELECT gea_theta_max FROM bubble_fine) AS bubble_gea_theta_max,\n    (SELECT theta_relative_percent FROM bubble_fine) AS bubble_theta_relative_percent,\n    (SELECT h_m FROM bubble_finest_all) AS bubble_finest_all_h_m,\n    (SELECT culbm_w_max FROM bubble_finest_all) AS bubble_finest_all_w_max,\n    (SELECT gea_w_max FROM bubble_finest_all) AS bubble_finest_all_gea_w_max,\n    (SELECT culbm_theta_max FROM bubble_finest_all) AS bubble_finest_all_theta_max,\n    (SELECT h_m FROM density_finest_all) AS density_finest_all_h_m,\n    (SELECT culbm_front_m FROM density_finest_all) AS density_finest_all_front_m,\n    (SELECT gea_front_m FROM density_finest_all) AS density_finest_all_gea_front_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 100.0) AS density_h100_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 100.0) AS density_h100_difference_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 50.0) AS density_h50_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 50.0) AS density_h50_difference_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 25.0) AS density_h25_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 25.0) AS density_h25_difference_m,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'complete'\n    ) AS robustness_complete,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'failed'\n    ) AS robustness_failed,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'incomplete'\n    ) AS robustness_incomplete",
+          "description": "计算主矩阵状态、最细文献可比点、CULBM 全部最细点及密度流可比偏差。",
+          "language": "sql",
+          "executed_at": "2026-07-31T04:58:16Z",
+          "tables_used": [
+            "data/main_grid_comparison.csv",
+            "data/sensitivity_comparison.csv"
+          ],
+          "filters": [
+            "主矩阵按 case/h/run_name 去重",
+            "最细热泡仅用严格完成且有文献值的网格",
+            "另保留没有同网格文献值的最细 CULBM 热泡/密度流点",
+            "密度流定量偏差只用 h=100/50/25 m 的文献对齐网格"
+          ],
+          "metric_definitions": [
+            "主矩阵状态计数以分析器选定的首选 run 为单位。",
+            "所有百分比偏差使用文献值或同网格主结果的绝对值作分母。"
+          ]
+        }
+      },
+      {
+        "id": "src_reference_metrics",
+        "label": "GEA 论文参考值审计表",
+        "path": "data/reference_metrics.csv"
+      },
+      {
+        "id": "src_solver_verification",
+        "label": "CULBM 最终 CTest 与 GPU free-slip 回归",
+        "path": "sources/solver_verification.md"
+      },
+      {
+        "id": "src_paper",
+        "label": "GEA 论文：arXiv:2302.04836",
+        "href": "https://arxiv.org/abs/2302.04836"
+      },
+      {
+        "id": "src_gea_commit",
+        "label": "GEA 官方实现固定提交 bdf0b929",
+        "href": "https://github.com/GEA-Geophysical-and-Environmental-Apps/GEA/tree/bdf0b929fc92163cb946520e5f8bd3d1fd6ca45f"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# CULBM 对 GEA 两个大气基准的数值验证",
+        "layout": "full"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## 技术结论：可稳定复现主要流动，但未建立与 GEA 的严格定量等价\n\n**本工作应解释为 CULBM 的 Boussinesq 类比验证，而不是相同控制方程的代码复现。** 主矩阵共有 **12** 个完整终止时刻算例，其中 **10** 个完成、**2** 个失败、**0** 个未完成。在最细的文献同网格比较点 **h=15.625 m**，CULBM 的 `w_max` 为 **16.38 m/s**，GEA AV15 为 12.17 m/s，相对偏差 **+34.56%**。同一网格的 `theta'_max` 为 1.533 K，文献值为 1.000 K，偏差 +53.31%。 更细的 CULBM 主网格 **h=7.8125 m** 给出 `w_max=17.56 m/s`、`theta'_max=1.564 K`；GEA 表 1 没有该网格值，因此该点只用于观察 CULBM 自身的加密趋势，不计算或外推跨代码百分比偏差。 密度流前缘相对 GEA AV75 的偏差依次为：h=100 m：-7.67% (-1171.9 m)；h=50 m：-2.59% (-392.7 m)；h=25 m：+3.80% (+561.7 m)。偏差随加密发生变号，不能据此宣称向 GEA AV75 单调收敛。 GEA 表 3 没有以下同网格 AV75 值：h=200 m (CULBM 13.511 km)、h=12.5 m (CULBM 15.756 km)；这些点只展示 CULBM 加密轨迹，不计入跨代码百分比误差。\n\n新增细网格的空间延拓为：从 h=15.625 m 加密到 h=7.8125 m 后，`w_max` 变化 **+7.26%**、`theta'_max` 变化 **+2.00%**；新主计算 `max Mach=0.389`。 从 h=25 m 加密到 h=12.5 m 后，前缘变化 **+2.60%**；新主计算 `max Mach=0.417`。\n\nh/2 加密相对上一层最细主网格的三路径结果为：热泡：固定 dt +7.26% (Ma=0.389)、dt∝h +0.05% (Ma=0.182)、dt∝h² -1.48% (Ma=0.089)；密度流：固定 dt +2.60% (Ma=0.417)、dt∝h +2.35% (Ma=0.213)、dt∝h² +2.26% (Ma=0.107)。\n\n因此，当前证据支持“边界条件、初值和两个基准的主要动力学已被实算并可审计”，但不支持把 CULBM 与 GEA 的终态极值/前缘视为数值等价。",
+        "layout": "full"
+      },
+      {
+        "id": "bubble_finding",
+        "type": "markdown",
+        "body": "## 热泡上升速度系统性偏高\n\n在最细的文献同网格比较点 **h=15.625 m**，CULBM 的 `w_max` 为 **16.38 m/s**，GEA AV15 为 12.17 m/s，相对偏差 **+34.56%**。同一网格的 `theta'_max` 为 1.533 K，文献值为 1.000 K，偏差 +53.31%。 更细的 CULBM 主网格 **h=7.8125 m** 给出 `w_max=17.56 m/s`、`theta'_max=1.564 K`；GEA 表 1 没有该网格值，因此该点只用于观察 CULBM 自身的加密趋势，不计算或外推跨代码百分比偏差。 完成网格上的 `w_max` 没有随加密向 AV15 表值靠拢，而是维持在更高的平台；这更像有效耗散与方程形式差异造成的系统偏差，而不是单一粗网格截断误差。下图纳入全部严格完成的 CULBM 主网格；没有同网格 GEA 表值的新加密点只显示 CULBM 柱，文献柱保持为空。 从 h=15.625 m 加密到 h=7.8125 m 后，`w_max` 变化 **+7.26%**、`theta'_max` 变化 **+2.00%**；新主计算 `max Mach=0.389`。",
+        "layout": "full",
+        "sourceId": "src_bubble_wmax"
+      },
+      {
+        "id": "bubble_wmax_visual",
+        "type": "chart",
+        "chartId": "bubble_wmax_chart",
+        "layout": "full"
+      },
+      {
+        "id": "density_finding",
+        "type": "markdown",
+        "body": "## 密度流前缘在加密过程中穿过文献基线\n\n相对 GEA AV75 区间中点：h=100 m：-7.67% (-1171.9 m)；h=50 m：-2.59% (-392.7 m)；h=25 m：+3.80% (+561.7 m)。偏差随加密发生变号，不能据此宣称向 GEA AV75 单调收敛。  GEA 表 3 没有以下同网格 AV75 值：h=200 m (CULBM 13.511 km)、h=12.5 m (CULBM 15.756 km)；这些点只展示 CULBM 加密轨迹，不计入跨代码百分比误差。 从 h=25 m 加密到 h=12.5 m 后，前缘变化 **+2.60%**；新主计算 `max Mach=0.417`。",
+        "layout": "full",
+        "sourceId": "src_density_front"
+      },
+      {
+        "id": "density_front_visual",
+        "type": "chart",
+        "chartId": "density_front_chart",
+        "layout": "full"
+      },
+      {
+        "id": "run_reliability",
+        "type": "markdown",
+        "body": "## 两个最粗主网格失稳，属于验证结果而非缺失数据\n\n严格完成判据下，主矩阵失败项为：**Density current h=400 m；Rising thermal bubble h=250 m**。失败算例只保留到最后有效采样的诊断量，异常终态不会进入物理比较。两项粗网格的 SRT 松弛时间非常接近 `tau=0.5` 稳定性边界；这使“低黏度映射 + 粗空间步长”的碰撞稳定性成为首要数值原因，同时粗网格对初始扰动界面的解析不足会放大风险。",
+        "layout": "full",
+        "sourceId": "src_run_audit"
+      },
+      {
+        "id": "run_audit_visual",
+        "type": "table",
+        "tableId": "run_audit_table",
+        "layout": "full"
+      },
+      {
+        "id": "scope_and_definitions",
+        "type": "markdown",
+        "body": "## 比较范围与指标定义\n\n验证对象为 GEA 论文中的 **Rising thermal bubble** 与 **Density current**。热泡比较 `t=1020 s` 的全域 `w_min/w_max` 和 `theta'_min/theta'_max`；密度流比较 `t=900 s, z=1200 m` 上 `theta'=-1 K` 的最右前缘，并保留阈值所在相邻网格中心作为 bracket。论文正文相邻位置写作 `+1 K`，但冷池扰动为负且其表 3 前缘定义与 `-1 K` 一致，因此本验证采用负阈值。\n\n主比较固定为 D3Q19 动量/热标量、SRT、`dt=0.1 s`、无 SGS。热泡网格中心按官方 GEA 的 `0,h,...,L-h` 注册；密度流按边界对齐注册。完成状态要求达到目标时刻、全场有限、格子密度为正，且最新 suite manifest 没有非零退出码。",
+        "layout": "full"
+      },
+      {
+        "id": "method_and_model",
+        "type": "markdown",
+        "body": "## 方法与模型规格：这是受控的 Boussinesq 类比\n\nCULBM 将论文常量动力黏度按地面参考密度映射为全域常量运动黏度，并直接输运归一化位温扰动，通过 Boussinesq 项反馈浮力。二维问题在 CULBM 中以 4-cell 周期薄层表示，外边界使用本次验证增加并单测的精确镜面 free-slip 反射。\n\nGEA 基准则求解带总能量、理想气体状态方程与高度变化静力背景的可压缩干空气方程；常量动力黏度对应的运动黏度会随高度密度下降而增加。两者还分别采用有限体积/BDF1/压力速度分裂和格子 Boltzmann SRT。因此，本报告检验的是初值、边界、主要动力学、网格行为与文献指标的一致程度，而不是逐项相同 PDE 离散的回归测试。\n\n新增 h/2 网格同时采用三档时间步：`dt=0.1 s` 直接延拓原矩阵，`dt=0.05 s` 维持与上一层主网格近似相同的格子 Mach，`dt=0.025 s` 按 diffusive scaling 保持 `nu_LBM` 与 `tau`，并把 Mach 约减半。三者用于分离固定时间步趋势、等 Mach 趋势和低 Mach/同松弛参数趋势。",
+        "layout": "full"
+      },
+      {
+        "id": "solver_regression",
+        "type": "markdown",
+        "body": "## 求解器边界实现与回归测试已通过\n\n最终构建的 CTest 为 **8/8 通过**。240 步四墙 free-slip GPU 回归同时覆盖 D3Q7 与 D3Q19：最大法向速度为 **5.96e-8**，切向速度保留约 **0.0199985**，温度误差不超过 **1.76e-5**。这把“边界实现本身错误”从两个基准主要偏差来源中排除；它不证明跨方程模型的物理等价。",
+        "layout": "full",
+        "sourceId": "src_solver_verification"
+      },
+      {
+        "id": "fine_grid_scaling",
+        "type": "markdown",
+        "body": "## h/2 三条缩放路径区分空间与时间离散效应\n\nh/2 加密相对上一层最细主网格的三路径结果为：热泡：固定 dt +7.26% (Ma=0.389)、dt∝h +0.05% (Ma=0.182)、dt∝h² -1.48% (Ma=0.089)；密度流：固定 dt +2.60% (Ma=0.417)、dt∝h +2.35% (Ma=0.213)、dt∝h² +2.26% (Ma=0.107)。 固定 `dt` 延续原矩阵但同时提高格子 Mach；`dt∝h` 近似保持格子速度/Mach；`dt∝h²` 近似保持 `nu_LBM` 与 `tau`。三条路径必须并列解释，不能把任一路径单独当作纯空间收敛。",
+        "layout": "full",
+        "sourceId": "src_fine_grid_scaling"
+      },
+      {
+        "id": "fine_grid_scaling_visual",
+        "type": "table",
+        "tableId": "fine_grid_scaling_table",
+        "layout": "full"
+      },
+      {
+        "id": "time_step_convergence",
+        "type": "markdown",
+        "body": "## 同网格时间步扫描量化 Mach 与终态指标敏感性\n\n最细可用同网格时间步序列为：热泡 h=7.8125 m：dt=0.100 s：17.5649，Ma=0.389，相对 dt=0.1 为 +0.00%；dt=0.050 s：16.3836，Ma=0.182，相对 dt=0.1 为 -6.72%；dt=0.025 s：16.1337，Ma=0.089，相对 dt=0.1 为 -8.15%；密度流 h=12.5 m：dt=0.100 s：15756.1955，Ma=0.417，相对 dt=0.1 为 +0.00%；dt=0.050 s：15718.2586，Ma=0.213，相对 dt=0.1 为 -0.24%；dt=0.025 s：15705.0383，Ma=0.107，相对 dt=0.1 为 -0.32%。 表中的“相对 dt=0.1”使用同一 case/h 的主时间步作基线，“逐级变化”只与相邻更粗时间步比较；两列分母不同，不能互换。",
+        "layout": "full",
+        "sourceId": "src_time_step_convergence"
+      },
+      {
+        "id": "time_step_visual",
+        "type": "table",
+        "tableId": "time_step_table",
+        "layout": "full"
+      },
+      {
+        "id": "robustness",
+        "type": "markdown",
+        "body": "## 控制组削弱了“时间步/Mach 数是主偏差来源”的解释\n\n共有 **12** 个已完成控制组可直接和同网格主结果比较；其主比较量最大相对变化为 **-8.15%**（Rising thermal bubble，时间步敏感性） 密度流最细已完成的最小时间步控制（h=12.5 m，dt=0.025 s）前缘变化为 -0.32%，`max Mach` 降至 0.107。 新增最细 D3Q19 主网格的减小时间步控制为：Density current h=12.5 m、dt=0.025 s：完成，主比较量变化 -0.32%，`max Mach=0.107`；Density current h=12.5 m、dt=0.050 s：完成，主比较量变化 -0.24%，`max Mach=0.213`；Rising thermal bubble h=7.8125 m、dt=0.025 s：完成，主比较量变化 -8.15%，`max Mach=0.089`；Rising thermal bubble h=7.8125 m、dt=0.050 s：完成，主比较量变化 -6.72%，`max Mach=0.182`。这些控制只检验时间步/Mach 敏感性，不能补造缺失的 GEA 同网格基线。 D3Q7 的前缘变化仅 -0.10%，但 `theta'_max` 达 1.844 K，说明前缘单一指标会掩盖标量场色散/过冲。 粗网格稳定性矩阵中，增大到 `dt=1.0 s` 的 SRT **2/2 完成**，而保持 `dt=0.1 s` 的 TRT **2/2 失败**；这说明把 `tau-0.5` 拉离零比只改变奇对称动量模态更关键，且标量/偶对称模态或界面欠解析仍可能触发失稳。 两档等效高度黏度在 h=31.25 m 热泡上的 `w_max` 变化绝对值为 **0.52%–2.66%**，明显小于对 GEA 的系统偏差，因此地面常量运动黏度映射不是唯一主因。 这些结果表明，降低弱可压误差或改变标量格子会改变局部过冲与稳定裕度，但目前并未消除热泡速度平台或密度流前缘的非单调偏差；剩余差异仍需优先按控制方程、静力背景和耗散模型不一致解释。",
+        "layout": "full",
+        "sourceId": "src_robustness"
+      },
+      {
+        "id": "robustness_visual",
+        "type": "table",
+        "tableId": "robustness_table",
+        "layout": "full"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 不确定性与限制：文献表值可量化，场误差目前不可量化\n\n- GEA 论文没有随文提供这两个算例的原始场或 `z=1200 m` 数字剖面，所以只能对表中极值/前缘计算精确偏差；等值线和剖面只能作定性、网格间审计，不能声称文献场的 `L1/L2/Linf` 误差。\n- 当 CULBM 加密到论文表 1/表 3 未列出的更细网格时，报告保留真实 CULBM 点并将 GEA 值记为空；这些点只支持 CULBM 自身的网格/时间步敏感性判断，不能通过插值或外推生成同网格文献误差。\n- 两个基准没有解析解，GEA 结果本身是特定人工黏度与有限体积离散下的文献参考，而非真值。\n- 细网格主计算的格子 Mach 数偏高，会增加弱可压误差；`dt=0.05/0.025 s`控制组用于隔离这一项并检查时间步收敛，但不能校正控制方程差异。\n- 常量地面运动黏度不能复现 GEA 随高度变化的等效运动黏度；热力学、静力背景、离散耗散和二维实现差异彼此耦合，现有控制组不能唯一分解每一项的贡献。\n- 失败粗网格的异常终态被排除；它们证明稳定性边界，而不提供可比较的终态物理量。",
+        "layout": "full"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 建议的下一步\n\n1. 对后续更细网格按 `dt/h` 固定或下降设计时间步，避免把增长的格子 Mach 数误判为空间离散趋势；严格完成并通过终态审计的 `dt=0.025 s` 结果才可作为低 Mach 基线。\n2. 保留本次 TRT 粗网格两案均失败的事实，进一步研究 MRT、cumulant、regularized 或 entropic 碰撞及标量稳定化；不要用新控制组替换本次 SRT 主矩阵。\n3. 增加随高度变化的黏性/扩散映射或真实静力背景能力，单独量化“常量动力黏度”与“常量运动黏度”的差别。\n4. 对热泡 `w_max` 平台做耗散预算：比较 SRT/TRT、显式滤波、SGS 与不同热格子，避免只看终态极值。\n5. 从 GEA 固定提交导出同网格原始场和 `z=1200 m` 剖面后，再计算相位对齐与未对齐的场范数误差。\n6. 将本次 runner、free-slip GPU 回归与关键表值阈值接入持续验证；失败粗网格应作为已知稳定性测试单列，不与物理一致性门槛混合。",
+        "layout": "full"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 仍需回答的问题\n\n- 若在 CULBM 中复现 GEA 的高度变黏性，热泡 `w_max` 的系统高估能下降多少？\n- TRT 只改善奇对称动量模态时，两个粗网格失败中有多少来自动量碰撞，多少来自标量/界面欠解析？\n- 获取 GEA 原始场后，密度流 h=25 m 的前缘超越是整体相位误差，还是阈值附近局部色散造成？\n- 对相同 Boussinesq 方程与相同黏性模型做一个中间基准，能否把“方程形式误差”和“离散误差”拆开？",
+        "layout": "full"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-31T04:58:16Z",
+    "status": "ready",
+    "datasets": {
+      "bubble_wmax": [
+        {
+          "grid": "h=125 m",
+          "h_m": 125.0,
+          "culbm_w_max": 16.00953517,
+          "gea_av15_w_max": 11.97,
+          "difference_m_s": 4.039535175,
+          "relative_difference_percent": 33.74716103,
+          "culbm_theta_max": 1.629217625,
+          "gea_av15_theta_max": 1.06,
+          "theta_relative_difference_percent": 53.69977591,
+          "status": "complete",
+          "grid_registration": "GEA cell-centred coordinates (bounds -h/2 to L-h/2)"
+        },
+        {
+          "grid": "h=62.5 m",
+          "h_m": 62.5,
+          "culbm_w_max": 15.85015329,
+          "gea_av15_w_max": 12.09,
+          "difference_m_s": 3.760153286,
+          "relative_difference_percent": 31.10135059,
+          "culbm_theta_max": 1.53238821,
+          "gea_av15_theta_max": 1.03,
+          "theta_relative_difference_percent": 48.7755544,
+          "status": "complete",
+          "grid_registration": "GEA cell-centred coordinates (bounds -h/2 to L-h/2)"
+        },
+        {
+          "grid": "h=31.25 m",
+          "h_m": 31.25,
+          "culbm_w_max": 16.02217788,
+          "gea_av15_w_max": 12.13,
+          "difference_m_s": 3.892177879,
+          "relative_difference_percent": 32.08720428,
+          "culbm_theta_max": 1.513947487,
+          "gea_av15_theta_max": 1.01,
+          "theta_relative_difference_percent": 49.89579078,
+          "status": "complete",
+          "grid_registration": "GEA cell-centred coordinates (bounds -h/2 to L-h/2)"
+        },
+        {
+          "grid": "h=15.625 m",
+          "h_m": 15.625,
+          "culbm_w_max": 16.37627021,
+          "gea_av15_w_max": 12.17,
+          "difference_m_s": 4.206270214,
+          "relative_difference_percent": 34.56261474,
+          "culbm_theta_max": 1.533142805,
+          "gea_av15_theta_max": 1.0,
+          "theta_relative_difference_percent": 53.31428051,
+          "status": "complete",
+          "grid_registration": "GEA cell-centred coordinates (bounds -h/2 to L-h/2)"
+        },
+        {
+          "grid": "h=7.8125 m",
+          "h_m": 7.8125,
+          "culbm_w_max": 17.56486599,
+          "gea_av15_w_max": null,
+          "difference_m_s": null,
+          "relative_difference_percent": null,
+          "culbm_theta_max": 1.563768864,
+          "gea_av15_theta_max": null,
+          "theta_relative_difference_percent": null,
+          "status": "complete",
+          "grid_registration": "GEA cell-centred coordinates (bounds -h/2 to L-h/2)"
+        }
+      ],
+      "density_front": [
+        {
+          "grid": "h=200 m",
+          "h_m": 200.0,
+          "culbm_front_km": 13.51089417,
+          "gea_av75_midpoint_km": null,
+          "gea_av75_lower_km": null,
+          "gea_av75_upper_km": null,
+          "difference_m": null,
+          "relative_difference_percent": null,
+          "status": "complete",
+          "grid_registration": "official_boundary_aligned"
+        },
+        {
+          "grid": "h=100 m",
+          "h_m": 100.0,
+          "culbm_front_km": 14.1100985,
+          "gea_av75_midpoint_km": 15.282,
+          "gea_av75_lower_km": 15.269,
+          "gea_av75_upper_km": 15.295,
+          "difference_m": -1171.901501,
+          "relative_difference_percent": -7.668508712,
+          "status": "complete",
+          "grid_registration": "official_boundary_aligned"
+        },
+        {
+          "grid": "h=50 m",
+          "h_m": 50.0,
+          "culbm_front_km": 14.76131412,
+          "gea_av75_midpoint_km": 15.154,
+          "gea_av75_lower_km": 15.141,
+          "gea_av75_upper_km": 15.167,
+          "difference_m": -392.6858778,
+          "relative_difference_percent": -2.59130182,
+          "status": "complete",
+          "grid_registration": "official_boundary_aligned"
+        },
+        {
+          "grid": "h=25 m",
+          "h_m": 25.0,
+          "culbm_front_km": 15.357237,
+          "gea_av75_midpoint_km": 14.7955,
+          "gea_av75_lower_km": 14.783,
+          "gea_av75_upper_km": 14.808,
+          "difference_m": 561.7370004,
+          "relative_difference_percent": 3.796674667,
+          "status": "complete",
+          "grid_registration": "official_boundary_aligned"
+        },
+        {
+          "grid": "h=12.5 m",
+          "h_m": 12.5,
+          "culbm_front_km": 15.75619554,
+          "gea_av75_midpoint_km": null,
+          "gea_av75_lower_km": null,
+          "gea_av75_upper_km": null,
+          "difference_m": null,
+          "relative_difference_percent": null,
+          "status": "complete",
+          "grid_registration": "GEA wall-centred bounds (0 to L)"
+        }
+      ],
+      "run_audit": [
+        {
+          "run_order": 1,
+          "case_label": "Density current",
+          "h_m": 400.0,
+          "status_label": "失败",
+          "status_detail": "suite_manifest 记录非零退出码 3",
+          "observed_time_s": 485.0,
+          "target_time_s": 900.0,
+          "completion_percent": 53.88888889,
+          "tau": 0.5001210781,
+          "diagnostic_max_mach": 0.5365702913,
+          "key_metric": "front_x (m)",
+          "key_value": null
+        },
+        {
+          "run_order": 2,
+          "case_label": "Density current",
+          "h_m": 200.0,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 900.0,
+          "target_time_s": 900.0,
+          "completion_percent": 100.0,
+          "tau": 0.5004843125,
+          "diagnostic_max_mach": 0.02401625512,
+          "key_metric": "front_x (m)",
+          "key_value": 13510.89417
+        },
+        {
+          "run_order": 3,
+          "case_label": "Density current",
+          "h_m": 100.0,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 900.0,
+          "target_time_s": 900.0,
+          "completion_percent": 100.0,
+          "tau": 0.50193725,
+          "diagnostic_max_mach": 0.04873237525,
+          "key_metric": "front_x (m)",
+          "key_value": 14110.0985
+        },
+        {
+          "run_order": 4,
+          "case_label": "Density current",
+          "h_m": 50.0,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 900.0,
+          "target_time_s": 900.0,
+          "completion_percent": 100.0,
+          "tau": 0.507749,
+          "diagnostic_max_mach": 0.09666485419,
+          "key_metric": "front_x (m)",
+          "key_value": 14761.31412
+        },
+        {
+          "run_order": 5,
+          "case_label": "Density current",
+          "h_m": 25.0,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 900.0,
+          "target_time_s": 900.0,
+          "completion_percent": 100.0,
+          "tau": 0.530996,
+          "diagnostic_max_mach": 0.2046111165,
+          "key_metric": "front_x (m)",
+          "key_value": 15357.237
+        },
+        {
+          "run_order": 6,
+          "case_label": "Density current",
+          "h_m": 12.5,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 900.0,
+          "target_time_s": 900.0,
+          "completion_percent": 100.0,
+          "tau": 0.623984,
+          "diagnostic_max_mach": 0.4167857499,
+          "key_metric": "front_x (m)",
+          "key_value": 15756.19554
+        },
+        {
+          "run_order": 7,
+          "case_label": "Rising thermal bubble",
+          "h_m": 250.0,
+          "status_label": "失败",
+          "status_detail": "suite_manifest 记录非零退出码 3",
+          "observed_time_s": 440.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 43.1372549,
+          "tau": 0.500061992,
+          "diagnostic_max_mach": 1.281418013,
+          "key_metric": "w_max (m/s)",
+          "key_value": null
+        },
+        {
+          "run_order": 8,
+          "case_label": "Rising thermal bubble",
+          "h_m": 125.0,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 1020.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 100.0,
+          "tau": 0.500247968,
+          "diagnostic_max_mach": 0.02218355399,
+          "key_metric": "w_max (m/s)",
+          "key_value": 16.00953517
+        },
+        {
+          "run_order": 9,
+          "case_label": "Rising thermal bubble",
+          "h_m": 62.5,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 1020.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 100.0,
+          "tau": 0.500991872,
+          "diagnostic_max_mach": 0.04392523593,
+          "key_metric": "w_max (m/s)",
+          "key_value": 15.85015329
+        },
+        {
+          "run_order": 10,
+          "case_label": "Rising thermal bubble",
+          "h_m": 31.25,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 1020.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 100.0,
+          "tau": 0.503967488,
+          "diagnostic_max_mach": 0.08880392474,
+          "key_metric": "w_max (m/s)",
+          "key_value": 16.02217788
+        },
+        {
+          "run_order": 11,
+          "case_label": "Rising thermal bubble",
+          "h_m": 15.625,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 1020.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 100.0,
+          "tau": 0.515869952,
+          "diagnostic_max_mach": 0.1815330053,
+          "key_metric": "w_max (m/s)",
+          "key_value": 16.37627021
+        },
+        {
+          "run_order": 12,
+          "case_label": "Rising thermal bubble",
+          "h_m": 7.8125,
+          "status_label": "完成",
+          "status_detail": "达到目标终止时刻，场有限且密度为正",
+          "observed_time_s": 1020.0,
+          "target_time_s": 1020.0,
+          "completion_percent": 100.0,
+          "tau": 0.563479808,
+          "diagnostic_max_mach": 0.3894174762,
+          "key_metric": "w_max (m/s)",
+          "key_value": 17.56486599
+        }
+      ],
+      "robustness": [
+        {
+          "experiment_order": 1,
+          "case_label": "Density current",
+          "run_group": "stability",
+          "run_name": "density_current_h400_dt0p1_trt",
+          "h_m": 400.0,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "TRT 碰撞",
+          "status_label": "失败",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": null,
+          "relative_to_main_percent": null,
+          "max_mach": null,
+          "theta_prime_min_K": null,
+          "theta_prime_max_K": null,
+          "front_x_m": null,
+          "w_max_m_s": null
+        },
+        {
+          "experiment_order": 2,
+          "case_label": "Density current",
+          "run_group": "stability",
+          "run_name": "density_current_h400_dt1_srt",
+          "h_m": 400.0,
+          "dt_s": 1.0,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "SRT 大时间步",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": null,
+          "relative_to_main_percent": null,
+          "max_mach": 0.117582436,
+          "theta_prime_min_K": -8.165787756,
+          "theta_prime_max_K": 2.21762538,
+          "front_x_m": 12920.45297,
+          "w_max_m_s": 16.91508293
+        },
+        {
+          "experiment_order": 3,
+          "case_label": "Density current",
+          "run_group": "sensitivity",
+          "run_name": "density_current_h50_dt0p1_d3q19_numeric",
+          "h_m": 50.0,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "numeric value treated as nu",
+          "nu_m2_s": 75.0,
+          "experiment": "数值黏度解释",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": 14761.31412,
+          "relative_to_main_percent": 0.3627705959,
+          "max_mach": 0.09718380906,
+          "theta_prime_min_K": -9.48982358,
+          "theta_prime_max_K": 0.02818644047,
+          "front_x_m": 14814.86383,
+          "w_max_m_s": 16.6902151
+        },
+        {
+          "experiment_order": 4,
+          "case_label": "Density current",
+          "run_group": "sensitivity",
+          "run_name": "density_current_h25_dt0p05_d3q19_dynamic",
+          "h_m": 25.0,
+          "dt_s": 0.05,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": 15357.237,
+          "relative_to_main_percent": -0.1288478728,
+          "max_mach": 0.1024261997,
+          "theta_prime_min_K": -9.555933774,
+          "theta_prime_max_K": 0.02781271935,
+          "front_x_m": 15337.44953,
+          "w_max_m_s": 15.68011008
+        },
+        {
+          "experiment_order": 5,
+          "case_label": "Density current",
+          "run_group": "sensitivity",
+          "run_name": "density_current_h25_dt0p1_d3q7_dynamic",
+          "h_m": 25.0,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q7",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "热标量 D3Q7",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": 15357.237,
+          "relative_to_main_percent": -0.09864014471,
+          "max_mach": 0.205904266,
+          "theta_prime_min_K": -9.647554457,
+          "theta_prime_max_K": 1.844261885,
+          "front_x_m": 15342.0886,
+          "w_max_m_s": 14.79163393
+        },
+        {
+          "experiment_order": 6,
+          "case_label": "Density current",
+          "run_group": "sensitivity",
+          "run_name": "density_current_h12p5_dt0p025_d3q19_dynamic",
+          "h_m": 12.5,
+          "dt_s": 0.025,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": 15756.19554,
+          "relative_to_main_percent": -0.3246803808,
+          "max_mach": 0.1069847883,
+          "theta_prime_min_K": -9.576255977,
+          "theta_prime_max_K": 0.02932012081,
+          "front_x_m": 15705.03827,
+          "w_max_m_s": 14.12208937
+        },
+        {
+          "experiment_order": 7,
+          "case_label": "Density current",
+          "run_group": "sensitivity",
+          "run_name": "density_current_h12p5_dt0p05_d3q19_dynamic",
+          "h_m": 12.5,
+          "dt_s": 0.05,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 64.575,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "front_x_m",
+          "matching_main_value": 15756.19554,
+          "relative_to_main_percent": -0.2407747111,
+          "max_mach": 0.2131663731,
+          "theta_prime_min_K": -9.58717525,
+          "theta_prime_max_K": 0.1246905327,
+          "front_x_m": 15718.25861,
+          "w_max_m_s": 13.7583958
+        },
+        {
+          "experiment_order": 8,
+          "case_label": "Rising thermal bubble",
+          "run_group": "stability",
+          "run_name": "rising_thermal_h250_dt0p1_trt",
+          "h_m": 250.0,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "TRT 碰撞",
+          "status_label": "失败",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": null,
+          "relative_to_main_percent": null,
+          "max_mach": null,
+          "theta_prime_min_K": null,
+          "theta_prime_max_K": null,
+          "front_x_m": null,
+          "w_max_m_s": null
+        },
+        {
+          "experiment_order": 9,
+          "case_label": "Rising thermal bubble",
+          "run_group": "stability",
+          "run_name": "rising_thermal_h250_dt1_srt",
+          "h_m": 250.0,
+          "dt_s": 1.0,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "SRT 大时间步",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": null,
+          "relative_to_main_percent": null,
+          "max_mach": 0.1092974041,
+          "theta_prime_min_K": -0.3606594801,
+          "theta_prime_max_K": 1.682640314,
+          "front_x_m": null,
+          "w_max_m_s": 15.77569731
+        },
+        {
+          "experiment_order": 10,
+          "case_label": "Rising thermal bubble",
+          "run_group": "sensitivity",
+          "run_name": "rising_thermal_h31p25_dt0p1_d3q19_numeric",
+          "h_m": 31.25,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "numeric value treated as nu",
+          "nu_m2_s": 15.0,
+          "experiment": "数值黏度解释",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 16.02217788,
+          "relative_to_main_percent": -0.2682637861,
+          "max_mach": 0.08856569486,
+          "theta_prime_min_K": -0.002756595612,
+          "theta_prime_max_K": 1.489103556,
+          "front_x_m": null,
+          "w_max_m_s": 15.97919618
+        },
+        {
+          "experiment_order": 11,
+          "case_label": "Rising thermal bubble",
+          "run_group": "viscosity_profile",
+          "run_name": "rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km",
+          "h_m": 31.25,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 16.66666667,
+          "experiment": "等效高度黏度",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 16.02217788,
+          "relative_to_main_percent": -0.5214508579,
+          "max_mach": 0.0883408555,
+          "theta_prime_min_K": -0.002645492554,
+          "theta_prime_max_K": 1.470345497,
+          "front_x_m": null,
+          "w_max_m_s": 15.93863009
+        },
+        {
+          "experiment_order": 12,
+          "case_label": "Rising thermal bubble",
+          "run_group": "viscosity_profile",
+          "run_name": "rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km",
+          "h_m": 31.25,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 27.27272727,
+          "experiment": "等效高度黏度",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 16.02217788,
+          "relative_to_main_percent": -2.661232559,
+          "max_mach": 0.08644064572,
+          "theta_prime_min_K": -0.00210750103,
+          "theta_prime_max_K": 1.352103472,
+          "front_x_m": null,
+          "w_max_m_s": 15.59579046
+        },
+        {
+          "experiment_order": 13,
+          "case_label": "Rising thermal bubble",
+          "run_group": "sensitivity",
+          "run_name": "rising_thermal_h15p625_dt0p05_d3q19_dynamic",
+          "h_m": 15.625,
+          "dt_s": 0.05,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 16.37627021,
+          "relative_to_main_percent": -1.686885344,
+          "max_mach": 0.08923537578,
+          "theta_prime_min_K": -0.002730607986,
+          "theta_prime_max_K": 1.516316175,
+          "front_x_m": null,
+          "w_max_m_s": 16.10002131
+        },
+        {
+          "experiment_order": 14,
+          "case_label": "Rising thermal bubble",
+          "run_group": "sensitivity",
+          "run_name": "rising_thermal_h15p625_dt0p1_d3q7_dynamic",
+          "h_m": 15.625,
+          "dt_s": 0.1,
+          "thermal_lattice": "D3Q7",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "热标量 D3Q7",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 16.37627021,
+          "relative_to_main_percent": -0.4078378863,
+          "max_mach": 0.1807926448,
+          "theta_prime_min_K": -0.1197093725,
+          "theta_prime_max_K": 1.687256336,
+          "front_x_m": null,
+          "w_max_m_s": 16.30948158
+        },
+        {
+          "experiment_order": 15,
+          "case_label": "Rising thermal bubble",
+          "run_group": "sensitivity",
+          "run_name": "rising_thermal_h7p8125_dt0p025_d3q19_dynamic",
+          "h_m": 7.8125,
+          "dt_s": 0.025,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 17.56486599,
+          "relative_to_main_percent": -8.147736247,
+          "max_mach": 0.08942219185,
+          "theta_prime_min_K": -0.002687096596,
+          "theta_prime_max_K": 1.504313469,
+          "front_x_m": null,
+          "w_max_m_s": 16.13372704
+        },
+        {
+          "experiment_order": 16,
+          "case_label": "Rising thermal bubble",
+          "run_group": "sensitivity",
+          "run_name": "rising_thermal_h7p8125_dt0p05_d3q19_dynamic",
+          "h_m": 7.8125,
+          "dt_s": 0.05,
+          "thermal_lattice": "D3Q19",
+          "viscosity_mode": "mu/rho_ref",
+          "nu_m2_s": 12.915,
+          "experiment": "时间步敏感性",
+          "status_label": "完成",
+          "comparison_metric": "w_max_m_s",
+          "matching_main_value": 17.56486599,
+          "relative_to_main_percent": -6.724926689,
+          "max_mach": 0.1816147182,
+          "theta_prime_min_K": -0.0152207613,
+          "theta_prime_max_K": 1.519244671,
+          "front_x_m": null,
+          "w_max_m_s": 16.38364163
+        }
+      ],
+      "time_step_convergence": [
+        {
+          "sequence": 1,
+          "case_label": "Density current",
+          "h_m": 12.5,
+          "dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "metric_value": 15756.19554,
+          "max_mach": 0.4167857499,
+          "relative_to_dt0p1_percent": 0.0,
+          "next_coarser_dt_s": null,
+          "relative_to_next_coarser_dt_percent": null
+        },
+        {
+          "sequence": 2,
+          "case_label": "Density current",
+          "h_m": 12.5,
+          "dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "metric_value": 15718.25861,
+          "max_mach": 0.2131663731,
+          "relative_to_dt0p1_percent": -0.2407747111,
+          "next_coarser_dt_s": 0.1,
+          "relative_to_next_coarser_dt_percent": -0.2407747111
+        },
+        {
+          "sequence": 3,
+          "case_label": "Density current",
+          "h_m": 12.5,
+          "dt_s": 0.025,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "metric_value": 15705.03827,
+          "max_mach": 0.1069847883,
+          "relative_to_dt0p1_percent": -0.3246803808,
+          "next_coarser_dt_s": 0.05,
+          "relative_to_next_coarser_dt_percent": -0.08410818099
+        },
+        {
+          "sequence": 4,
+          "case_label": "Density current",
+          "h_m": 25.0,
+          "dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "metric_value": 15357.237,
+          "max_mach": 0.2046111165,
+          "relative_to_dt0p1_percent": 0.0,
+          "next_coarser_dt_s": null,
+          "relative_to_next_coarser_dt_percent": null
+        },
+        {
+          "sequence": 5,
+          "case_label": "Density current",
+          "h_m": 25.0,
+          "dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "metric_value": 15337.44953,
+          "max_mach": 0.1024261997,
+          "relative_to_dt0p1_percent": -0.1288478728,
+          "next_coarser_dt_s": 0.1,
+          "relative_to_next_coarser_dt_percent": -0.1288478728
+        },
+        {
+          "sequence": 6,
+          "case_label": "Rising thermal bubble",
+          "h_m": 7.8125,
+          "dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "metric_value": 17.56486599,
+          "max_mach": 0.3894174762,
+          "relative_to_dt0p1_percent": 0.0,
+          "next_coarser_dt_s": null,
+          "relative_to_next_coarser_dt_percent": null
+        },
+        {
+          "sequence": 7,
+          "case_label": "Rising thermal bubble",
+          "h_m": 7.8125,
+          "dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "metric_value": 16.38364163,
+          "max_mach": 0.1816147182,
+          "relative_to_dt0p1_percent": -6.724926689,
+          "next_coarser_dt_s": 0.1,
+          "relative_to_next_coarser_dt_percent": -6.724926689
+        },
+        {
+          "sequence": 8,
+          "case_label": "Rising thermal bubble",
+          "h_m": 7.8125,
+          "dt_s": 0.025,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "metric_value": 16.13372704,
+          "max_mach": 0.08942219185,
+          "relative_to_dt0p1_percent": -8.147736247,
+          "next_coarser_dt_s": 0.05,
+          "relative_to_next_coarser_dt_percent": -1.525390983
+        },
+        {
+          "sequence": 9,
+          "case_label": "Rising thermal bubble",
+          "h_m": 15.625,
+          "dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "metric_value": 16.37627021,
+          "max_mach": 0.1815330053,
+          "relative_to_dt0p1_percent": 0.0,
+          "next_coarser_dt_s": null,
+          "relative_to_next_coarser_dt_percent": null
+        },
+        {
+          "sequence": 10,
+          "case_label": "Rising thermal bubble",
+          "h_m": 15.625,
+          "dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "metric_value": 16.10002131,
+          "max_mach": 0.08923537578,
+          "relative_to_dt0p1_percent": -1.686885344,
+          "next_coarser_dt_s": 0.1,
+          "relative_to_next_coarser_dt_percent": -1.686885344
+        }
+      ],
+      "fine_grid_scaling": [
+        {
+          "sequence": 1,
+          "case_label": "Density current",
+          "scaling_label": "fixed dt",
+          "baseline_h_m": 25.0,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 12.5,
+          "refined_dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "baseline_value": 15357.237,
+          "refined_value": 15756.19554,
+          "relative_change_percent": 2.597853667,
+          "baseline_tau": 0.530996,
+          "refined_tau": 0.623984,
+          "baseline_max_mach": 0.2046111165,
+          "refined_max_mach": 0.4167857499
+        },
+        {
+          "sequence": 2,
+          "case_label": "Density current",
+          "scaling_label": "dt proportional to h",
+          "baseline_h_m": 25.0,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 12.5,
+          "refined_dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "baseline_value": 15357.237,
+          "refined_value": 15718.25861,
+          "relative_change_percent": 2.350823981,
+          "baseline_tau": 0.530996,
+          "refined_tau": 0.561992,
+          "baseline_max_mach": 0.2046111165,
+          "refined_max_mach": 0.2131663731
+        },
+        {
+          "sequence": 3,
+          "case_label": "Density current",
+          "scaling_label": "dt proportional to h^2",
+          "baseline_h_m": 25.0,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 12.5,
+          "refined_dt_s": 0.025,
+          "status_label": "完成",
+          "metric_label": "front_x (m)",
+          "baseline_value": 15357.237,
+          "refined_value": 15705.03827,
+          "relative_change_percent": 2.264738565,
+          "baseline_tau": 0.530996,
+          "refined_tau": 0.530996,
+          "baseline_max_mach": 0.2046111165,
+          "refined_max_mach": 0.1069847883
+        },
+        {
+          "sequence": 4,
+          "case_label": "Rising thermal bubble",
+          "scaling_label": "fixed dt",
+          "baseline_h_m": 15.625,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 7.8125,
+          "refined_dt_s": 0.1,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "baseline_value": 16.37627021,
+          "refined_value": 17.56486599,
+          "relative_change_percent": 7.25803717,
+          "baseline_tau": 0.515869952,
+          "refined_tau": 0.563479808,
+          "baseline_max_mach": 0.1815330053,
+          "refined_max_mach": 0.3894174762
+        },
+        {
+          "sequence": 5,
+          "case_label": "Rising thermal bubble",
+          "scaling_label": "dt proportional to h",
+          "baseline_h_m": 15.625,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 7.8125,
+          "refined_dt_s": 0.05,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "baseline_value": 16.37627021,
+          "refined_value": 16.38364163,
+          "relative_change_percent": 0.04501280269,
+          "baseline_tau": 0.515869952,
+          "refined_tau": 0.531739904,
+          "baseline_max_mach": 0.1815330053,
+          "refined_max_mach": 0.1816147182
+        },
+        {
+          "sequence": 6,
+          "case_label": "Rising thermal bubble",
+          "scaling_label": "dt proportional to h^2",
+          "baseline_h_m": 15.625,
+          "baseline_dt_s": 0.1,
+          "refined_h_m": 7.8125,
+          "refined_dt_s": 0.025,
+          "status_label": "完成",
+          "metric_label": "w_max (m/s)",
+          "baseline_value": 16.37627021,
+          "refined_value": 16.13372704,
+          "relative_change_percent": -1.481064802,
+          "baseline_tau": 0.515869952,
+          "refined_tau": 0.515869952,
+          "baseline_max_mach": 0.1815330053,
+          "refined_max_mach": 0.08942219185
+        }
+      ],
+      "derived_metrics": [
+        {
+          "main_total": 12,
+          "main_complete": 10,
+          "main_failed": 2,
+          "main_incomplete": 0,
+          "bubble_fine_h_m": 15.625,
+          "bubble_culbm_w_max": 16.37627021,
+          "bubble_gea_w_max": 12.17,
+          "bubble_w_relative_percent": 34.56261474,
+          "bubble_culbm_theta_max": 1.533142805,
+          "bubble_gea_theta_max": 1.0,
+          "bubble_theta_relative_percent": 53.31428051,
+          "bubble_finest_all_h_m": 7.8125,
+          "bubble_finest_all_w_max": 17.56486599,
+          "bubble_finest_all_gea_w_max": null,
+          "bubble_finest_all_theta_max": 1.563768864,
+          "density_finest_all_h_m": 12.5,
+          "density_finest_all_front_m": 15756.19554,
+          "density_finest_all_gea_front_m": null,
+          "density_h100_relative_percent": -7.668508712,
+          "density_h100_difference_m": -1171.901501,
+          "density_h50_relative_percent": -2.59130182,
+          "density_h50_difference_m": -392.6858778,
+          "density_h25_relative_percent": 3.796674667,
+          "density_h25_difference_m": 561.7370004,
+          "robustness_complete": 14,
+          "robustness_failed": 2,
+          "robustness_incomplete": 0
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "src_bubble_wmax",
+      "label": "热泡主网格与 GEA AV15 对比查询",
+      "path": "sources/bubble_wmax.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "SELECT\n    'h=' ||\n        rtrim(rtrim(printf('%.4f', CAST(w.h_m AS REAL)), '0'), '.') ||\n        ' m' AS grid,\n    CAST(w.h_m AS REAL) AS h_m,\n    CAST(w.culbm_value AS REAL) AS culbm_w_max,\n    CASE\n        WHEN NULLIF(w.reference_value, '') IS NULL THEN NULL\n        ELSE CAST(w.reference_value AS REAL)\n    END AS gea_av15_w_max,\n    CASE\n        WHEN NULLIF(w.difference, '') IS NULL THEN NULL\n        ELSE CAST(w.difference AS REAL)\n    END AS difference_m_s,\n    CASE\n        WHEN NULLIF(w.relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(w.relative_difference_percent AS REAL)\n    END AS relative_difference_percent,\n    CAST(t.culbm_value AS REAL) AS culbm_theta_max,\n    CASE\n        WHEN NULLIF(t.reference_value, '') IS NULL THEN NULL\n        ELSE CAST(t.reference_value AS REAL)\n    END AS gea_av15_theta_max,\n    CASE\n        WHEN NULLIF(t.relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(t.relative_difference_percent AS REAL)\n    END AS theta_relative_difference_percent,\n    w.status AS status,\n    w.grid_registration AS grid_registration\nFROM main_grid_comparison AS w\nLEFT JOIN main_grid_comparison AS t\n    ON t.\"case\" = w.\"case\"\n   AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n   AND t.metric = 'theta_prime_max_K'\nWHERE w.\"case\" = 'rising_thermal'\n  AND w.metric = 'w_max_m_s'\n  AND w.status = 'complete'\n  AND NULLIF(w.culbm_value, '') IS NOT NULL\nORDER BY CAST(w.h_m AS REAL) DESC",
+        "description": "从分析器的逐网格比较表连接 w_max 与 theta'_max，保留全部严格完成的热泡主计算；论文未列出的更细网格参考值为 NULL。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/main_grid_comparison.csv"
+        ],
+        "filters": [
+          "case = rising_thermal",
+          "metric = w_max_m_s（并连接 theta_prime_max_K）",
+          "status = complete",
+          "必须存在 CULBM 值；GEA 参考值允许为空"
+        ],
+        "metric_definitions": [
+          "w_max：t=1020 s 全域竖直速度最大值，单位 m/s。",
+          "相对偏差：100*(CULBM-GEA)/abs(GEA)。",
+          "theta'_max：t=1020 s 全域位温扰动最大值，单位 K。"
+        ]
+      }
+    },
+    {
+      "id": "src_density_front",
+      "label": "密度流主网格与 GEA AV75 对比查询",
+      "path": "sources/density_front.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "SELECT\n    'h=' ||\n        rtrim(rtrim(printf('%.4f', CAST(h_m AS REAL)), '0'), '.') ||\n        ' m' AS grid,\n    CAST(h_m AS REAL) AS h_m,\n    CAST(culbm_value AS REAL) / 1000.0 AS culbm_front_km,\n    CASE\n        WHEN NULLIF(reference_value, '') IS NULL THEN NULL\n        ELSE CAST(reference_value AS REAL) / 1000.0\n    END AS gea_av75_midpoint_km,\n    CASE\n        WHEN NULLIF(reference_lower, '') IS NULL THEN NULL\n        ELSE CAST(reference_lower AS REAL) / 1000.0\n    END AS gea_av75_lower_km,\n    CASE\n        WHEN NULLIF(reference_upper, '') IS NULL THEN NULL\n        ELSE CAST(reference_upper AS REAL) / 1000.0\n    END AS gea_av75_upper_km,\n    CASE\n        WHEN NULLIF(difference, '') IS NULL THEN NULL\n        ELSE CAST(difference AS REAL)\n    END AS difference_m,\n    CASE\n        WHEN NULLIF(relative_difference_percent, '') IS NULL THEN NULL\n        ELSE CAST(relative_difference_percent AS REAL)\n    END AS relative_difference_percent,\n    status,\n    grid_registration\nFROM main_grid_comparison\nWHERE \"case\" = 'density_current'\n  AND metric = 'front_x_m'\n  AND status = 'complete'\n  AND NULLIF(culbm_value, '') IS NOT NULL\nORDER BY CAST(h_m AS REAL) DESC",
+        "description": "读取完成的密度流主计算前缘；文献区间存在时同时给出中点和上下界。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/main_grid_comparison.csv"
+        ],
+        "filters": [
+          "case = density_current",
+          "metric = front_x_m",
+          "status = complete"
+        ],
+        "metric_definitions": [
+          "前缘：t=900 s、z=1200 m 上 theta'=-1 K 的最右交点。",
+          "GEA 对比值：Table 3 AV75 区间中点；上下界保留在 tooltip。",
+          "相对偏差：100*(CULBM-GEA中点)/abs(GEA中点)。"
+        ]
+      }
+    },
+    {
+      "id": "src_run_audit",
+      "label": "严格主网格运行审计查询",
+      "path": "sources/run_audit.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "WITH preferred AS (\n    SELECT DISTINCT\n        run_name,\n        \"case\",\n        CAST(h_m AS REAL) AS h_m,\n        grid_registration\n    FROM main_grid_comparison\n    WHERE NULLIF(run_name, '') IS NOT NULL\n),\nselected AS (\n    SELECT s.*\n    FROM run_summary AS s\n    INNER JOIN preferred AS p\n        ON p.run_name = s.run_name\n       AND p.\"case\" = s.\"case\"\n       AND p.h_m = CAST(s.h_m AS REAL)\n       AND p.grid_registration = s.grid_registration\n)\nSELECT\n    ROW_NUMBER() OVER (\n        ORDER BY selected.\"case\" ASC, CAST(selected.h_m AS REAL) DESC\n    ) AS run_order,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE selected.\"case\"\n    END AS case_label,\n    CAST(selected.h_m AS REAL) AS h_m,\n    CASE selected.status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    selected.status_detail AS status_detail,\n    CAST(selected.observed_time_s AS REAL) AS observed_time_s,\n    CAST(selected.end_time_s AS REAL) AS target_time_s,\n    100.0 * CAST(selected.completion_fraction AS REAL) AS completion_percent,\n    CAST(selected.tau AS REAL) AS tau,\n    CASE\n        WHEN NULLIF(selected.max_mach, '') IS NOT NULL\n            THEN CAST(selected.max_mach AS REAL)\n        WHEN NULLIF(selected.last_valid_max_mach, '') IS NOT NULL\n            THEN CAST(selected.last_valid_max_mach AS REAL)\n        ELSE NULL\n    END AS diagnostic_max_mach,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN 'w_max (m/s)'\n        WHEN 'density_current' THEN 'front_x (m)'\n        ELSE '关键指标'\n    END AS key_metric,\n    CASE selected.\"case\"\n        WHEN 'rising_thermal' THEN CAST(NULLIF(selected.w_max_m_s, '') AS REAL)\n        WHEN 'density_current' THEN CAST(NULLIF(selected.front_x_m, '') AS REAL)\n        ELSE NULL\n    END AS key_value\nFROM selected\nORDER BY selected.\"case\" ASC, CAST(selected.h_m AS REAL) DESC",
+        "description": "用主比较表选定的首选 run 连接严格状态汇总，失败 run 只显示最后有效诊断而不暴露异常终态。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/main_grid_comparison.csv",
+          "data/summary.csv"
+        ],
+        "filters": [
+          "仅保留 main_grid_comparison 选定的首选 run_name"
+        ],
+        "metric_definitions": [
+          "complete：达到目标时刻、终态有限、密度为正且最新 manifest 退出码为 0。",
+          "diagnostic max Mach：完成 run 用终态值，失败 run 用最后有效采样值。"
+        ]
+      }
+    },
+    {
+      "id": "src_robustness",
+      "label": "敏感性与稳定性控制组查询",
+      "path": "sources/robustness.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY sensitivity_comparison.\"case\" ASC,\n                 CAST(sensitivity_comparison.h_m AS REAL) DESC,\n                 sensitivity_comparison.run_group ASC,\n                 sensitivity_comparison.run_name ASC\n    ) AS experiment_order,\n    CASE sensitivity_comparison.\"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE sensitivity_comparison.\"case\"\n    END AS case_label,\n    sensitivity_comparison.run_group AS run_group,\n    sensitivity_comparison.run_name AS run_name,\n    CAST(sensitivity_comparison.h_m AS REAL) AS h_m,\n    CAST(sensitivity_comparison.dt_s AS REAL) AS dt_s,\n    sensitivity_comparison.thermal_lattice AS thermal_lattice,\n    sensitivity_comparison.viscosity_mode AS viscosity_mode,\n    CAST(NULLIF(sensitivity_comparison.nu_m2_s, '') AS REAL) AS nu_m2_s,\n    CASE\n        WHEN lower(sensitivity_comparison.run_name) LIKE '%_trt' THEN 'TRT 碰撞'\n        WHEN lower(sensitivity_comparison.run_name) LIKE '%_srt' THEN 'SRT 大时间步'\n        WHEN sensitivity_comparison.thermal_lattice = 'D3Q7' THEN '热标量 D3Q7'\n        WHEN sensitivity_comparison.viscosity_mode LIKE 'numeric%' THEN '数值黏度解释'\n        WHEN lower(sensitivity_comparison.run_group) = 'viscosity_profile'\n            THEN '等效高度黏度'\n        WHEN ABS(CAST(sensitivity_comparison.dt_s AS REAL) - 0.1) > 1.0e-12\n            THEN '时间步敏感性'\n        ELSE sensitivity_comparison.run_group\n    END AS experiment,\n    CASE sensitivity_comparison.status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    sensitivity_comparison.comparison_metric AS comparison_metric,\n    CAST(NULLIF(sensitivity_comparison.matching_main_value, '') AS REAL)\n        AS matching_main_value,\n    CAST(NULLIF(sensitivity_comparison.relative_to_matching_main_percent, '') AS REAL)\n        AS relative_to_main_percent,\n    CAST(NULLIF(sensitivity_comparison.max_mach, '') AS REAL) AS max_mach,\n    CAST(NULLIF(sensitivity_comparison.theta_prime_min_K, '') AS REAL)\n        AS theta_prime_min_K,\n    CAST(NULLIF(sensitivity_comparison.theta_prime_max_K, '') AS REAL)\n        AS theta_prime_max_K,\n    CAST(NULLIF(sensitivity_comparison.front_x_m, '') AS REAL) AS front_x_m,\n    CAST(NULLIF(sensitivity_comparison.w_max_m_s, '') AS REAL) AS w_max_m_s\nFROM sensitivity_comparison\nWHERE lower(sensitivity_comparison.run_group) <> 'registration_sensitivity'\nORDER BY sensitivity_comparison.\"case\" ASC,\n         CAST(sensitivity_comparison.h_m AS REAL) DESC,\n         sensitivity_comparison.run_group ASC,\n         sensitivity_comparison.run_name ASC",
+        "description": "汇总时间步、热格子、黏度解释与 SRT/TRT 控制组，并保留相对同网格主结果的变化。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/sensitivity_comparison.csv"
+        ],
+        "filters": [
+          "排除 registration_sensitivity 旧半网格平移归档"
+        ],
+        "metric_definitions": [
+          "主比较量：热泡为 w_max，密度流为 front_x。",
+          "相对主结果变化：100*(控制组-同网格主结果)/abs(同网格主结果)。"
+        ]
+      }
+    },
+    {
+      "id": "src_time_step_convergence",
+      "label": "细网格时间步与 Mach 收敛查询",
+      "path": "sources/time_step_convergence.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY \"case\" ASC, CAST(h_m AS REAL) ASC, CAST(dt_s AS REAL) DESC\n    ) AS sequence,\n    CASE \"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE \"case\"\n    END AS case_label,\n    CAST(h_m AS REAL) AS h_m,\n    CAST(dt_s AS REAL) AS dt_s,\n    CASE status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    CASE metric\n        WHEN 'w_max_m_s' THEN 'w_max (m/s)'\n        WHEN 'front_x_m' THEN 'front_x (m)'\n        ELSE metric\n    END AS metric_label,\n    CAST(NULLIF(value, '') AS REAL) AS metric_value,\n    CAST(NULLIF(max_mach, '') AS REAL) AS max_mach,\n    CAST(NULLIF(relative_to_dt0p1_percent, '') AS REAL)\n        AS relative_to_dt0p1_percent,\n    CAST(NULLIF(next_coarser_dt_s, '') AS REAL) AS next_coarser_dt_s,\n    CAST(NULLIF(relative_to_next_coarser_dt_percent, '') AS REAL)\n        AS relative_to_next_coarser_dt_percent\nFROM time_step_convergence\nORDER BY \"case\" ASC, CAST(h_m AS REAL) ASC, CAST(dt_s AS REAL) DESC",
+        "description": "对同一 D3Q19 动态黏度网格按 dt 逐级比较主指标和最大格子 Mach，同时保留相对 dt=0.1 及相邻更粗时间步的变化。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/time_step_convergence.csv"
+        ],
+        "filters": [
+          "仅含同 case/h 至少两个时间步的 D3Q19 动态黏度结果",
+          "严格完成 run 才提供终态主指标和 max Mach"
+        ],
+        "metric_definitions": [
+          "热泡主指标为 w_max，单位 m/s；密度流主指标为 front_x，单位 m。",
+          "逐级变化：100*(当前 dt 值-相邻更粗 dt 值)/abs(相邻更粗 dt 值)。"
+        ]
+      }
+    },
+    {
+      "id": "src_fine_grid_scaling",
+      "label": "h/2 加密三路径比较查询",
+      "path": "sources/fine_grid_scaling.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "SELECT\n    ROW_NUMBER() OVER (\n        ORDER BY \"case\" ASC,\n                 CASE scaling\n                     WHEN 'fixed_dt' THEN 1\n                     WHEN 'acoustic_dt_proportional_h' THEN 2\n                     WHEN 'diffusive_dt_proportional_h2' THEN 3\n                     ELSE 4\n                 END\n    ) AS sequence,\n    CASE \"case\"\n        WHEN 'rising_thermal' THEN 'Rising thermal bubble'\n        WHEN 'density_current' THEN 'Density current'\n        ELSE \"case\"\n    END AS case_label,\n    CASE scaling\n        WHEN 'fixed_dt' THEN 'fixed dt'\n        WHEN 'acoustic_dt_proportional_h' THEN 'dt proportional to h'\n        WHEN 'diffusive_dt_proportional_h2' THEN 'dt proportional to h^2'\n        ELSE scaling\n    END AS scaling_label,\n    CAST(baseline_h_m AS REAL) AS baseline_h_m,\n    CAST(baseline_dt_s AS REAL) AS baseline_dt_s,\n    CAST(refined_h_m AS REAL) AS refined_h_m,\n    CAST(refined_dt_s AS REAL) AS refined_dt_s,\n    CASE status\n        WHEN 'complete' THEN '完成'\n        WHEN 'failed' THEN '失败'\n        ELSE '未完成'\n    END AS status_label,\n    CASE metric\n        WHEN 'w_max_m_s' THEN 'w_max (m/s)'\n        WHEN 'front_x_m' THEN 'front_x (m)'\n        ELSE metric\n    END AS metric_label,\n    CAST(NULLIF(baseline_value, '') AS REAL) AS baseline_value,\n    CAST(NULLIF(refined_value, '') AS REAL) AS refined_value,\n    CAST(NULLIF(relative_change_percent, '') AS REAL) AS relative_change_percent,\n    CAST(NULLIF(baseline_tau, '') AS REAL) AS baseline_tau,\n    CAST(NULLIF(refined_tau, '') AS REAL) AS refined_tau,\n    CAST(NULLIF(baseline_max_mach, '') AS REAL) AS baseline_max_mach,\n    CAST(NULLIF(refined_max_mach, '') AS REAL) AS refined_max_mach\nFROM fine_grid_scaling_comparison\nORDER BY \"case\" ASC, sequence ASC",
+        "description": "把新增 h/2 网格的固定 dt、dt∝h 和 dt∝h² 三条路径分别与上一层最细 dt=0.1 主网格比较。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/fine_grid_scaling_comparison.csv"
+        ],
+        "filters": [
+          "热泡 15.625→7.8125 m；密度流 25→12.5 m",
+          "D3Q19、动态黏度映射；严格完成 run 才给出终态值"
+        ],
+        "metric_definitions": [
+          "dt∝h：近似保持格子速度/Mach；dt∝h²：保持 nu_LBM 与 tau。",
+          "相对变化：100*(新网格-上一层最细主网格)/abs(上一层值)。"
+        ]
+      }
+    },
+    {
+      "id": "src_derived_metrics",
+      "label": "报告头部派生指标查询",
+      "path": "sources/derived_metrics.sql",
+      "query": {
+        "engine": "SQLite (Python sqlite3)",
+        "sql": "WITH main_unique AS (\n    SELECT DISTINCT \"case\", CAST(h_m AS REAL) AS h_m, status, run_name\n    FROM main_grid_comparison\n),\nbubble_fine AS (\n    SELECT\n        CAST(w.h_m AS REAL) AS h_m,\n        CAST(w.culbm_value AS REAL) AS culbm_w_max,\n        CAST(w.reference_value AS REAL) AS gea_w_max,\n        CAST(w.relative_difference_percent AS REAL) AS w_relative_percent,\n        CAST(t.culbm_value AS REAL) AS culbm_theta_max,\n        CAST(t.reference_value AS REAL) AS gea_theta_max,\n        CAST(t.relative_difference_percent AS REAL) AS theta_relative_percent\n    FROM main_grid_comparison AS w\n    LEFT JOIN main_grid_comparison AS t\n      ON t.\"case\" = w.\"case\"\n     AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n     AND t.metric = 'theta_prime_max_K'\n    WHERE w.\"case\" = 'rising_thermal'\n      AND w.metric = 'w_max_m_s'\n      AND w.status = 'complete'\n      AND NULLIF(w.reference_value, '') IS NOT NULL\n    ORDER BY CAST(w.h_m AS REAL) ASC\n    LIMIT 1\n),\nbubble_finest_all AS (\n    SELECT\n        CAST(w.h_m AS REAL) AS h_m,\n        CAST(w.culbm_value AS REAL) AS culbm_w_max,\n        CASE\n            WHEN NULLIF(w.reference_value, '') IS NULL THEN NULL\n            ELSE CAST(w.reference_value AS REAL)\n        END AS gea_w_max,\n        CAST(t.culbm_value AS REAL) AS culbm_theta_max\n    FROM main_grid_comparison AS w\n    LEFT JOIN main_grid_comparison AS t\n      ON t.\"case\" = w.\"case\"\n     AND CAST(t.h_m AS REAL) = CAST(w.h_m AS REAL)\n     AND t.metric = 'theta_prime_max_K'\n    WHERE w.\"case\" = 'rising_thermal'\n      AND w.metric = 'w_max_m_s'\n      AND w.status = 'complete'\n      AND NULLIF(w.culbm_value, '') IS NOT NULL\n    ORDER BY CAST(w.h_m AS REAL) ASC\n    LIMIT 1\n),\ndensity_ref AS (\n    SELECT\n        CAST(h_m AS REAL) AS h_m,\n        CAST(culbm_value AS REAL) AS culbm_front_m,\n        CAST(reference_value AS REAL) AS gea_front_m,\n        CAST(difference AS REAL) AS difference_m,\n        CAST(relative_difference_percent AS REAL) AS relative_percent\n    FROM main_grid_comparison\n    WHERE \"case\" = 'density_current'\n      AND metric = 'front_x_m'\n      AND status = 'complete'\n      AND NULLIF(reference_value, '') IS NOT NULL\n),\ndensity_finest_all AS (\n    SELECT\n        CAST(h_m AS REAL) AS h_m,\n        CAST(culbm_value AS REAL) AS culbm_front_m,\n        CASE\n            WHEN NULLIF(reference_value, '') IS NULL THEN NULL\n            ELSE CAST(reference_value AS REAL)\n        END AS gea_front_m\n    FROM main_grid_comparison\n    WHERE \"case\" = 'density_current'\n      AND metric = 'front_x_m'\n      AND status = 'complete'\n      AND NULLIF(culbm_value, '') IS NOT NULL\n    ORDER BY CAST(h_m AS REAL) ASC\n    LIMIT 1\n)\nSELECT\n    (SELECT COUNT(*) FROM main_unique) AS main_total,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'complete') AS main_complete,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'failed') AS main_failed,\n    (SELECT COUNT(*) FROM main_unique WHERE status = 'incomplete') AS main_incomplete,\n    (SELECT h_m FROM bubble_fine) AS bubble_fine_h_m,\n    (SELECT culbm_w_max FROM bubble_fine) AS bubble_culbm_w_max,\n    (SELECT gea_w_max FROM bubble_fine) AS bubble_gea_w_max,\n    (SELECT w_relative_percent FROM bubble_fine) AS bubble_w_relative_percent,\n    (SELECT culbm_theta_max FROM bubble_fine) AS bubble_culbm_theta_max,\n    (SELECT gea_theta_max FROM bubble_fine) AS bubble_gea_theta_max,\n    (SELECT theta_relative_percent FROM bubble_fine) AS bubble_theta_relative_percent,\n    (SELECT h_m FROM bubble_finest_all) AS bubble_finest_all_h_m,\n    (SELECT culbm_w_max FROM bubble_finest_all) AS bubble_finest_all_w_max,\n    (SELECT gea_w_max FROM bubble_finest_all) AS bubble_finest_all_gea_w_max,\n    (SELECT culbm_theta_max FROM bubble_finest_all) AS bubble_finest_all_theta_max,\n    (SELECT h_m FROM density_finest_all) AS density_finest_all_h_m,\n    (SELECT culbm_front_m FROM density_finest_all) AS density_finest_all_front_m,\n    (SELECT gea_front_m FROM density_finest_all) AS density_finest_all_gea_front_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 100.0) AS density_h100_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 100.0) AS density_h100_difference_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 50.0) AS density_h50_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 50.0) AS density_h50_difference_m,\n    (SELECT relative_percent FROM density_ref WHERE h_m = 25.0) AS density_h25_relative_percent,\n    (SELECT difference_m FROM density_ref WHERE h_m = 25.0) AS density_h25_difference_m,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'complete'\n    ) AS robustness_complete,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'failed'\n    ) AS robustness_failed,\n    (\n        SELECT COUNT(*)\n        FROM sensitivity_comparison\n        WHERE lower(run_group) <> 'registration_sensitivity'\n          AND status = 'incomplete'\n    ) AS robustness_incomplete",
+        "description": "计算主矩阵状态、最细文献可比点、CULBM 全部最细点及密度流可比偏差。",
+        "language": "sql",
+        "executed_at": "2026-07-31T04:58:16Z",
+        "tables_used": [
+          "data/main_grid_comparison.csv",
+          "data/sensitivity_comparison.csv"
+        ],
+        "filters": [
+          "主矩阵按 case/h/run_name 去重",
+          "最细热泡仅用严格完成且有文献值的网格",
+          "另保留没有同网格文献值的最细 CULBM 热泡/密度流点",
+          "密度流定量偏差只用 h=100/50/25 m 的文献对齐网格"
+        ],
+        "metric_definitions": [
+          "主矩阵状态计数以分析器选定的首选 run 为单位。",
+          "所有百分比偏差使用文献值或同网格主结果的绝对值作分母。"
+        ]
+      }
+    },
+    {
+      "id": "src_reference_metrics",
+      "label": "GEA 论文参考值审计表",
+      "path": "data/reference_metrics.csv"
+    },
+    {
+      "id": "src_solver_verification",
+      "label": "CULBM 最终 CTest 与 GPU free-slip 回归",
+      "path": "sources/solver_verification.md"
+    },
+    {
+      "id": "src_paper",
+      "label": "GEA 论文：arXiv:2302.04836",
+      "href": "https://arxiv.org/abs/2302.04836"
+    },
+    {
+      "id": "src_gea_commit",
+      "label": "GEA 官方实现固定提交 bdf0b929",
+      "href": "https://github.com/GEA-Geophysical-and-Environmental-Apps/GEA/tree/bdf0b929fc92163cb946520e5f8bd3d1fd6ca45f"
+    }
+  ]
+}

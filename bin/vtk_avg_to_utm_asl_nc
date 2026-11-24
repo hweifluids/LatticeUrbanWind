@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=vtk_avg_to_utm_asl_nc exec "$(dirname "$0")/.luw-wrapper" "$@"

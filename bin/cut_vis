@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=cut_vis exec "$(dirname "$0")/.luw-wrapper" "$@"

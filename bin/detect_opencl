@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=detect_opencl exec "$(dirname "$0")/.luw-wrapper" "$@"

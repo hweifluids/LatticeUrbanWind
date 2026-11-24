@@ -1,0 +1,17 @@
+experiment_order,case_label,run_group,run_name,h_m,dt_s,thermal_lattice,viscosity_mode,nu_m2_s,experiment,status_label,comparison_metric,matching_main_value,relative_to_main_percent,max_mach,theta_prime_min_K,theta_prime_max_K,front_x_m,w_max_m_s
+1,Density current,stability,density_current_h400_dt0p1_trt,400.0,0.1,D3Q19,mu/rho_ref,64.575,TRT 碰撞,失败,front_x_m,,,,,,,
+2,Density current,stability,density_current_h400_dt1_srt,400.0,1.0,D3Q19,mu/rho_ref,64.575,SRT 大时间步,完成,front_x_m,,,0.117582436,-8.165787756,2.21762538,12920.45297,16.91508293
+3,Density current,sensitivity,density_current_h50_dt0p1_d3q19_numeric,50.0,0.1,D3Q19,numeric value treated as nu,75.0,数值黏度解释,完成,front_x_m,14761.31412,0.3627705959,0.09718380906,-9.48982358,0.02818644047,14814.86383,16.6902151
+4,Density current,sensitivity,density_current_h25_dt0p05_d3q19_dynamic,25.0,0.05,D3Q19,mu/rho_ref,64.575,时间步敏感性,完成,front_x_m,15357.237,-0.1288478728,0.1024261997,-9.555933774,0.02781271935,15337.44953,15.68011008
+5,Density current,sensitivity,density_current_h25_dt0p1_d3q7_dynamic,25.0,0.1,D3Q7,mu/rho_ref,64.575,热标量 D3Q7,完成,front_x_m,15357.237,-0.09864014471,0.205904266,-9.647554457,1.844261885,15342.0886,14.79163393
+6,Density current,sensitivity,density_current_h12p5_dt0p025_d3q19_dynamic,12.5,0.025,D3Q19,mu/rho_ref,64.575,时间步敏感性,完成,front_x_m,15756.19554,-0.3246803808,0.1069847883,-9.576255977,0.02932012081,15705.03827,14.12208937
+7,Density current,sensitivity,density_current_h12p5_dt0p05_d3q19_dynamic,12.5,0.05,D3Q19,mu/rho_ref,64.575,时间步敏感性,完成,front_x_m,15756.19554,-0.2407747111,0.2131663731,-9.58717525,0.1246905327,15718.25861,13.7583958
+8,Rising thermal bubble,stability,rising_thermal_h250_dt0p1_trt,250.0,0.1,D3Q19,mu/rho_ref,12.915,TRT 碰撞,失败,w_max_m_s,,,,,,,
+9,Rising thermal bubble,stability,rising_thermal_h250_dt1_srt,250.0,1.0,D3Q19,mu/rho_ref,12.915,SRT 大时间步,完成,w_max_m_s,,,0.1092974041,-0.3606594801,1.682640314,,15.77569731
+10,Rising thermal bubble,sensitivity,rising_thermal_h31p25_dt0p1_d3q19_numeric,31.25,0.1,D3Q19,numeric value treated as nu,15.0,数值黏度解释,完成,w_max_m_s,16.02217788,-0.2682637861,0.08856569486,-0.002756595612,1.489103556,,15.97919618
+11,Rising thermal bubble,viscosity_profile,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z3km,31.25,0.1,D3Q19,mu/rho_ref,16.66666667,等效高度黏度,完成,w_max_m_s,16.02217788,-0.5214508579,0.0883408555,-0.002645492554,1.470345497,,15.93863009
+12,Rising thermal bubble,viscosity_profile,rising_thermal_h31p25_dt0p1_d3q19_dynamic_rho_z8km,31.25,0.1,D3Q19,mu/rho_ref,27.27272727,等效高度黏度,完成,w_max_m_s,16.02217788,-2.661232559,0.08644064572,-0.00210750103,1.352103472,,15.59579046
+13,Rising thermal bubble,sensitivity,rising_thermal_h15p625_dt0p05_d3q19_dynamic,15.625,0.05,D3Q19,mu/rho_ref,12.915,时间步敏感性,完成,w_max_m_s,16.37627021,-1.686885344,0.08923537578,-0.002730607986,1.516316175,,16.10002131
+14,Rising thermal bubble,sensitivity,rising_thermal_h15p625_dt0p1_d3q7_dynamic,15.625,0.1,D3Q7,mu/rho_ref,12.915,热标量 D3Q7,完成,w_max_m_s,16.37627021,-0.4078378863,0.1807926448,-0.1197093725,1.687256336,,16.30948158
+15,Rising thermal bubble,sensitivity,rising_thermal_h7p8125_dt0p025_d3q19_dynamic,7.8125,0.025,D3Q19,mu/rho_ref,12.915,时间步敏感性,完成,w_max_m_s,17.56486599,-8.147736247,0.08942219185,-0.002687096596,1.504313469,,16.13372704
+16,Rising thermal bubble,sensitivity,rising_thermal_h7p8125_dt0p05_d3q19_dynamic,7.8125,0.05,D3Q19,mu/rho_ref,12.915,时间步敏感性,完成,w_max_m_s,17.56486599,-6.724926689,0.1816147182,-0.0152207613,1.519244671,,16.38364163

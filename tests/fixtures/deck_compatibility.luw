@@ -1,0 +1,15 @@
+This preamble is intentionally preserved.
+
+// CFD control
+gpu_memory = 20000
+vk inlet enable = "yes" // legacy alias
+mystery-key = first
+mystery-key = second
+// Domain
+cut_lon_manual = [121.700000,, 121.300000]
+cut_lat_manual = [31.4, 31.1]
+utm_crs = 'EPSG:32651'
+url_value = "https://example.invalid/a//b" // comment
+// Output and probes
+probes =
+

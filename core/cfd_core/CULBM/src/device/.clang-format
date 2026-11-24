@@ -1,0 +1,4 @@
+BasedOnStyle: LLVM
+Language: Cpp
+ColumnLimit: 120
+SortIncludes: Never

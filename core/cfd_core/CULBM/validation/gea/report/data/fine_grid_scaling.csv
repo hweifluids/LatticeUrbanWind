@@ -1,0 +1,7 @@
+sequence,case_label,scaling_label,baseline_h_m,baseline_dt_s,refined_h_m,refined_dt_s,status_label,metric_label,baseline_value,refined_value,relative_change_percent,baseline_tau,refined_tau,baseline_max_mach,refined_max_mach
+1,Density current,fixed dt,25.0,0.1,12.5,0.1,完成,front_x (m),15357.237,15756.19554,2.597853667,0.530996,0.623984,0.2046111165,0.4167857499
+2,Density current,dt proportional to h,25.0,0.1,12.5,0.05,完成,front_x (m),15357.237,15718.25861,2.350823981,0.530996,0.561992,0.2046111165,0.2131663731
+3,Density current,dt proportional to h^2,25.0,0.1,12.5,0.025,完成,front_x (m),15357.237,15705.03827,2.264738565,0.530996,0.530996,0.2046111165,0.1069847883
+4,Rising thermal bubble,fixed dt,15.625,0.1,7.8125,0.1,完成,w_max (m/s),16.37627021,17.56486599,7.25803717,0.515869952,0.563479808,0.1815330053,0.3894174762
+5,Rising thermal bubble,dt proportional to h,15.625,0.1,7.8125,0.05,完成,w_max (m/s),16.37627021,16.38364163,0.04501280269,0.515869952,0.531739904,0.1815330053,0.1816147182
+6,Rising thermal bubble,dt proportional to h^2,15.625,0.1,7.8125,0.025,完成,w_max (m/s),16.37627021,16.13372704,-1.481064802,0.515869952,0.515869952,0.1815330053,0.08942219185

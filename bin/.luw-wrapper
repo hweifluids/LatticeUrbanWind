@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ -z "${LUW_COMMAND:-}" ]; then
+  echo "ERROR: Internal wrapper command is not set" >&2
+  exit 2
+fi
+if [ -z "${LUW_HOME:-}" ]; then
+  echo "ERROR: LUW_HOME is not set" >&2
+  exit 2
+fi
+
+launcher="$LUW_HOME/bin/luw"
+if [ ! -f "$launcher" ]; then
+  echo "ERROR: Native launcher not found: $launcher" >&2
+  exit 2
+fi
+
+exec "$launcher" "$LUW_COMMAND" "$@"

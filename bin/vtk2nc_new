@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=vtk2nc_new exec "$(dirname "$0")/.luw-wrapper" "$@"

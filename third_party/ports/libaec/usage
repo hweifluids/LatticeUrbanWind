@@ -1,0 +1,6 @@
+libaec provides CMake targets:
+
+  find_package(libaec CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE libaec::aec)
+  target_link_libraries(main PRIVATE libaec::sz)
+

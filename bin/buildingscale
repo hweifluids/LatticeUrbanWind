@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=buildingscale exec "$(dirname "$0")/.luw-wrapper" "$@"

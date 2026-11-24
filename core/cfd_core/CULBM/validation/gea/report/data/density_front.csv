@@ -1,0 +1,6 @@
+grid,h_m,culbm_front_km,gea_av75_midpoint_km,gea_av75_lower_km,gea_av75_upper_km,difference_m,relative_difference_percent,status,grid_registration
+h=200 m,200.0,13.51089417,,,,,,complete,official_boundary_aligned
+h=100 m,100.0,14.1100985,15.282,15.269,15.295,-1171.901501,-7.668508712,complete,official_boundary_aligned
+h=50 m,50.0,14.76131412,15.154,15.141,15.167,-392.6858778,-2.59130182,complete,official_boundary_aligned
+h=25 m,25.0,15.357237,14.7955,14.783,14.808,561.7370004,3.796674667,complete,official_boundary_aligned
+h=12.5 m,12.5,15.75619554,,,,,,complete,GEA wall-centred bounds (0 to L)

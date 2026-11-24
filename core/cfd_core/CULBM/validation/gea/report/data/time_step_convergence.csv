@@ -1,0 +1,11 @@
+sequence,case_label,h_m,dt_s,status_label,metric_label,metric_value,max_mach,relative_to_dt0p1_percent,next_coarser_dt_s,relative_to_next_coarser_dt_percent
+1,Density current,12.5,0.1,完成,front_x (m),15756.19554,0.4167857499,0.0,,
+2,Density current,12.5,0.05,完成,front_x (m),15718.25861,0.2131663731,-0.2407747111,0.1,-0.2407747111
+3,Density current,12.5,0.025,完成,front_x (m),15705.03827,0.1069847883,-0.3246803808,0.05,-0.08410818099
+4,Density current,25.0,0.1,完成,front_x (m),15357.237,0.2046111165,0.0,,
+5,Density current,25.0,0.05,完成,front_x (m),15337.44953,0.1024261997,-0.1288478728,0.1,-0.1288478728
+6,Rising thermal bubble,7.8125,0.1,完成,w_max (m/s),17.56486599,0.3894174762,0.0,,
+7,Rising thermal bubble,7.8125,0.05,完成,w_max (m/s),16.38364163,0.1816147182,-6.724926689,0.1,-6.724926689
+8,Rising thermal bubble,7.8125,0.025,完成,w_max (m/s),16.13372704,0.08942219185,-8.147736247,0.05,-1.525390983
+9,Rising thermal bubble,15.625,0.1,完成,w_max (m/s),16.37627021,0.1815330053,0.0,,
+10,Rising thermal bubble,15.625,0.05,完成,w_max (m/s),16.10002131,0.08923537578,-1.686885344,0.1,-1.686885344

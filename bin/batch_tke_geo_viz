@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+LUW_COMMAND=batch_tke_geo_viz exec "$(dirname "$0")/.luw-wrapper" "$@"

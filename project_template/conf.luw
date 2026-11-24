@@ -1,0 +1,103 @@
+// LUW deck
+
+// Project
+casename = example
+datetime = 20251010120000
+
+// Domain
+cut_lon_manual = [121.3, 121.7]
+cut_lat_manual = [31.1, 31.4]
+si_x_cfd = [0.000000, 38156.187309]
+si_y_cfd = [0.000000, 33276.727502]
+si_z_cfd = [0.000000, 1000.000000]
+base_height = 50
+z_limit = 500
+geometry_mode = 2
+terr_voxel_height_field = auto
+terr_voxel_ignore_under = 0.000000
+terr_voxel_approach = idw
+terr_voxel_grid_resolution = 50.000000
+terr_voxel_idw_sigma = 1.000000
+terr_voxel_idw_power = 2.000000
+terr_voxel_idw_neighbors = 12
+midmesh_basesize = 10
+utm_crs = "EPSG:32651"
+rotate_deg = 0.774936
+
+// Generated
+origin_shift_applied = true
+um_vol = [0.450915, 0.775041, 0.092367]
+um_bc = [0.464899, 1.326544, 0.000000]
+downstream_bc = "+y"
+downstream_bc_yaw = 30.19
+
+// Preprocessing
+preprocess_use_gpu = false
+preprocess_gpu_device = 0
+
+// CFD Controls
+cfd_solver = "culbm"
+n_gpu = [2, 1, 1]
+mesh_control = "gpu_memory"
+gpu_memory = 20000
+cell_size =
+validation = pass
+high_order = true
+flux_correction = true
+
+// Output & Probes
+unsteady_output = 0
+
+// Physics
+coriolis_term = true
+culbm_velocity_set = D3Q19
+culbm_ddf_storage = FP16C
+culbm_temperature_lattice = D3Q19
+culbm_base_kinematic_viscosity_m2_s = 0.0000148
+culbm_base_thermal_diffusivity_m2_s = 0.0000210
+culbm_sgs_enable = true
+culbm_sgs_cs = 0.173265956
+culbm_sgs_scalar_coupling = true
+culbm_sgs_turbulent_prandtl = 1.0
+culbm_sgs_diagnostics_interval = 0
+culbm_wall_model = true
+culbm_wall_model_ibm = true
+culbm_wall_model_z0_ground_m = 0.03
+culbm_wall_model_z0_building_m = 0.01
+culbm_wall_model_kappa = 0.41
+culbm_wall_model_sgs_layers = 3
+ibm_enabler = false
+culbm_surface_ibm_delta_kernel = roma3_point
+culbm_surface_ibm_geometry_policy = exterior_union
+culbm_surface_ibm_marker_spacing_lu = 0.75
+culbm_surface_ibm_forcing_iterations = 8
+culbm_surface_ibm_relaxation = 1.0
+culbm_surface_ibm_residual_tolerance = 0.001
+culbm_surface_ibm_retraction_lu = 0.5
+culbm_surface_ibm_support_thickness_lu = 0.75
+culbm_surface_ibm_max_markers = 5000000
+culbm_surface_ibm_strict_geometry = false
+culbm_surface_ibm_diagnostics_interval = 0
+enable_buffer_nudging = true
+buffer_thickness_m = 160.0
+buffer_tau_s = 300.0
+buffer_nudge_vertical = false
+enable_top_sponge = true
+sponge_thickness_m = 200.0
+sponge_tau_s = 120.0
+sponge_ref_mode = 0
+
+// Turbulence inflow
+turb_inflow_enable = true
+turb_inflow_approach = vonkarman
+vk_inlet_ti = 0.050000
+vk_inlet_sigma = 0.0
+vk_inlet_l = 100.0
+vk_inlet_nmodes = 256
+vk_inlet_seed = 100
+vk_inlet_update_stride = 1
+vk_inlet_uc_mode = NORM_MEAN
+vk_inlet_same_realization_all_faces = true
+vk_inlet_stride_interpolation = false
+vk_inlet_inflow_only = false
+vk_inlet_anisotropy = [1.0, 1.0, 1.0]

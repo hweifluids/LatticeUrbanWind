@@ -1,0 +1,31 @@
+case,h_m,metric,units,status,culbm_value,reference_value,reference_lower,reference_upper,difference,relative_difference_percent,within_reference_bracket,run_name,grid_registration
+density_current,400,front_x_m,m,failed,,,,,,,,density_current_h400_dt0p1_d3q19_dynamic,official_boundary_aligned
+density_current,200,front_x_m,m,complete,13510.89417,,,,,,,density_current_h200_dt0p1_d3q19_dynamic,official_boundary_aligned
+density_current,100,front_x_m,m,complete,14110.0985,15282,15269,15295,-1171.901501,-7.668508712,False,density_current_h100_dt0p1_d3q19_dynamic,official_boundary_aligned
+density_current,50,front_x_m,m,complete,14761.31412,15154,15141,15167,-392.6858778,-2.59130182,False,density_current_h50_dt0p1_d3q19_dynamic,official_boundary_aligned
+density_current,25,front_x_m,m,complete,15357.237,14795.5,14783,14808,561.7370004,3.796674667,False,density_current_h25_dt0p1_d3q19_dynamic,official_boundary_aligned
+density_current,12.5,front_x_m,m,complete,15756.19554,,,,,,,density_current_h12p5_dt0p1_d3q19_dynamic,GEA wall-centred bounds (0 to L)
+rising_thermal,250,theta_prime_max_K,K,failed,,0.89,0.89,0.89,,,,rising_thermal_h250_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,250,theta_prime_min_K,K,failed,,-0.069,-0.069,-0.069,,,,rising_thermal_h250_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,250,w_max_m_s,m/s,failed,,11.23,11.23,11.23,,,,rising_thermal_h250_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,250,w_min_m_s,m/s,failed,,-9.59,-9.59,-9.59,,,,rising_thermal_h250_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,125,theta_prime_max_K,K,complete,1.629217625,1.06,1.06,1.06,0.5692176247,53.69977591,False,rising_thermal_h125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,125,theta_prime_min_K,K,complete,-0.09584307671,-0.042,-0.042,-0.042,-0.05384307671,-128.1978017,False,rising_thermal_h125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,125,w_max_m_s,m/s,complete,16.00953517,11.97,11.97,11.97,4.039535175,33.74716103,False,rising_thermal_h125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,125,w_min_m_s,m/s,complete,-9.087044746,-10.02,-10.02,-10.02,0.9329552543,9.310930682,False,rising_thermal_h125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,62.5,theta_prime_max_K,K,complete,1.53238821,1.03,1.03,1.03,0.5023882103,48.7755544,False,rising_thermal_h62p5_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,62.5,theta_prime_min_K,K,complete,-0.01948177814,-0.037,-0.037,-0.037,0.01751822186,47.34654555,False,rising_thermal_h62p5_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,62.5,w_max_m_s,m/s,complete,15.85015329,12.09,12.09,12.09,3.760153286,31.10135059,False,rising_thermal_h62p5_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,62.5,w_min_m_s,m/s,complete,-9.113458218,-10.08,-10.08,-10.08,0.9665417819,9.588708154,False,rising_thermal_h62p5_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,31.25,theta_prime_max_K,K,complete,1.513947487,1.01,1.01,1.01,0.5039474869,49.89579078,False,rising_thermal_h31p25_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,31.25,theta_prime_min_K,K,complete,-0.002882838249,-0.037,-0.037,-0.037,0.03411716175,92.20854527,False,rising_thermal_h31p25_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,31.25,w_max_m_s,m/s,complete,16.02217788,12.13,12.13,12.13,3.892177879,32.08720428,False,rising_thermal_h31p25_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,31.25,w_min_m_s,m/s,complete,-8.868637378,-10.05,-10.05,-10.05,1.181362622,11.75485196,False,rising_thermal_h31p25_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,15.625,theta_prime_max_K,K,complete,1.533142805,1,1,1,0.5331428051,53.31428051,False,rising_thermal_h15p625_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,15.625,theta_prime_min_K,K,complete,-0.01546502113,-0.038,-0.038,-0.038,0.02253497887,59.30257596,False,rising_thermal_h15p625_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,15.625,w_max_m_s,m/s,complete,16.37627021,12.17,12.17,12.17,4.206270214,34.56261474,False,rising_thermal_h15p625_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,15.625,w_min_m_s,m/s,complete,-8.869266021,-10.02,-10.02,-10.02,1.150733979,11.48437105,False,rising_thermal_h15p625_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,7.8125,theta_prime_max_K,K,complete,1.563768864,,,,,,,rising_thermal_h7p8125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,7.8125,theta_prime_min_K,K,complete,-0.0588208437,,,,,,,rising_thermal_h7p8125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,7.8125,w_max_m_s,m/s,complete,17.56486599,,,,,,,rising_thermal_h7p8125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
+rising_thermal,7.8125,w_min_m_s,m/s,complete,-8.822729578,,,,,,,rising_thermal_h7p8125_dt0p1_d3q19_dynamic,GEA cell-centred coordinates (bounds -h/2 to L-h/2)
